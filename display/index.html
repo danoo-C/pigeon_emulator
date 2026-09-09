@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Pigeon Display</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #222; color: #eee; display:flex; flex-direction:column; align-items:center; padding:16px }
+    #controls { margin-bottom:8px }
+    canvas { image-rendering: pixelated; border:1px solid #444 }
+    button { margin-right:8px }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <button id="clear">Clear</button>
+    <label>Scale: <input id="scale" type="number" value="4" min="1" max="16" /></label>
+    <label><input id="running" type="checkbox" checked/> Live</label>
+  </div>
+  <canvas id="screen"></canvas>
+
+  <script>
+    let W=64, H=64, SIZE=64*64*4;
+    const canvas = document.getElementById('screen');
+    const ctx = canvas.getContext('2d');
+    const clearBtn = document.getElementById('clear');
+    const scaleInput = document.getElementById('scale');
+    const runningBox = document.getElementById('running');
+
+    const off = document.createElement('canvas');
+    const offctx = off.getContext('2d');
+
+    async function init(){
+      try{
+        const info = await fetch('/info').then(r=>r.json());
+        W = info.w; H = info.h; SIZE = info.size;
+      }catch(e){ /* ignore, use defaults */ }
+      off.width = W; off.height = H;
+      canvas.width = W * Number(scaleInput.value || 4);
+      canvas.height = H * Number(scaleInput.value || 4);
+      loop();
+    }
+
+    scaleInput.addEventListener('change', ()=>{
+      canvas.width = W * Number(scaleInput.value || 4);
+      canvas.height = H * Number(scaleInput.value || 4);
+    });
+
+    clearBtn.addEventListener('click', async ()=>{
+      await fetch('/clear', {method:'POST'}).catch(()=>{});
+    });
+
+    let fetching = false;
+    async function loop(){
+      if (!runningBox.checked){ setTimeout(loop, 200); return; }
+      if (fetching){ setTimeout(loop, 10); return; }
+      fetching = true;
+      try{
+        const resp = await fetch('/frame');
+        if (!resp.ok) throw new Error('bad');
+        const buf = await resp.arrayBuffer();
+        const arr = new Uint8ClampedArray(buf);
+        if (arr.length === W*H*4){
+          const img = new ImageData(arr, W, H);
+          offctx.putImageData(img, 0, 0);
+          ctx.imageSmoothingEnabled = false;
+          ctx.clearRect(0,0,canvas.width, canvas.height);
+          ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+        }
+      }catch(e){ /* ignore */ }
+      fetching = false;
+      setTimeout(loop, 66); // ~15 FPS
+    }
+
+    init();
+  </script>
+</body>
+</html>
