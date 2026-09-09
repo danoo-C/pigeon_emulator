@@ -1,7 +1,7 @@
 {
   "host": "127.0.0.1",
-  "display_port": 8000,
-  "hid_port": 8001,
+  "display_port": 1234,
+  "hid_port": 1235,
 
   "program_dirs": ["user"],
 

@@ -27,70 +27,31 @@ class Instruction:
     opcode: int
     handler: Callable
     size: int = INSTR_SIZE
-    operands: set = None   # <-- add this
 
 
 INSTRUCTIONS_BY_NAME = {}
 INSTRUCTIONS_BY_OPCODE = {}
 
-_NO_OPERATOR = 0b0000
-_DST = 0b0001
-_SRC1 = 0b0010
-_SRC2 = 0b0100
-_IMM = 0b1000
-
 _next_opcode = 0
 
 
-# def instruction(name, size=INSTR_SIZE):
-#     """Decorator: registers a function as an instruction handler."""
-#     def decorator(func):
-#         global _next_opcode
-#         opcode = _next_opcode
-#         _next_opcode += 1
-#         instr = Instruction(name=name, opcode=opcode, handler=func, size=size)
-#         INSTRUCTIONS_BY_NAME[name] = instr
-#         INSTRUCTIONS_BY_OPCODE[opcode] = instr
-#         return func
-#     return decorator
-
-import ast
-import inspect
-import textwrap
-
-_OPERAND_PARAMS = ("dst", "src1", "src2", "imm")
-
-def operands_used(func):
-    """Statically determine which of dst/src1/src2/imm a handler
-    actually reads, by inspecting its AST -- no need to call it."""
-    source = textwrap.dedent(inspect.getsource(func))
-    tree = ast.parse(source)
-
-    used = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and node.id in _OPERAND_PARAMS:
-            #used.add((node.id, _OPERAND_PARAMS.index(node.id)))
-            used.add(_OPERAND_PARAMS.index(node.id))
-
-    return used
-
-
 def instruction(name, size=INSTR_SIZE):
+    """Register a function as an instruction handler.
+
+    Opcodes are handed out in declaration order, so APPENDING an
+    instruction is safe but INSERTING one renumbers every opcode after it
+    and invalidates every previously assembled binary.
+    """
     def decorator(func):
         global _next_opcode
         opcode = _next_opcode
         _next_opcode += 1
-        instr = Instruction(
-            name=name,
-            opcode=opcode,
-            handler=func,
-            size=size,
-            operands=operands_used(func),   # <-- derived automatically
-        )
+        instr = Instruction(name=name, opcode=opcode, handler=func, size=size)
         INSTRUCTIONS_BY_NAME[name] = instr
         INSTRUCTIONS_BY_OPCODE[opcode] = instr
         return func
     return decorator
+
 
 def reg_or_imm(cpu, reg_slot, imm):
     """Resolve an operand that could be a register OR an immediate.
@@ -290,8 +251,8 @@ def op_mww(cpu, dst, src1, src2, imm):
 def op_cmp(cpu, dst, src1, src2, imm):
     """CMP -- compare two values and set flags for a following jump.
     Doesn't touch any register -- only sets:
-      zero_flag     = True if src1 == src2 (or immediate)
-      negative_flag = True if src1 <  src2 (or immediate)
+      zero_flag = True if src1 == src2 (or immediate)
+      less_flag = True if src1 <  src2 (or immediate), unsigned
     Usage:   CMP src1, src2
              CMP src1, #imm
     Example: CMP A, B
@@ -301,7 +262,7 @@ def op_cmp(cpu, dst, src1, src2, imm):
     a = cpu.reg.read(src1)
     b = reg_or_imm(cpu, src2, imm)
     cpu.zero_flag = (a == b)
-    cpu.negative_flag = (a < b)
+    cpu.less_flag = (a < b)
 
 
 @instruction("JZ")
@@ -333,7 +294,7 @@ def op_jl(cpu, dst, src1, src2, imm):
     Usage:   JL address / label   (use right after a CMP)
     Example: CMP A, #10
              JL  loop             -> loop while A < 10"""
-    if cpu.negative_flag:
+    if cpu.less_flag:
         cpu.pc = reg_or_imm(cpu, src1, imm)
 
 
@@ -344,7 +305,7 @@ def op_jg(cpu, dst, src1, src2, imm):
     Usage:   JG address / label   (use right after a CMP)
     Example: CMP A, B
              JG  a_bigger"""
-    if not cpu.zero_flag and not cpu.negative_flag:
+    if not cpu.zero_flag and not cpu.less_flag:
         cpu.pc = reg_or_imm(cpu, src1, imm)
 
 
@@ -355,7 +316,7 @@ def op_jle(cpu, dst, src1, src2, imm):
     Usage:   JLE address / label  (use right after a CMP)
     Example: CMP A, #10
              JLE loop             -> loop while A <= 10"""
-    if cpu.negative_flag or cpu.zero_flag:
+    if cpu.less_flag or cpu.zero_flag:
         cpu.pc = reg_or_imm(cpu, src1, imm)
 
 
@@ -366,7 +327,7 @@ def op_jge(cpu, dst, src1, src2, imm):
     Usage:   JGE address / label  (use right after a CMP)
     Example: CMP A, B
              JGE a_not_smaller"""
-    if not cpu.negative_flag:
+    if not cpu.less_flag:
         cpu.pc = reg_or_imm(cpu, src1, imm)
 
 
@@ -408,6 +369,59 @@ def op_pop(cpu, dst, src1, src2, imm):
     cpu.sp += 4
 
 
+# --------------------------------------------------------------------------
+# Everything below is APPENDED. Opcodes are assigned in declaration order,
+# so adding here is safe; inserting anywhere above renumbers every later
+# opcode and invalidates every already-assembled .bin.
+# --------------------------------------------------------------------------
+
+@instruction("CALL")
+def op_call(cpu, dst, src1, src2, imm):
+    """CALL -- call a subroutine. Pushes the return address, then jumps.
+    Usage:   CALL address / label
+             CALL reg              (indirect, for function pointers)
+    Example: CALL draw_pixel
+             ...
+             RET                   -> comes back here
+    PC already points at the following instruction by the time a handler
+    runs, so that is exactly the address to push."""
+    cpu.sp -= 4
+    cpu.ram.write_word(cpu.sp, cpu.pc)
+    cpu.pc = reg_or_imm(cpu, src1, imm)
+
+
+@instruction("RET")
+def op_ret(cpu, dst, src1, src2, imm):
+    """RET -- return from a subroutine. Pops the address CALL pushed.
+    Usage:   RET
+    Pair every CALL with exactly one RET, and leave the stack balanced in
+    between, or RET will jump to whatever the last PUSH happened to be."""
+    cpu.pc = cpu.ram.read_word(cpu.sp)
+    cpu.sp += 4
+
+
+@instruction("SHL")
+def op_shl(cpu, dst, src1, src2, imm):
+    """SHL -- Shift Left. dst = src1 << src2 (or << immediate).
+    Usage:   SHL dst, src1, src2
+             SHL dst, src1, #imm
+    Example: SHL A, B, #2         -> A = B * 4, without a MUL
+    Shifting by 32 or more yields 0; the result keeps the low 32 bits."""
+    a = cpu.reg.read(src1)
+    b = reg_or_imm(cpu, src2, imm)
+    cpu.reg.write(dst, 0 if b >= 32 else a << b)
+
+
+@instruction("SHR")
+def op_shr(cpu, dst, src1, src2, imm):
+    """SHR -- Shift Right (logical: zeros shift in at the top).
+    Usage:   SHR dst, src1, src2
+             SHR dst, src1, #imm
+    Example: SHR A, B, #2         -> A = B / 4, without a DIV"""
+    a = cpu.reg.read(src1)
+    b = reg_or_imm(cpu, src2, imm)
+    cpu.reg.write(dst, 0 if b >= 32 else a >> b)
+
 
 # --------------------------------------------------------------------------
 # Encoding helpers (used by the assembler)
@@ -423,3 +437,26 @@ def decode(chunk):
     opcode, dst, src1, src2 = chunk[0], chunk[1], chunk[2], chunk[3]
     imm = int.from_bytes(chunk[4:8], "little")
     return opcode, dst, src1, src2, imm
+
+
+def disassemble(chunk, offset=0):
+    """Format one 8-byte instruction as a line of assembly-ish text.
+
+    The single copy of this -- main.py had two and test.py a third, all
+    with their own drifting format strings.
+    """
+    opcode, dst, src1, src2, imm = decode(chunk)
+    instr = INSTRUCTIONS_BY_OPCODE.get(opcode)
+    name = instr.name if instr is not None else f"UNKNOWN({opcode})"
+
+    def fmt(x):
+        return '.' if x == NONE_REG else str(x)
+
+    return (f"0x{offset:04x}: {name:<6} dst={fmt(dst):<3} src1={fmt(src1):<3} "
+            f"src2={fmt(src2):<3} imm=0x{imm:08x}")
+
+
+def disassemble_range(mem, start, length):
+    """Disassemble `length` bytes of `mem`, one line per instruction."""
+    return [disassemble(bytes(mem[o:o + INSTR_SIZE]), o)
+            for o in range(start, start + length, INSTR_SIZE)]

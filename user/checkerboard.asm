@@ -4,22 +4,17 @@
 ; Constants and Memory Map
 ; ============================================================================
 DISPLAY_START = 0x1418    ; Start of display framebuffer in RAM
-DISPLAY_WIDTH = 100
-DISPLAY_HEIGHT = 100
+DISPLAY_WIDTH = DISPLAY_W
+DISPLAY_HEIGHT = DISPLAY_H
 PIXEL_SIZE = 4
 ALPHA = 255
 
 ; Heap memory layout
-HEAP_ADDRESS = 0x120000
+HEAP_ADDRESS = HEAP_START
 X_OFFSET = 0              ; X coordinate stored at HEAP_ADDRESS + 0
 Y_OFFSET = 4              ; Y coordinate stored at HEAP_ADDRESS + 4
 
 IO_POINTER = 0x00000400   ; IO Controller base address
-IO_CHANNEL = 0
-IO_R_W = 4
-IO_COMMAND = 8
-IO_LENGTH  = 12
-IO_ADDRESS = 16
 
 
 ; ============================================================================

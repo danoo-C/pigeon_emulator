@@ -27,15 +27,20 @@ Command list:
   CMD_TRUNCATE = 4    - Truncate/resize disk to `address` bytes (length ignored).
   CMD_FLUSH = 5       - Flush OS buffers to disk; returns zero-length bytes.
 
-The module creates `pigeon_hard_drive.bin` beside this file if it does not
-exist. Defaults to a small initial size (1 MiB) when creating a new image.
+The module creates `build/pigeon_hard_drive.bin` at the repo root if it
+does not exist. Defaults to a small initial size (1 MiB) when creating a new image.
 """
 
-from __future__ import annotations
-
+import logging
 import os
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger(__name__)
+
+# The repo root: devices/ -> emulator/ -> root
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DISK = REPO_ROOT / "build" / "pigeon_hard_drive.bin"
 
 
 CMD_NOP = 0
@@ -48,7 +53,7 @@ CMD_FLUSH = 5
 
 class HDD:
     def __init__(self, path: Optional[str] = None, create_size: int = 1024 * 1024):
-        self.path = Path(path) if path is not None else Path(__file__).parent / "pigeon_hard_drive.bin"
+        self.path = Path(path) if path is not None else DEFAULT_DISK
         self.create_size = create_size
         self._f = None
         self._open()
@@ -81,7 +86,7 @@ class HDD:
         # if len(data) < length:
         #     data += b"\x00" * (length - len(data))
 
-        print(f"HDD: read {length} bytes at offset {offset}, returning {len(data)} bytes")
+        log.debug("HDD: read %d bytes at offset %d, returning %d", length, offset, len(data))
         return data
 
     def _write_at(self, offset: int, data: bytes):
@@ -140,16 +145,6 @@ class HDD:
 
         # unknown command -> return zeros for reads, ignore for writes
         return b"\x00" * length
-
-
-_default_hdd: Optional[HDD] = None
-
-
-def default_hdd() -> HDD:
-    global _default_hdd
-    if _default_hdd is None:
-        _default_hdd = HDD()
-    return _default_hdd
 
 
 if __name__ == "__main__":

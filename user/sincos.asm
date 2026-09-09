@@ -10,9 +10,8 @@
 ;   range) rather than the old fixed 16-step table.
 ; ============================================================================
 
-DISPLAY_START = 0x1418
-DISPLAY_WIDTH = 100
-DISPLAY_HEIGHT = 100
+DISPLAY_WIDTH = DISPLAY_W
+DISPLAY_HEIGHT = DISPLAY_H
 CENTER_X = 50
 CENTER_Y = 50
 
@@ -26,7 +25,7 @@ AMPLITUDE = 45          ; wave swings CENTER_Y +/- this many pixels
 PHASE_STEP = 24         ; degrees the wave advances per frame
 CROSSHAIR_REDRAW_INTERVAL = 10   ; redraw crosshairs every N frames (~150ms/frame)
 
-HEAP_ADDRESS = 0x120000
+HEAP_ADDRESS = HEAP_START
 CURRENT_PHASE = 0       ; Current phase (degrees, 0-359) at HEAP + 0
 PREVIOUS_PHASE = 4      ; Previous phase (degrees, 0-359) at HEAP + 4
 FRAME_COUNT = 8         ; Frames since the last crosshair redraw, at HEAP + 8
@@ -36,12 +35,7 @@ COLOR_WHITE = 0xFFFFFFFF
 COLOR_RED = 0xFF00FFFF
 COLOR_BLACK = 0x00F0000
 
-IO_POINTER = 0x00000400
-IO_CHANNEL = 0
-IO_R_W = 4
-IO_COMMAND = 8
-IO_LENGTH  = 12
-IO_ADDRESS = 16
+IO_POINTER = IO_START
 
 ; ============================================================================
 ; Program Entry Point

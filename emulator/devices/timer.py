@@ -40,11 +40,8 @@ Timing note: this is wall-clock based (uses time.time()), so it's a
 "real seconds" timer, not tied to emulated CPU cycles.
 """
 
-from __future__ import annotations
-
 import struct
 import time as t
-from typing import Optional
 
 
 CMD_NOP = 0
@@ -107,11 +104,7 @@ class TI:
 
 class Timer:
     def __init__(self):
-        # `path`/`create_size` aren't used by this device - they only exist
-        # so Timer can be constructed the same way as the other
-        # IOController devices (HDD, etc.) that do back onto a file.
         self.timers: dict[int, TI] = {}
-        self.current_timer = 0  # count of timers created so far (debug/introspection)
 
     def _get_timer(self, addr: int) -> TI:
         """Return the TI for this address, creating it on first use."""
@@ -119,7 +112,6 @@ class Timer:
         if timer is None:
             timer = TI(addr)
             self.timers[addr] = timer
-            self.current_timer = len(self.timers)
         return timer
 
     @staticmethod
@@ -141,6 +133,8 @@ class Timer:
           CMD_STOP/CMD_RESET/CMD_STATUS.
         - `address`: timer id
         - `data`: unused
+        - always returns bytes, never None -- the controller writes
+          len(result) into RETURN_DATA and used to crash on None
         - returns RESPONSE_LEN bytes (two 32-bit words: status, remaining_ms)
           for every command except CMD_NOP; see module docstring for the encoding
         """
@@ -148,7 +142,7 @@ class Timer:
         cmd = int(command)
 
         if cmd == CMD_NOP:
-            return None
+            return b"\x00" * max(length, 0)
         timer = self._get_timer(addr)
 
         if cmd == CMD_START:
@@ -170,9 +164,4 @@ class Timer:
             return self._encode(status, remaining)
 
         # unknown command: behave like NOP rather than raising
-        return None
-
-
-if __name__ == "__main__":
-    # quick CLI to inspect/modify the image
-    print("no support")
+        return b"\x00" * max(length, 0)

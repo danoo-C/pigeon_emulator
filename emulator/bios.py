@@ -1,11 +1,9 @@
 """BIOS helper for the pigeon emulator."""
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Optional
 
-from memory_map import BIOS_START, BIOS_MAX
+from .memory_map import BIOS_START, BIOS_MAX
 
 
 class BIOS:

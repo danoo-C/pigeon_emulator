@@ -3,20 +3,18 @@
 ; ============================================================================
 ; Constants and Memory Map
 ; ============================================================================
-DISPLAY_START = 0x1218    ; Start of display framebuffer in RAM
-DISPLAY_WIDTH = 100
-DISPLAY_HEIGHT = 100
+;; DISPLAY_START, DISPLAY_W/H, IO_START, HEAP_START and the IO_* header
+;; offsets all come from emulator/memory_map.py -- the assembler predefines
+;; them. This file used to hardcode DISPLAY_START = 0x1218 and
+;; IO_POINTER = 0x200, a layout two generations stale, so every pixel it
+;; drew landed inside the IO region instead of the framebuffer.
+DISPLAY_WIDTH = DISPLAY_W
+DISPLAY_HEIGHT = DISPLAY_H
 PIXEL_SIZE = 4
 ALPHA = 255
 
-IO_POINTER = 0x00000200   ; IO Controller base address
-IO_CHANNEL = 0
-IO_R_W = 4
-IO_COMMAND = 8
-IO_LENGTH  = 12
-IO_ADDRESS = 16
-
-HEAP_ADDRESS = 0x120000
+IO_POINTER = IO_START
+HEAP_ADDRESS = HEAP_START
 X = 0 ; variable screen pos X at HEAP_ADDRESS+0
 Y = 4 ; variable screen pos Y at HEAP_ADDRESS+4
 
