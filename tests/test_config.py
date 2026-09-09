@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import cases, run_module                              # noqa: E402
 from emulator.config import DEFAULTS, ConfigError, load_config     # noqa: E402
-from emulator.programs import Program, discover, find, from_path   # noqa: E402
+from emulator.programs import (Program, discover, find, from_path,  # noqa: E402
+                               libraries_for)
 
 
 def write_config(directory, settings):
@@ -142,6 +143,54 @@ def test_override_resolves_paths_too():
 def test_discovers_the_user_programs():
     names = {p.name for p in discover(load_config())}
     assert {"checkerboard", "screen", "sincos", "ui"} <= names, names
+
+
+def test_discovers_c_programs_too():
+    """A .c program must appear in the picker alongside .asm ones -- the
+    launcher only globbed *.asm and *.bin, so user/demo.c was invisible."""
+    found = {p.name: p for p in discover(load_config())}
+    assert "demo" in found, f"demo.c not discovered: {sorted(found)}"
+    assert found["demo"].language == "c"
+    assert found["demo"].source.suffix == ".c"
+
+
+def test_asm_programs_are_still_assembly():
+    found = {p.name: p for p in discover(load_config())}
+    assert found["screen"].language == "asm"
+
+
+def test_library_dependencies_come_from_the_includes():
+    """There is no linker, so every unit must be named on the command
+    line. Reading them off the #includes means the user does not have to."""
+    libraries = libraries_for(REPO_ROOT / "user" / "demo.c")
+    names = {p.name for p in libraries}
+    assert names == {"display.c", "input.c", "mem.c"}, names
+
+
+def test_a_c_program_with_no_includes_needs_no_libraries():
+    with tempfile.TemporaryDirectory() as d:
+        plain = Path(d) / "p.c"
+        plain.write_text("int main(void){ return 0; }\n")
+        assert libraries_for(plain) == []
+
+
+def test_c_program_is_stale_when_a_library_changes():
+    """Editing display.c must rebuild every program that uses it."""
+    import os
+    with tempfile.TemporaryDirectory() as d:
+        source = Path(d) / "p.c"
+        source.write_text("#include <pigeon/display.h>\nint main(void){return 0;}\n")
+        binary = Path(d) / "p.bin"
+        binary.write_bytes(b"\x00" * 8)
+        program = Program(name="p", source=source, binary=binary)
+
+        os.utime(binary, None)
+        os.utime(source, (0, 0))
+        assert not program.stale, "nothing newer than the build"
+
+        library = REPO_ROOT / "lib" / "pigeon" / "display.c"
+        os.utime(binary, (library.stat().st_mtime - 100,) * 2)
+        assert program.stale, "a newer library should make the build stale"
 
 
 def test_source_and_binary_are_one_entry():

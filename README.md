@@ -48,17 +48,24 @@ That lists what's in `user/` and lets you pick:
 Programs in user:
 
    1.   checkerboard   user/checkerboard.asm      not built
-   2. * screen         user/screen.asm            built
-   3.   sincos         user/sincos.asm            not built
-   4.   ui             user/ui.asm                not built
+   2.   demo           user/demo.c                not built
+   3. * screen         user/screen.asm            built
+   4.   sincos         user/sincos.asm            not built
+   5.   ui             user/ui.asm                not built
 
   * built   ~ source is newer than the build   + binary only
 
-Program (number or name, Enter to skip, q to quit):
+Program (number or name, Enter to skip, q to quit): 2
+Compiling demo.c with display.c, input.c, mem.c
+Assembled build/demo.asm -> build/demo.bin (31180 bytes, 3897 instructions)
+Program: demo  (build/demo.bin)
 ```
 
-Nothing needs assembling by hand — anything not built, or whose source is
-newer than its build, is reassembled when you pick it. Same for the BIOS.
+**Nothing is built by hand.** Assembly and C are treated the same: pick a
+program and anything not built — or whose source is newer than its build —
+is rebuilt first. A `.c` program's libraries are worked out from its
+`#include <pigeon/…>` lines, so you never name them yourself. Editing a
+library marks every program that uses it stale. Same for the BIOS.
 
 You can also name a program up front, by name, number, or path:
 
@@ -140,6 +147,7 @@ unrecognised key is a warning, not an error.
 
 | | |
 |---|---|
+| `user/demo.c` | ⭐ **start here** — a menu, a textbox and a canvas, in C |
 | `user/screen.asm` | ✅ runs to `HALT`, fills the screen with a bitwise pattern |
 | `user/sincos.asm` | animated plot; loops forever by design |
 | `user/ui.asm` | two alternating draw routines; loops forever by design |
@@ -167,7 +175,9 @@ emulator/             the machine (importable, no side effects on import)
   devices/            hdd.py  timer.py  hid.py  display_io.py
 assembler/            assembler.py + README.md
 firmware/bios.asm     boot ROM source (loads programs in 4 KB chunks)
-user/                 example programs
+user/                 example programs (.asm and .c alike)
+lib/pigeon/           the C libraries: mem, display, input
+compiler/             pigeon-cc: C -> assembly
 display/              pygame client + browser front-end (talks HTTP only)
 tools/                disasm.py, bench.py
 tests/                test_golden.py, test_smoke.py, test_config.py, golden/
