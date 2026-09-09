@@ -1,4 +1,6 @@
+# Emulator: the display and input HTTP servers.
+# The CPU, assembler, tools and tests need none of this -- run the emulator
+# with --headless and they are not imported at all.
 fastapi>=0.95.0
 uvicorn[standard]>=0.22.0
-# aiofiles optional for StaticFiles if later needed
-aiofiles>=23.1.0
+pydantic>=2.0

@@ -1,0 +1,5 @@
+# display/display.py only -- the pygame front-end, a separate process that
+# talks to the emulator over HTTP. Not needed to run the emulator itself,
+# and not needed for the browser front-end at http://127.0.0.1:8000
+pygame>=2.5
+requests>=2.31

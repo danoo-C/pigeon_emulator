@@ -6,6 +6,8 @@
   <style>
     body { font-family: Arial, sans-serif; background: #222; color: #eee; display:flex; flex-direction:column; align-items:center; padding:16px }
     #controls { margin-bottom:8px }
+    #hint { color:#888; font-size:12px; margin-top:8px }
+    canvas:focus { outline:2px solid #4a90d9 }
     canvas { image-rendering: pixelated; border:1px solid #444 }
     button { margin-right:8px }
   </style>
@@ -16,9 +18,45 @@
     <label>Scale: <input id="scale" type="number" value="4" min="1" max="16" /></label>
     <label><input id="running" type="checkbox" checked/> Live</label>
   </div>
-  <canvas id="screen"></canvas>
+  <canvas id="screen" tabindex="0"></canvas>
+  <p id="hint">Click the canvas to give it focus, then use the mouse and keyboard.</p>
 
   <script>
+    // ---- input -----------------------------------------------------------
+    // The HID server is a separate port from the one serving this page; it
+    // comes from /hidinfo so config.json stays the single source of truth.
+    // Keycodes MUST be translated: the guest's key FIFO is one byte wide,
+    // and the emulator rejects anything above 0xFF rather than truncating.
+    // This table mirrors emulator/devices/keycodes.py -- tests/test_input.py
+    // parses it and asserts the two agree.
+    const KEYS = {
+      ArrowLeft:0x80, ArrowRight:0x81, ArrowUp:0x82, ArrowDown:0x83,
+      Home:0x84, End:0x85, PageUp:0x86, PageDown:0x87,
+      Insert:0x88, Delete:0x7F, Backspace:0x08, Tab:0x09,
+      Enter:0x0D, Escape:0x1B, ' ':0x20,
+      ShiftLeft:0x89, ShiftRight:0x8A, ControlLeft:0x8B, ControlRight:0x8C,
+      AltLeft:0x8D, AltRight:0x8E,
+      F1:0x90, F2:0x91, F3:0x92, F4:0x93, F5:0x94, F6:0x95,
+      F7:0x96, F8:0x97, F9:0x98, F10:0x99, F11:0x9A, F12:0x9B
+    };
+
+    function toPigeonKey(e){
+      if (KEYS[e.code] !== undefined) return KEYS[e.code];
+      if (KEYS[e.key]  !== undefined) return KEYS[e.key];
+      if (e.key.length === 1){
+        const c = e.key.charCodeAt(0);
+        if (c >= 0x20 && c <= 0x7E) return c;   // printable ASCII passes through
+      }
+      return null;                               // drop, never truncate
+    }
+
+    let HID = null;
+    const post = (path, body) => {
+      if (!HID) return;
+      fetch(HID + path, {method:'POST', headers:{'Content-Type':'application/json'},
+                         body: JSON.stringify(body)}).catch(()=>{});
+    };
+
     let W=64, H=64, SIZE=64*64*4;
     const canvas = document.getElementById('screen');
     const ctx = canvas.getContext('2d');
@@ -33,7 +71,9 @@
       try{
         const info = await fetch('/info').then(r=>r.json());
         W = info.w; H = info.h; SIZE = info.size;
+        if (info.hid_url) HID = info.hid_url;
       }catch(e){ /* ignore, use defaults */ }
+      wireInput();
       off.width = W; off.height = H;
       canvas.width = W * Number(scaleInput.value || 4);
       canvas.height = H * Number(scaleInput.value || 4);
@@ -69,6 +109,50 @@
       }catch(e){ /* ignore */ }
       fetching = false;
       setTimeout(loop, 66); // ~15 FPS
+    }
+
+    // Translate a browser event into display pixel coordinates. The canvas
+    // is upscaled, so divide by the real scale rather than the input box --
+    // they differ while the box is mid-edit.
+    function toDisplayXY(e){
+      const r = canvas.getBoundingClientRect();
+      const x = Math.floor((e.clientX - r.left) / (r.width  / W));
+      const y = Math.floor((e.clientY - r.top ) / (r.height / H));
+      return {x: Math.max(0, Math.min(W-1, x)), y: Math.max(0, Math.min(H-1, y))};
+    }
+
+    function wireInput(){
+      let lastPos = 0;
+      canvas.addEventListener('mousemove', e => {
+        const now = performance.now();
+        if (now - lastPos < 33) return;          // ~30 Hz, same as the pygame client
+        lastPos = now;
+        post('/mouse_pos', toDisplayXY(e));
+      });
+      // Browser button 0/1/2 = left/middle/right; HID wants 0/1/2 = left/right/middle.
+      const BTN = {0:0, 1:2, 2:1};
+      canvas.addEventListener('mousedown', e => {
+        canvas.focus();
+        if (BTN[e.button] !== undefined) post('/mouse_event', {button: BTN[e.button], pressed: true});
+      });
+      window.addEventListener('mouseup', e => {
+        if (BTN[e.button] !== undefined) post('/mouse_event', {button: BTN[e.button], pressed: false});
+      });
+      canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+      canvas.addEventListener('keydown', e => {
+        const c = toPigeonKey(e);
+        if (c !== null){ post('/key', {code:c, pressed:true}); e.preventDefault(); }
+      });
+      canvas.addEventListener('keyup', e => {
+        const c = toPigeonKey(e);
+        if (c !== null){ post('/key', {code:c, pressed:false}); e.preventDefault(); }
+      });
+      // Losing focus with keys held would leave them stuck down in the
+      // guest's state bitmap forever, so release everything on blur.
+      canvas.addEventListener('blur', () => {
+        for (const code of new Set(Object.values(KEYS))) post('/key', {code, pressed:false});
+      });
     }
 
     init();

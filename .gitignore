@@ -1,0 +1,18 @@
+# Build output: assembled binaries and the disk image
+build/
+
+# Crash/debug dumps
+ram.bin
+*.bin.bak
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp

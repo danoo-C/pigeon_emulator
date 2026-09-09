@@ -1,0 +1,151 @@
+"""Configuration: defaults, config.json, and the precedence between them.
+
+Settings come from three places, later winning over earlier:
+
+    1. DEFAULTS below
+    2. config.json at the repo root (or --config PATH)
+    3. command-line flags
+
+So config.json is where you change something permanently, and a flag is
+how you override it once. A missing or partial config.json is fine --
+every key falls back to its default.
+
+All paths in config.json are relative to the repo root unless absolute,
+so the file works the same no matter which directory you run from.
+"""
+import json
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import List, Optional
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = REPO_ROOT / "config.json"
+
+DEFAULTS = {
+    # Where the display and input HTTP servers listen.
+    "host": "127.0.0.1",
+    "display_port": 8000,
+    "hid_port": 8001,
+
+    # Folders scanned for programs to run. Add your own here; the launcher
+    # lists everything it finds across all of them.
+    "program_dirs": ["user"],
+
+    # Assembled output and the channel-2 disk image.
+    "build_dir": "build",
+    "disk": "build/pigeon_hard_drive.bin",
+
+    # The BIOS. Rebuilt automatically when the binary is older than the
+    # source, since build/ is gitignored and a fresh clone has neither.
+    "bios_source": "firmware/bios.asm",
+    "bios_binary": "build/bios.bin",
+    "auto_build": True,
+}
+
+
+class ConfigError(Exception):
+    """config.json is present but unusable."""
+
+
+@dataclass
+class Config:
+    host: str
+    display_port: int
+    hid_port: int
+    program_dirs: List[Path]
+    build_dir: Path
+    disk: Path
+    bios_source: Path
+    bios_binary: Path
+    auto_build: bool
+    source_path: Optional[Path] = None   # which config.json this came from
+    unknown_keys: List[str] = field(default_factory=list)
+
+    @property
+    def display_url(self) -> str:
+        return f"http://{self.host}:{self.display_port}"
+
+    @property
+    def hid_url(self) -> str:
+        return f"http://{self.host}:{self.hid_port}"
+
+    def override(self, **kwargs) -> "Config":
+        """Apply command-line flags. None means 'not given, keep config'."""
+        given = {k: v for k, v in kwargs.items() if v is not None}
+        for key in ("program_dirs", "build_dir", "disk", "bios_source", "bios_binary"):
+            if key in given:
+                given[key] = ([_resolve(p) for p in given[key]]
+                              if key == "program_dirs" else _resolve(given[key]))
+        return replace(self, **given)
+
+
+def _resolve(value) -> Path:
+    """Interpret a configured path relative to the repo root."""
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def _port(value, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ConfigError(f"{name} must be a whole number, got {value!r}")
+    if not 1 <= value <= 65535:
+        raise ConfigError(f"{name} must be between 1 and 65535, got {value}")
+    return value
+
+
+def load_config(path: Optional[Path] = None) -> Config:
+    """Read config.json, falling back to DEFAULTS for anything absent.
+
+    Raises ConfigError with an actionable message when the file exists but
+    is malformed -- a typo in config.json should say so, not surface later
+    as a confusing TypeError.
+    """
+    explicit = path is not None
+    path = Path(path) if explicit else CONFIG_PATH
+
+    settings = dict(DEFAULTS)
+    unknown: List[str] = []
+
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise ConfigError(f"{path} is not valid JSON: {e}") from None
+        if not isinstance(loaded, dict):
+            raise ConfigError(f"{path} must contain a JSON object, got "
+                              f"{type(loaded).__name__}")
+        unknown = sorted(set(loaded) - set(DEFAULTS))
+        settings.update({k: v for k, v in loaded.items() if k in DEFAULTS})
+    elif explicit:
+        raise ConfigError(f"No such config file: {path}")
+
+    dirs = settings["program_dirs"]
+    if isinstance(dirs, str):        # a bare string is an easy mistake to make
+        dirs = [dirs]
+    if not isinstance(dirs, list) or not all(isinstance(d, str) for d in dirs):
+        raise ConfigError("program_dirs must be a list of folder names, e.g. "
+                          f'["user", "demos"] -- got {dirs!r}')
+
+    if not isinstance(settings["auto_build"], bool):
+        raise ConfigError(f"auto_build must be true or false, got "
+                          f"{settings['auto_build']!r}")
+
+    display_port = _port(settings["display_port"], "display_port")
+    hid_port = _port(settings["hid_port"], "hid_port")
+    if display_port == hid_port:
+        raise ConfigError(f"display_port and hid_port must differ (both {display_port}); "
+                          "the two servers each need their own port")
+
+    return Config(
+        host=str(settings["host"]),
+        display_port=display_port,
+        hid_port=hid_port,
+        program_dirs=[_resolve(d) for d in dirs],
+        build_dir=_resolve(settings["build_dir"]),
+        disk=_resolve(settings["disk"]),
+        bios_source=_resolve(settings["bios_source"]),
+        bios_binary=_resolve(settings["bios_binary"]),
+        auto_build=bool(settings["auto_build"]),
+        source_path=path if path.exists() else None,
+        unknown_keys=unknown,
+    )

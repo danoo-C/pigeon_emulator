@@ -1,0 +1,14 @@
+{
+  "host": "127.0.0.1",
+  "display_port": 8000,
+  "hid_port": 8001,
+
+  "program_dirs": ["user"],
+
+  "build_dir": "build",
+  "disk": "build/pigeon_hard_drive.bin",
+
+  "bios_source": "firmware/bios.asm",
+  "bios_binary": "build/bios.bin",
+  "auto_build": true
+}

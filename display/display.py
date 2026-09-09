@@ -5,18 +5,72 @@ Polls GET /frame for the current RGBA framebuffer and renders it scaled
 by an adjustable pixel size. Includes buttons to clear the display and
 to increase/decrease the pixel size.
 
-Requires: pygame, requests
-    pip install pygame requests
+Requires pygame and requests, which the emulator itself does NOT need:
+
+    python3 -m venv .venv
+    .venv/bin/pip install -r requirements-client.txt
 
 Usage:
-    python display_client.py [--host 127.0.0.1] [--port 8000] [--fps 30]
+    .venv/bin/python display/display.py [--host 127.0.0.1] [--port 8000] [--fps 30]
+
+For display only, with no extra packages at all, open the browser front-end
+at http://127.0.0.1:8000 instead -- it is served by the emulator itself.
 """
 import argparse
+import json
+import sys
 import threading
 import time
+from pathlib import Path
 
-import pygame
-import requests
+try:
+    import pygame
+    import requests
+except ImportError as exc:
+    sys.exit(
+        f"{exc.name} is not installed, and this client needs it.\n"
+        "\n"
+        "  python3 -m venv .venv\n"
+        "  .venv/bin/pip install -r requirements-client.txt\n"
+        "  .venv/bin/python display/display.py\n"
+        "\n"
+        "Installing into the system Python usually fails on modern distros\n"
+        "(PEP 668, 'externally-managed-environment') -- use a venv as above.\n"
+        "\n"
+        "For display without pygame, open http://127.0.0.1:8000 in a browser."
+    )
+
+# The pigeon keycode space is defined once, in the emulator; this client
+# owns only the pygame -> pigeon mapping. Raw pygame keycodes must never be
+# sent: they are above 2**30 for non-printable keys, and the guest's key
+# FIFO is one byte wide.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from emulator.devices import keycodes as K          # noqa: E402
+
+PYGAME_TO_PIGEON = {
+    pygame.K_LEFT: K.KEY_LEFT,       pygame.K_RIGHT: K.KEY_RIGHT,
+    pygame.K_UP: K.KEY_UP,           pygame.K_DOWN: K.KEY_DOWN,
+    pygame.K_HOME: K.KEY_HOME,       pygame.K_END: K.KEY_END,
+    pygame.K_PAGEUP: K.KEY_PGUP,     pygame.K_PAGEDOWN: K.KEY_PGDN,
+    pygame.K_INSERT: K.KEY_INSERT,   pygame.K_DELETE: K.KEY_DELETE,
+    pygame.K_BACKSPACE: K.KEY_BACKSPACE, pygame.K_TAB: K.KEY_TAB,
+    pygame.K_RETURN: K.KEY_ENTER,    pygame.K_KP_ENTER: K.KEY_ENTER,
+    pygame.K_ESCAPE: K.KEY_ESC,      pygame.K_SPACE: K.KEY_SPACE,
+    pygame.K_LSHIFT: K.KEY_LSHIFT,   pygame.K_RSHIFT: K.KEY_RSHIFT,
+    pygame.K_LCTRL: K.KEY_LCTRL,     pygame.K_RCTRL: K.KEY_RCTRL,
+    pygame.K_LALT: K.KEY_LALT,       pygame.K_RALT: K.KEY_RALT,
+}
+PYGAME_TO_PIGEON.update({getattr(pygame, f"K_F{n}"): K.key_f(n) for n in range(1, 13)})
+
+
+def to_pigeon_key(key_code):
+    """pygame keycode -> pigeon keycode, or None if we do not carry it."""
+    if key_code in PYGAME_TO_PIGEON:
+        return PYGAME_TO_PIGEON[key_code]
+    if K.is_printable(key_code):        # printable ASCII passes straight through
+        return key_code
+    return None
+
 
 BUTTON_BAR_HEIGHT = 40
 MIN_PIXEL_SIZE = 1
@@ -31,6 +85,10 @@ BUTTON_COLOR = (70, 70, 70)
 BUTTON_HOVER_COLOR = (100, 100, 100)
 BUTTON_TEXT_COLOR = (230, 230, 230)
 DISCONNECTED_COLOR = (200, 80, 80)
+
+# pygame button index -> HID button index (4 and 5 are the legacy scroll
+# wheel, which the HID event byte has no encoding for, so they are dropped)
+MOUSE_BUTTON_MAP = {1: 0, 3: 1, 2: 2}
 
 
 class Button:
@@ -104,6 +162,9 @@ class DisplayClient:
         self._hid_connected_lock = threading.Lock()
         self._last_mouse_pos_time = 0
         self._mouse_pos_interval = 1.0 / MOUSE_POS_RATE_LIMIT
+        # True while a press that started on the toolbar is still held, so
+        # its release is not forwarded to the guest either.
+        self._toolbar_drag = False
 
         # Background HID keep-alive thread: periodically checks/reconnects to HID server
         # independently of the render loop, same as display fetch thread
@@ -256,14 +317,16 @@ class DisplayClient:
         except Exception:
             self._set_hid_connected(False)
 
-    def _send_key(self, key_code: int):
-        """Send a keyboard key code to HID server."""
+    def _send_key(self, key_code: int, pressed: bool = True):
+        """Forward one key transition. `key_code` must already be a pigeon
+        keycode -- see to_pigeon_key(); raw pygame codes are rejected by
+        the HID device."""
         if not self._is_hid_connected():
             return
         try:
             self.hid_session.post(
                 f"{self.hid_url}/key",
-                json={"code": key_code},
+                json={"code": key_code, "pressed": pressed},
                 timeout=REQUEST_TIMEOUT,
             )
             self._set_hid_connected(True)
@@ -312,32 +375,32 @@ class DisplayClient:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN:
-                    # Button indices: 1=left, 2=middle, 3=right, 4=scroll up, 5=scroll down
-                    # Map to HID indices: 0=left, 1=right, 2=middle, 3=back, 4=forward
-                    if event.button == 1:
-                        self._send_mouse_button(0, True)
-                    elif event.button == 3:
-                        self._send_mouse_button(1, True)
-                    elif event.button == 2:
-                        self._send_mouse_button(2, True)
-
-                    # Check if click is on a button (only if above button bar)
+                    # A click on the toolbar belongs to the toolbar. It used
+                    # to be forwarded to the guest as well, as a press at a
+                    # coordinate clamped to y=0 -- so pressing "Clear" also
+                    # injected a phantom click into the running program.
                     if event.pos[1] < BUTTON_BAR_HEIGHT:
-                        for button in self.buttons:
-                            if button.handle_click(event.pos):
-                                break
+                        if event.button == 1:          # left click only
+                            for button in self.buttons:
+                                if button.handle_click(event.pos):
+                                    break
+                        self._toolbar_drag = True
+                    else:
+                        hid_button = MOUSE_BUTTON_MAP.get(event.button)
+                        if hid_button is not None:
+                            self._send_mouse_button(hid_button, True)
                 elif event.type == pygame.MOUSEBUTTONUP:
-                    if event.button == 1:
-                        self._send_mouse_button(0, False)
-                    elif event.button == 3:
-                        self._send_mouse_button(1, False)
-                    elif event.button == 2:
-                        self._send_mouse_button(2, False)
-                elif event.type == pygame.KEYDOWN:
-                    # Send the key code (pygame.key.key_code() returns printable char or name)
-                    # For simplicity, send the key value; the emulator can interpret it
-                    # Common ASCII codes: A-Z are 65-90, 0-9 are 48-57, space is 32, enter is 13, etc.
-                    self._send_key(event.key)
+                    # Release the press we actually forwarded, and only that.
+                    if self._toolbar_drag:
+                        self._toolbar_drag = False
+                    else:
+                        hid_button = MOUSE_BUTTON_MAP.get(event.button)
+                        if hid_button is not None:
+                            self._send_mouse_button(hid_button, False)
+                elif event.type in (pygame.KEYDOWN, pygame.KEYUP):
+                    code = to_pigeon_key(event.key)
+                    if code is not None:
+                        self._send_key(code, event.type == pygame.KEYDOWN)
 
             frame = self._get_latest_frame()
             self._render(frame, mouse_pos)
@@ -389,17 +452,51 @@ class DisplayClient:
         pygame.display.flip()
 
 
+FALLBACK = {"host": "127.0.0.1", "display_port": 8000, "hid_port": 8001}
+
+
+def server_defaults():
+    """Read host/ports from the emulator's config.json.
+
+    Read as plain JSON rather than importing emulator.config, so this
+    client stays a standalone process with no emulator imports. Any
+    problem with the file just means the built-in defaults -- the client
+    should still start and let you point it somewhere with flags.
+    """
+    settings = dict(FALLBACK)
+    config_path = Path(__file__).resolve().parent.parent / "config.json"
+    try:
+        loaded = json.loads(config_path.read_text(encoding="utf-8"))
+        for key in settings:
+            if key in loaded:
+                settings[key] = loaded[key]
+    except (OSError, ValueError, TypeError):
+        pass
+    return settings
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Pigeon emulator display + input client")
-    parser.add_argument("--host", default="127.0.0.1", help="Display server host")
-    parser.add_argument("--port", type=int, default=8000, help="Display server port")
-    parser.add_argument("--hid-host", default="127.0.0.1", help="HID server host")
-    parser.add_argument("--hid-port", type=int, default=8001, help="HID server port")
+    defaults = server_defaults()
+    parser = argparse.ArgumentParser(
+        description="Pigeon emulator display + input client",
+        epilog="Host and ports default to config.json at the repo root.")
+    parser.add_argument("--host", default=defaults["host"], help="Display server host")
+    parser.add_argument("--port", type=int, default=defaults["display_port"],
+                        help="Display server port")
+    parser.add_argument("--hid-host", default=None,
+                        help="HID server host (defaults to --host)")
+    parser.add_argument("--hid-port", type=int, default=defaults["hid_port"],
+                        help="HID server port")
     parser.add_argument("--fps", type=int, default=30, help="Display update FPS")
-    parser.add_argument("--pixel-size", type=int, default=8, help="Initial pixel size magnification")
+    parser.add_argument("--pixel-size", type=int, default=8,
+                        help="Initial pixel size magnification")
     args = parser.parse_args()
 
-    client = DisplayClient(args.host, args.port, args.fps, args.pixel_size, args.hid_host, args.hid_port)
+    pixel_size = max(MIN_PIXEL_SIZE, min(MAX_PIXEL_SIZE, args.pixel_size))
+    hid_host = args.hid_host if args.hid_host is not None else args.host
+
+    client = DisplayClient(args.host, args.port, args.fps, pixel_size,
+                           hid_host, args.hid_port)
     client.run()
 
 
