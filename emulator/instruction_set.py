@@ -53,6 +53,26 @@ def instruction(name, size=INSTR_SIZE):
     return decorator
 
 
+# --------------------------------------------------------------------------
+# A note on the shape of the hot handlers below.
+#
+# The obvious way to write these is cpu.reg.read(src1) / cpu.reg.write(dst),
+# and that is what they used to do. But Registers.read/write call _resolve,
+# which does an isinstance check so a caller may pass 'A' as well as 0 --
+# and the CPU only ever passes integers. Profiling real code showed
+# _resolve alone at 1.67 calls per instruction and, with read/write and the
+# isinstance, about a THIRD of total runtime.
+#
+# So the handlers on the hot path index cpu.reg.values directly and inline
+# the operand choice. Bounds are still enforced: an out-of-range index
+# raises IndexError immediately, the same failure _resolve produced.
+# read()/write() remain the API for everything off this path -- the
+# debugger, tests, __repr__ -- where the letter names are worth having.
+# --------------------------------------------------------------------------
+
+MASK32 = 0xFFFFFFFF
+
+
 def reg_or_imm(cpu, reg_slot, imm):
     """Resolve an operand that could be a register OR an immediate.
     Most instructions let their last operand be EITHER a register OR a
@@ -86,7 +106,8 @@ def op_mov(cpu, dst, src1, src2, imm):
              MOV dst, #imm       (dst = a literal constant)
     Example: MOV A, #10          -> A = 10
              MOV B, A            -> B = whatever A currently holds"""
-    cpu.reg.write(dst, reg_or_imm(cpu, src1, imm))
+    v = cpu.reg.values
+    v[dst] = (imm if src1 == NONE_REG else v[src1]) & MASK32
 
 
 @instruction("ADD")
@@ -96,9 +117,9 @@ def op_add(cpu, dst, src1, src2, imm):
              ADD dst, src1, #imm
     Example: ADD C, A, B         -> C = A + B
              ADD A, A, #1        -> A = A + 1  (increment)"""
-    a = cpu.reg.read(src1)
-    b = reg_or_imm(cpu, src2, imm)
-    cpu.reg.write(dst, a + b)
+    v = cpu.reg.values
+    b = imm if src2 == NONE_REG else v[src2]
+    v[dst] = (v[src1] + b) & MASK32
 
 
 @instruction("SUB")
@@ -110,9 +131,9 @@ def op_sub(cpu, dst, src1, src2, imm):
              SUB A, A, #1        -> A = A - 1  (decrement)
     Note: registers are unsigned 32-bit -- going below 0 wraps around
     to a very large number rather than becoming negative."""
-    a = cpu.reg.read(src1)
-    b = reg_or_imm(cpu, src2, imm)
-    cpu.reg.write(dst, a - b)
+    v = cpu.reg.values
+    b = imm if src2 == NONE_REG else v[src2]
+    v[dst] = (v[src1] - b) & MASK32
 
 
 @instruction("MUL")
@@ -121,9 +142,9 @@ def op_mul(cpu, dst, src1, src2, imm):
     Usage:   MUL dst, src1, src2
              MUL dst, src1, #imm
     Example: MUL C, A, B         -> C = A * B"""
-    a = cpu.reg.read(src1)
-    b = reg_or_imm(cpu, src2, imm)
-    cpu.reg.write(dst, a * b)
+    v = cpu.reg.values
+    b = imm if src2 == NONE_REG else v[src2]
+    v[dst] = (v[src1] * b) & MASK32
 
 
 @instruction("DIV")
@@ -135,34 +156,31 @@ def op_div(cpu, dst, src1, src2, imm):
     Raises ZeroDivisionError if the divisor is 0 -- there's no DIV-by-zero
     flag yet, so this currently crashes the emulator rather than setting
     a status bit the program could check."""
-    a = cpu.reg.read(src1)
-    b = reg_or_imm(cpu, src2, imm)
+    v = cpu.reg.values
+    b = imm if src2 == NONE_REG else v[src2]
     if b == 0:
         raise ZeroDivisionError(f"Division by zero at PC={cpu.pc:#06x}")
-    cpu.reg.write(dst, a // b)
+    v[dst] = (v[src1] // b) & MASK32
 
 @instruction("OR")
 def op_or(cpu, dst, src1, src2, imm):
 
-    a = cpu.reg.read(src1)
-    b = reg_or_imm(cpu, src2, imm)
-    cpu.reg.write(dst, a | b)
+    v = cpu.reg.values
+    v[dst] = (v[src1] | (imm if src2 == NONE_REG else v[src2])) & MASK32
 
 
 @instruction("AND")
 def op_and(cpu, dst, src1, src2, imm):
 
-    a = cpu.reg.read(src1)
-    b = reg_or_imm(cpu, src2, imm)
-    cpu.reg.write(dst, a & b)
+    v = cpu.reg.values
+    v[dst] = (v[src1] & (imm if src2 == NONE_REG else v[src2])) & MASK32
 
 
 @instruction("XOR")
 def op_xor(cpu, dst, src1, src2, imm):
 
-    a = cpu.reg.read(src1)
-    b = reg_or_imm(cpu, src2, imm)
-    cpu.reg.write(dst, a ^ b)
+    v = cpu.reg.values
+    v[dst] = (v[src1] ^ (imm if src2 == NONE_REG else v[src2])) & MASK32
 
 
 @instruction("NOT")
@@ -172,8 +190,9 @@ def op_not(cpu, dst, src1, src2, imm):
     Example: NOT A, B
              NOT A, #0xFF
     """
-    a = reg_or_imm(cpu, src1, imm)
-    cpu.reg.write(dst, ~a & 0xFFFFFFFF)  # only keep the low 32 bits, since registers are 32-bit
+    v = cpu.reg.values
+    # only keep the low 32 bits, since registers are 32-bit
+    v[dst] = ~(imm if src1 == NONE_REG else v[src1]) & MASK32
 
 
 @instruction("JMP")
@@ -197,8 +216,8 @@ def op_mr(cpu, dst, src1, src2, imm):
     Example: MR A, [0xF000]      -> A = whatever byte sits at 0xF000
              MR A, [B]            -> A = byte at the address stored in B
     For reading a full 32-bit value at once, see MRW."""
-    addr = reg_or_imm(cpu, src1, imm)
-    cpu.reg.write(dst, cpu.ram.read_byte(addr))
+    v = cpu.reg.values
+    v[dst] = cpu.ram.read_byte(imm if src1 == NONE_REG else v[src1])
 
 
 @instruction("MW")
@@ -212,11 +231,9 @@ def op_mw(cpu, dst, src1, src2, imm):
              MW [0xF000], #5      -> writes the value 5 as a byte at 0xF000
              MW [B], A             -> writes A's value at the address in B
     For writing a full 32-bit value at once, see MWW."""
-    addr = cpu.reg.read(dst)
-
-    value = reg_or_imm(cpu, src1, imm)
-    value &= 0xFF  # only the low byte is written
-    cpu.ram.write_byte(addr, value)
+    v = cpu.reg.values
+    # only the low byte is written
+    cpu.ram.write_byte(v[dst], (imm if src1 == NONE_REG else v[src1]) & 0xFF)
 
 
 @instruction("MRW")
@@ -226,8 +243,8 @@ def op_mrw(cpu, dst, src1, src2, imm):
     Usage:   MRW dst, [address]
     Example: MRW A, [0xC000]     -> A = the full 32-bit value at 0xC000
     Useful for things like reading a 32-bit length field in one shot."""
-    addr = reg_or_imm(cpu, src1, imm)
-    cpu.reg.write(dst, cpu.ram.read_word(addr))
+    v = cpu.reg.values
+    v[dst] = cpu.ram.read_word(imm if src1 == NONE_REG else v[src1])
 
 
 @instruction("MWW")
@@ -241,10 +258,8 @@ def op_mww(cpu, dst, src1, src2, imm):
     DST - allway fed from a register
     SRC1 - fed from a register or immediate
     """
-    addr = cpu.reg.read(dst)
-
-    value = reg_or_imm(cpu, src1, imm)
-    cpu.ram.write_word(addr, value)
+    v = cpu.reg.values
+    cpu.ram.write_word(v[dst], imm if src1 == NONE_REG else v[src1])
 
 
 @instruction("CMP")
@@ -259,10 +274,11 @@ def op_cmp(cpu, dst, src1, src2, imm):
              JL  less_branch      -> jumps if A < B
     Always pair this with one of the J** instructions below -- CMP by
     itself has no visible effect."""
-    a = cpu.reg.read(src1)
-    b = reg_or_imm(cpu, src2, imm)
-    cpu.zero_flag = (a == b)
-    cpu.less_flag = (a < b)
+    v = cpu.reg.values
+    a = v[src1]
+    b = imm if src2 == NONE_REG else v[src2]
+    cpu.zero_flag = a == b
+    cpu.less_flag = a < b
 
 
 @instruction("JZ")
@@ -350,7 +366,7 @@ def op_push(cpu, dst, src1, src2, imm):
     same convention as most real CPUs. Always pair pushes/pops so the
     stack pointer ends up back where it started."""
     cpu.sp -= 4
-    cpu.ram.write_word(cpu.sp, cpu.reg.read(src1))
+    cpu.ram.write_word(cpu.sp, cpu.reg.values[src1])
 
 
 @instruction("POP")
@@ -365,7 +381,7 @@ def op_pop(cpu, dst, src1, src2, imm):
              POP  D              -> D = A's old value (pushed first)
     Reads the 32-bit value at the current stack pointer, then moves the
     stack pointer UP by 4 bytes (undoing one PUSH's worth of movement)."""
-    cpu.reg.write(dst, cpu.ram.read_word(cpu.sp))
+    cpu.reg.values[dst] = cpu.ram.read_word(cpu.sp)
     cpu.sp += 4
 
 
@@ -407,9 +423,9 @@ def op_shl(cpu, dst, src1, src2, imm):
              SHL dst, src1, #imm
     Example: SHL A, B, #2         -> A = B * 4, without a MUL
     Shifting by 32 or more yields 0; the result keeps the low 32 bits."""
-    a = cpu.reg.read(src1)
-    b = reg_or_imm(cpu, src2, imm)
-    cpu.reg.write(dst, 0 if b >= 32 else a << b)
+    v = cpu.reg.values
+    b = imm if src2 == NONE_REG else v[src2]
+    v[dst] = 0 if b >= 32 else (v[src1] << b) & MASK32
 
 
 @instruction("SHR")
@@ -418,9 +434,9 @@ def op_shr(cpu, dst, src1, src2, imm):
     Usage:   SHR dst, src1, src2
              SHR dst, src1, #imm
     Example: SHR A, B, #2         -> A = B / 4, without a DIV"""
-    a = cpu.reg.read(src1)
-    b = reg_or_imm(cpu, src2, imm)
-    cpu.reg.write(dst, 0 if b >= 32 else a >> b)
+    v = cpu.reg.values
+    b = imm if src2 == NONE_REG else v[src2]
+    v[dst] = 0 if b >= 32 else (v[src1] >> b) & MASK32
 
 
 # --------------------------------------------------------------------------

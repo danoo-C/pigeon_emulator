@@ -1,5 +1,13 @@
 # Emulator performance — a plan
 
+> **Steps 0–3 are done.** Measured end to end on the same program with the
+> same harness: **1,306,245 → 3,010,111 IPS, a 2.30× speedup**, with the
+> instruction count identical before and after (1,530,743) and all 281
+> tests green. That beat the 1.59× this plan predicted for these steps —
+> see [Results](#results-steps-0-3) at the end for why.
+>
+> Steps 4 and 5 remain open.
+
 Every number here was measured on this machine, running `build/demo.bin`
 (the compiled C demo) through the full `Machine` path — real mixed code,
 not a synthetic loop.
@@ -48,13 +56,15 @@ million times to support a convenience the hot path never uses.
 Ordered by payoff per unit of risk. Each was prototyped and measured, and
 the cumulative figures come from running them together.
 
-### 0. Make the benchmark honest — no speedup, prevents self-deception
+### 0. ✅ Make the benchmark honest — no speedup, prevents self-deception
 
-`tools/bench.py` reports the synthetic loop. Add a second line that runs a
-real program through `Machine.step()`. Optimising against a benchmark that
-does not resemble the workload is how you end up tuning the wrong thing.
+`tools/bench.py` reported only the synthetic loop. It now prints both, and
+skips the BIOS when timing the real program — the BIOS waits two *real*
+seconds on the timer, so including it measures the wall clock rather than
+the interpreter. That mistake cost me a confusing measurement mid-way
+through this work: 70% of what I was timing was the BIOS spin.
 
-### 1. Handlers index the register list directly — **1.38×** ✅ measured
+### 1. ✅ DONE — Handlers index the register list directly
 
 *1,382,000 → 1,913,000 IPS*
 
@@ -84,7 +94,7 @@ MRW MWW`); the rest can stay as they are.
 
 **Risk: low.** Pure local rewrites, each covered by `tests/test_smoke.py`.
 
-### 2. Fuse the run loop — **1.59×** cumulative ✅ measured
+### 2. ✅ DONE — Fuse the run loop
 
 *1,913,000 → 2,195,000 IPS*
 
@@ -108,7 +118,15 @@ Keep `step()` as it is — the debugger and every test use it. This is about
 
 **Risk: low.** Two code paths to keep in agreement; the suite covers both.
 
-### 3. `struct` for word access — ✅ measured on the primitive
+*Done.* One thing the prototype hid: the real loop also did
+`self.instruction_count += 1` and `self.total_instructions += 1` every
+instruction, and two attribute round-trips through the instance dict cost
+more than most handlers. Counting in a local and writing back at each
+sample point took this from 1.05× to **1.31×**. The partial window at the
+end is added back on exit, so the totals stay exact — a test asserts the
+instruction count is identical through `step()` and `run()`.
+
+### 3. ✅ DONE — `struct` for word access
 
 `RAM.read_word` / `write_word` are on the `MRW`/`MWW` path:
 
@@ -188,18 +206,41 @@ them twice.
 
 ---
 
-## Expected result
+## Results, steps 0-3
 
-| Step | IPS | vs today |
+Measured with the same program and harness before and after, BIOS excluded:
+
+| | IPS | vs before |
 |---|---|---|
-| today | 1,382,000 | 1.00× |
-| + direct register access | 1,913,000 | 1.38× |
-| + fused run loop | 2,195,000 | 1.59× |
-| + decoded cache | 2,528,000 | 1.83× |
-| + specialised closures | ~2,700,000 | ~2.0× |
+| before (git HEAD) | 1,306,245 | 1.00× |
+| **after steps 1–3** | **3,010,111** | **2.30×** |
 
-On **real code**, not the synthetic loop. The synthetic figure would rise
-correspondingly.
+Identical instruction counts (1,530,743) either side, so the work done is
+the same. All 281 tests green at every step.
+
+**That is well above the 1.59× predicted.** Two reasons, and the second is
+the more interesting one:
+
+1. The prototypes measured each change against the *unoptimised* baseline
+   in isolation. Composed, they multiply rather than add — removing the
+   register overhead makes the dispatch a larger share of what is left, so
+   fusing the loop then wins more than it did alone.
+2. Step 3 was worth far more than the "low risk, modest win" I had it down
+   as. `struct` for word access took 2.39M → 2.89M on its own (**1.21×**),
+   because a compiled C program is much heavier on `MRW`/`MWW` than the
+   arithmetic loop I profiled against. The instruction *mix* matters as
+   much as the per-instruction cost.
+
+Remaining, still open:
+
+| Step | est. IPS | vs now |
+|---|---|---|
+| 4. decoded cache | ~3.5M | ~1.2× |
+| 5. specialised closures | ~4.0M | ~1.3× |
+
+Those estimates are extrapolated from the earlier prototypes and have not
+been re-measured on top of steps 1–3; the real gain is likely smaller,
+since both target overhead that step 1 already removed a chunk of.
 
 ---
 

@@ -7,11 +7,13 @@ That is what makes it importable from tests. The interactive front end
 lives in cli.py.
 """
 import logging
+import struct
 import time
 from typing import Optional
 
 from .bios import BIOS
-from .cpu import CPU
+from .cpu import _HANDLERS, _UNPACK, CPU
+from .instruction_set import INSTR_SIZE
 from .devices.display_io import DisplayIO
 from .devices.hdd import HDD
 from .devices.hid import HID
@@ -116,11 +118,14 @@ class Machine:
             self.io_controller.update()
         return 0
 
-    def run(self, on_frame=None, report_ips=None):
+    def run(self, on_frame=None, report_ips=None, deadline=None):
         """Run until HALT.
 
         `on_frame` is called at DISPLAY_FPS with no arguments; `report_ips`
-        is called about once a second with the measured rate.
+        is called about once a second with the measured rate. `deadline` is
+        a time.time() value to stop at -- for benchmarking, so throughput
+        can be measured on the same loop users actually run rather than on
+        a step()-per-instruction imitation of it.
         """
         frame_interval = 1.0 / DISPLAY_FPS
         now = time.time()
@@ -128,11 +133,44 @@ class Machine:
         self.instruction_count = 0
         countdown = CLOCK_SAMPLE_INTERVAL
 
+        # step() is inlined below rather than called. At a couple of million
+        # instructions a second, a method call that does one `if` is about
+        # 9% of total runtime -- it showed up third in the profile, above
+        # every real instruction handler. step() itself stays exactly as it
+        # is: the debugger and every test go through it, and this loop must
+        # keep matching it.
+        cpu = self.cpu
+        ram = self.ram
+        controller = self.io_controller
+        memory = ram.mem
+        handlers = _HANDLERS
+        unpack = _UNPACK
+        instruction_size = INSTR_SIZE
+
+        # Counters are locals in the loop and written back at each sample
+        # point. `self.x += 1` is a load, an add and a store through the
+        # instance dict; done twice per instruction it cost more than most
+        # of the handlers.
+        executed = 0
+
         while True:
-            if self.step() == 1:
+            if cpu.halted:
                 break
-            self.instruction_count += 1
-            self.total_instructions += 1
+
+            pc = cpu.pc
+            try:
+                opcode, dst, src1, src2, imm = unpack(memory, pc)
+            except struct.error:
+                raise RuntimeError(f"Fetch past end of memory at PC={pc:#06x}") from None
+            cpu.pc = pc + instruction_size
+
+            handler = handlers[opcode]
+            if handler is None:
+                raise RuntimeError(f"Unknown opcode {opcode} at PC={pc:#06x}")
+            handler(cpu, dst, src1, src2, imm)
+
+            if ram.io_pending:
+                controller.update()
 
             # Reading the clock costs more than executing an instruction, so
             # do it once per CLOCK_SAMPLE_INTERVAL rather than twice per
@@ -140,6 +178,9 @@ class Machine:
             countdown -= 1
             if countdown:
                 continue
+            executed += CLOCK_SAMPLE_INTERVAL
+            self.instruction_count += CLOCK_SAMPLE_INTERVAL
+            self.total_instructions += CLOCK_SAMPLE_INTERVAL
             countdown = CLOCK_SAMPLE_INTERVAL
 
             now = time.time()
@@ -149,6 +190,9 @@ class Machine:
                     on_frame()
                 last_frame = now
 
+            if deadline is not None and now >= deadline:
+                break
+
             elapsed = now - last_ips
             if elapsed >= 1.0:
                 self.last_ips = self.instruction_count / elapsed
@@ -156,6 +200,12 @@ class Machine:
                     report_ips(self.last_ips)
                 self.instruction_count = 0
                 last_ips = now
+
+        # Count the partial window the loop ended in, so the totals are
+        # exact rather than rounded down to the last sample point.
+        remainder = CLOCK_SAMPLE_INTERVAL - countdown
+        self.instruction_count += remainder
+        self.total_instructions += remainder
 
     def dump_ram_to(self, path):
         """Write the whole address space out for debugging."""

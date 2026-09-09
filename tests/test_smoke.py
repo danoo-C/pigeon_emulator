@@ -213,5 +213,58 @@ def test_display_conversion_swaps_r_and_b():
     assert display._convert_to_rgba(data) == bytes(reference)
 
 
+def test_run_and_step_execute_identically():
+    """Machine.run() inlines step() for speed, so the two are separate
+    code paths that must not drift. They must execute the same
+    instructions and reach the same state.
+
+    run() also counts in a local and writes back at each sample point
+    rather than touching self twice per instruction, so this pins that the
+    totals still come out exact rather than rounded to the last window.
+    """
+    import contextlib
+    import io as _io
+    import tempfile
+    from pathlib import Path as _Path
+
+    from emulator.machine import Machine
+    from emulator.memory_map import PROGRAM_LOAD_ADDR
+
+    # A loop long enough to cross several clock-sample windows.
+    program = (encode("MOV", dst=0, src1=NONE_REG, imm=0)
+               + encode("ADD", dst=0, src1=0, src2=NONE_REG, imm=1)
+               + encode("CMP", src1=0, src2=NONE_REG, imm=25_000)
+               + encode("JL", src1=NONE_REG, imm=PROGRAM_LOAD_ADDR + 8)
+               + encode("HALT"))
+
+    results = []
+    with tempfile.TemporaryDirectory() as d:
+        disk = _Path(d) / "p.bin"
+        disk.write_bytes(program)
+        for use_run in (False, True):
+            machine = Machine(bios_path=str(REPO_ROOT / "build" / "bios.bin"))
+            try:
+                machine.ram.load_bytes(program, PROGRAM_LOAD_ADDR)
+                machine.cpu.pc = PROGRAM_LOAD_ADDR
+                with contextlib.redirect_stdout(_io.StringIO()):
+                    if use_run:
+                        machine.run()
+                    else:
+                        while machine.step() == 0:
+                            machine.total_instructions += 1
+                results.append((machine.total_instructions,
+                                machine.cpu.reg.read(0),
+                                machine.cpu.pc,
+                                machine.cpu.halted))
+            finally:
+                machine.close()
+
+    stepped, ran = results
+    assert stepped[1] == ran[1] == 25_000, f"different results: {stepped} vs {ran}"
+    assert stepped[0] == ran[0], (
+        f"instruction counts differ: step() {stepped[0]:,}, run() {ran[0]:,}")
+    assert stepped[2:] == ran[2:], f"different end state: {stepped} vs {ran}"
+
+
 if __name__ == "__main__":
     raise SystemExit(run_module(dict(globals()), "emulator smoke tests"))

@@ -461,5 +461,87 @@ def test_demo_screen_is_stable_when_idle():
     assert counts[0] > 500, f"screen is blank: {counts[0]}"
 
 
+# --- the 3D cube demo -------------------------------------------------------
+
+CUBE = REPO_ROOT / "build" / "cube.bin"
+
+
+def run_cube(setup, budget=25_000_000):
+    machine = Machine(bios_path=str(REPO_ROOT / "build" / "bios.bin"),
+                      program_path=str(CUBE))
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            while machine.cpu.pc < PROGRAM_LOAD_ADDR:
+                if machine.step() == 1:
+                    break
+            setup(machine)
+            for _ in range(budget):
+                if machine.step() == 1:
+                    break
+        return machine
+    finally:
+        machine.close()
+
+
+def screen_of(machine):
+    size = DISPLAY_W * DISPLAY_W * 4
+    return bytes(machine.ram.mem[DISPLAY_START:DISPLAY_START + size])
+
+
+def test_cube_binary_exists():
+    assert CUBE.exists(), "build/cube.bin is missing; run start_emulator.py cube"
+
+
+def test_cube_draws_a_wireframe():
+    machine = run_cube(lambda m: None)
+    fb = screen_of(machine)
+    edge = sum(1 for i in range(0, len(fb), 4) if fb[i:i + 3] in
+               (b"\xff\xc0\x30", b"\xff\xe0\x60"))
+    assert edge > 150, f"only {edge} cube-coloured pixels -- is it drawing?"
+
+
+def test_cube_rotates_when_dragged():
+    """The whole point: hold the left button and move, and the cube turns.
+
+    Auto-spin is switched off first, so any change is the drag and not the
+    clock.
+    """
+    def drag(m):
+        m.hid.push_key(ord(' '))            # stop the auto-spin
+        m.hid.push_mouse_event(0, True)     # button down
+        m.hid.set_mouse_pos(40, 50)
+
+    machine = run_cube(drag, budget=14_000_000)
+    before = screen_of(machine)
+    with contextlib.redirect_stdout(io.StringIO()):
+        machine.hid.set_mouse_pos(64, 50)   # drag right -> yaw
+        for _ in range(14_000_000):
+            if machine.step() == 1:
+                break
+    after = screen_of(machine)
+    machine.close()
+
+    changed = sum(1 for i in range(0, len(before), 4)
+                  if before[i:i + 3] != after[i:i + 3])
+    assert changed > 100, f"drag moved only {changed} pixels -- rotation is stuck"
+
+
+def test_cube_is_still_when_not_dragged_and_not_spinning():
+    """Releasing the button must stop the rotation, not coast."""
+    def settle(m):
+        m.hid.push_key(ord(' '))            # auto-spin off
+        m.hid.set_mouse_pos(50, 50)
+
+    machine = run_cube(settle, budget=14_000_000)
+    before = screen_of(machine)
+    with contextlib.redirect_stdout(io.StringIO()):
+        for _ in range(14_000_000):
+            if machine.step() == 1:
+                break
+    after = screen_of(machine)
+    machine.close()
+    assert before == after, "the cube moved with no input and no auto-spin"
+
+
 if __name__ == "__main__":
     raise SystemExit(run_module(dict(globals()), "C libraries"))

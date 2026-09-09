@@ -148,6 +148,7 @@ unrecognised key is a warning, not an error.
 | | |
 |---|---|
 | `user/demo.c` | ⭐ **start here** — a menu, a textbox and a canvas, in C |
+| `user/cube.c` | a draggable 3D wireframe cube — fixed-point maths, no FP hardware |
 | `user/screen.asm` | ✅ runs to `HALT`, fills the screen with a bitwise pattern |
 | `user/sincos.asm` | animated plot; loops forever by design |
 | `user/ui.asm` | two alternating draw routines; loops forever by design |

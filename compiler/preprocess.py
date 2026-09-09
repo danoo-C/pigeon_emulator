@@ -7,6 +7,13 @@ arithmetic, no token pasting, no stringification, no variadic macros.
 Line directives are not emitted; instead every produced line carries the
 file and line it came from, so a diagnostic in an included header names
 the header rather than the line of the file that included it.
+
+Comments are stripped HERE, before directives are read, exactly as a real
+C preprocessor does -- not later in the lexer. Doing it later meant
+`#define FP 8  /* fractional bits */` captured the comment as part of the
+macro body, so every use of FP pasted a comment in with it. Harmless in an
+expression; fatal when the expansion landed inside another comment, since
+that produced a nested `/*` the lexer cannot parse.
 """
 import re
 from pathlib import Path
@@ -49,11 +56,78 @@ class Preprocessor:
 
     # --- the worker --------------------------------------------------------
 
+    def _strip_comments(self, source: str):
+        """Remove // and /* */ comments, preserving line structure.
+
+        String and character literals are respected, so a "//" inside a
+        string survives. Block comments are replaced by a space and their
+        newlines kept, so every output line still corresponds to the same
+        input line -- diagnostics depend on that.
+        """
+        out = []
+        i, n = 0, len(source)
+        in_block = False
+        in_string = False
+        quote = ""
+        while i < n:
+            ch = source[i]
+            nxt = source[i + 1] if i + 1 < n else ""
+
+            if in_block:
+                if ch == "*" and nxt == "/":
+                    in_block = False
+                    out.append(" ")
+                    i += 2
+                    continue
+                out.append("\n" if ch == "\n" else " ")
+                i += 1
+                continue
+
+            if in_string:
+                out.append(ch)
+                if ch == "\\" and nxt:
+                    out.append(nxt)
+                    i += 2
+                    continue
+                if ch == quote:
+                    in_string = False
+                i += 1
+                continue
+
+            if ch in "\"'":
+                in_string, quote = True, ch
+                out.append(ch)
+                i += 1
+                continue
+
+            if ch == "/" and nxt == "/":
+                while i < n and source[i] != "\n":
+                    i += 1
+                continue
+
+            if ch == "/" and nxt == "*":
+                in_block = True
+                out.append(" ")
+                i += 2
+                continue
+
+            out.append(ch)
+            i += 1
+
+        if in_block:
+            raise CompileError("unterminated /* comment", 1, 1, "<source>")
+        return "".join(out)
+
     def _run(self, source, filename, directory, out, origins, depth):
         if depth > MAX_INCLUDE_DEPTH:
             raise CompileError(
                 f"#include nested more than {MAX_INCLUDE_DEPTH} deep -- a cycle?",
                 1, 1, filename)
+
+        try:
+            source = self._strip_comments(source)
+        except CompileError as e:
+            raise CompileError(e.message, e.line, e.column, filename) from None
 
         # Each entry: (this branch is being emitted, any branch has been taken)
         conditions: List[Tuple[bool, bool]] = []
