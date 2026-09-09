@@ -12,9 +12,15 @@
 #ifndef PIGEON_DISPLAY_H
 #define PIGEON_DISPLAY_H
 
-#define DISP_W 100
-#define DISP_H 100
-#define DISP_BASE 0x1418
+/* The geometry comes from the machine, not from here. DISPLAY_W,
+ * DISPLAY_H and DISPLAY_START are predefined by the compiler out of
+ * emulator/memory_map.py -- the same names the assembler injects. These
+ * three were literals until the screen changed shape, and nothing
+ * checked them against the machine; a resolution change updated the
+ * emulator and left every C program drawing at the old size. */
+#define DISP_W    DISPLAY_W
+#define DISP_H    DISPLAY_H
+#define DISP_BASE DISPLAY_START
 
 typedef unsigned int color_t;
 
@@ -39,8 +45,26 @@ typedef unsigned int color_t;
  *     for (;;) { draw_everything(); disp_present(); }
  *
  * The buffer comes from the heap, so it costs nothing in the program
- * image -- 40,000 bytes of `.space` would otherwise be copied by the
- * BIOS on every boot.
+ * image -- a screen of `.space` would otherwise be copied by the BIOS on
+ * every boot.
+ *
+ * disp_present() is a PAGE FLIP, not a copy. It hands the display the
+ * address of the buffer you just drew and hands you back the one that
+ * was on screen. Both surfaces are real and both keep their contents, so
+ *
+ *     the buffer you draw into after a present still holds the frame
+ *     BEFORE the one now showing -- not a clean slate.
+ *
+ * Clear it, or write every pixel. disp_clear() is a hardware fill and
+ * costs about six instructions, so there is no reason not to. The one
+ * pattern this breaks is redrawing only what changed: the parts you skip
+ * are two frames old, not one.
+ *
+ * disp_get() reads through the draw target, so after a present it reads
+ * that same two-frames-ago image, not what is on screen.
+ *
+ * With no display device on the bus -- a bare CPU, as tests/test_libs.py
+ * builds -- present falls back to copying and none of the above applies.
  */
 int  disp_use_back_buffer(void);   /* 0 if the heap could not provide one */
 void disp_present(void);           /* copy the back buffer to the screen  */

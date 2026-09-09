@@ -19,17 +19,23 @@
 #include <pigeon/input.h>
 #include <pigeon/mem.h>
 
-/* --- layout, in a 100x100 screen with a 4x6 font ------------------------ */
+/* --- layout, with a 4x6 font -------------------------------------------
+ *
+ * Top-anchored rows are absolute; anything that has to sit near the
+ * middle or the bottom is derived from DISP_H, and the text width from
+ * DISP_W. These were all literals for a 100x100 screen, so the whole
+ * lower half of the UI hung off the bottom the moment the screen
+ * changed shape. */
 #define TITLE_H     9
 #define MENU_Y      13
 #define MENU_STEP   9
 #define MENU_COUNT  3
-#define BOX_Y       44
+#define BOX_Y       (DISP_H / 2 - 10)
 #define BOX_H       13
-#define CANVAS_Y    60
-#define CANVAS_H    32
-#define STATUS_Y    94
-#define TEXT_MAX    17          /* 17 glyphs * 5px = 85px, fits with a margin */
+#define CANVAS_Y    (DISP_H / 2 + 6)
+#define CANVAS_H    (DISP_H - CANVAS_Y - 14)
+#define STATUS_Y    (DISP_H - 6)
+#define TEXT_MAX    ((DISP_W - 10) / (GLYPH_W + 1))
 
 #define ACCENT  0xFF30C0FF
 #define DIM     0xFF505868
@@ -259,6 +265,6 @@ int main(void) {
     }
 
     disp_clear(0xFF0A0C10);
-    disp_text(20, 45, "BYE", ACCENT);
+    disp_text(DISP_W / 2 - 6, DISP_H / 2 - 3, "BYE", ACCENT);
     return key_count;
 }

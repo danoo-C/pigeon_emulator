@@ -6,8 +6,12 @@ the original failure, so the fixes stay fixed.
     python3 tests/test_input.py      (or: python3 -m pytest tests/)
 """
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -206,6 +210,234 @@ def test_javascript_keycode_table_matches_python():
         assert name in js, f"index.html is missing {name}"
         assert js[name] == want, (
             f"index.html has {name}=0x{js[name]:02X}, keycodes.py says 0x{want:02X}")
+
+
+def _node():
+    """The `node` binary, or None. Browser-side logic is otherwise
+    untestable from here, but node is not a dependency of this project --
+    skip rather than fail when it is absent."""
+    return shutil.which("node")
+
+
+def _browser_script():
+    return (REPO_ROOT / "display" / "index.html").read_text()
+
+
+def test_the_browser_page_is_valid_javascript():
+    """A syntax error in the page is silent: the browser logs it to a
+    console nobody is watching and the screen simply stays blank."""
+    node = _node()
+    if node is None:
+        print("      (node not installed -- browser script not checked)")
+        return
+    script = re.search(r"<script>(.*?)</script>", _browser_script(), re.DOTALL)
+    assert script, "could not find the script block in index.html"
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+        f.write(script.group(1))
+        path = f.name
+    try:
+        done = subprocess.run([node, "--check", path], capture_output=True, text=True)
+        assert done.returncode == 0, f"index.html has a syntax error:\n{done.stderr}"
+    finally:
+        os.unlink(path)
+
+
+def _outbox_source():
+    """The page's post()/drain() pair, lifted out so node can run it."""
+    html = _browser_script()
+    assert "const outbox = [];" in html, (
+        "index.html no longer has the outbox that serialises HID posts -- "
+        "without it several requests are in flight at once and arrive in "
+        "any order, which the guest reads as the pointer jumping")
+    start = html.index("const outbox = [];")
+    end = html.index("function drain(){", start)
+    end = html.index("\n    }\n", end) + len("\n    }\n")
+    return html[start:end]
+
+
+HARNESS_TOP = """
+var HID = 'http://hid';
+var inFlight = 0, maxInFlight = 0;
+var sent = [], resolvers = [];
+globalThis.fetch = function (url, opts) {
+  inFlight++; if (inFlight > maxInFlight) maxInFlight = inFlight;
+  sent.push(url.slice(HID.length) + ' ' + opts.body);
+  return new Promise(function (res) {
+    resolvers.push(function () { inFlight--; res({}); });
+  });
+};
+"""
+
+HARNESS_BOTTOM = """
+post('/mouse_pos',   {x:1, y:1});
+post('/mouse_pos',   {x:2, y:2});
+post('/mouse_event', {button:0, pressed:true});
+post('/mouse_pos',   {x:3, y:3});
+post('/mouse_pos',   {x:4, y:4});
+post('/key',         {code:65, pressed:true});
+post('/mouse_event', {button:0, pressed:false});
+
+(async function () {
+  while (resolvers.length) {
+    resolvers.shift()();
+    await new Promise(r => setTimeout(r, 0));
+  }
+  console.log(JSON.stringify({maxInFlight: maxInFlight, sent: sent}));
+})();
+"""
+
+
+def _run_outbox():
+    node = _node()
+    if node is None:
+        return None
+    with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as f:
+        f.write(HARNESS_TOP + _outbox_source() + HARNESS_BOTTOM)
+        path = f.name
+    try:
+        done = subprocess.run([node, path], capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+        return json.loads(done.stdout.strip().splitlines()[-1])
+    finally:
+        os.unlink(path)
+
+
+def test_the_browser_sends_one_request_at_a_time():
+    """fetch() does not preserve order, and the guest reads a drag as the
+    difference between successive positions -- so a stale /mouse_pos
+    arriving after a fresh one is one jump across the screen. Keeping a
+    single request in flight is what rules that out.
+
+    This is the difference between the two front ends: the pygame client
+    posts synchronously from its event loop and is ordered for free.
+    """
+    result = _run_outbox()
+    if result is None:
+        print("      (node not installed -- browser outbox not checked)")
+        return
+    assert result["maxInFlight"] == 1, (
+        f"{result['maxInFlight']} requests were in flight at once; "
+        "they can then arrive in any order")
+
+
+def test_the_browser_collapses_stale_positions_but_keeps_every_edge():
+    """Only the newest position means anything, so a backlog of them is
+    worse than useless -- it arrives after the gesture is over. Button and
+    key edges are the opposite: each one is discrete and two in a row do
+    not mean the same as one."""
+    result = _run_outbox()
+    if result is None:
+        print("      (node not installed -- browser outbox not checked)")
+        return
+    sent = result["sent"]
+
+    assert sent == [
+        '/mouse_pos {"x":1,"y":1}',
+        '/mouse_pos {"x":2,"y":2}',
+        '/mouse_event {"button":0,"pressed":true}',
+        '/mouse_pos {"x":4,"y":4}',          # (3,3) collapsed into it
+        '/key {"code":65,"pressed":true}',
+        '/mouse_event {"button":0,"pressed":false}',
+    ], f"unexpected delivery:\n  " + "\n  ".join(sent)
+
+
+def test_the_browser_anchors_a_click_to_a_position():
+    """mousedown used to carry no position, so a press landed on whatever
+    the last throttled mousemove had reported -- up to a frame of travel
+    away, and the whole of that gap became the first drag delta."""
+    html = _browser_script()
+    down = re.search(r"canvas\.addEventListener\('mousedown'.*?\}\);", html, re.DOTALL)
+    assert down, "could not find the mousedown handler"
+    body = down.group(0)
+    assert "/mouse_pos" in body, "mousedown does not post a position"
+    assert body.index("/mouse_pos") < body.index("/mouse_event"), (
+        "mousedown posts the button before the position it happened at")
+
+
+def _pygame_client():
+    """display/display.py, or None when pygame is not installed.
+
+    pygame is an optional client dependency (requirements-client.txt) and
+    the emulator core deliberately does not need it, so the suite has to
+    survive its absence -- but it must not pass quietly on a machine that
+    HAS it and is broken.
+    """
+    try:
+        import pygame                                        # noqa: F401
+    except ImportError:
+        return None
+    sys.path.insert(0, str(REPO_ROOT / "display"))
+    import display as client
+    return client
+
+
+def test_shifted_characters_survive_the_pygame_client():
+    """Shift+9 must reach the guest as '(', not as '9'.
+
+    pygame's event.key is the PHYSICAL key -- K_9 whether or not shift is
+    held, and K_9 == 57 == ord('9') -- so a client that reads only
+    event.key can never deliver a shifted character: no parentheses, no
+    '*', '^' or '+', no capitals. event.unicode is the field that knows
+    about shift AND about the keyboard layout, which matters because '('
+    is Shift+9 on a US layout and Shift+8 on a Slovak one.
+    """
+    client = _pygame_client()
+    if client is None:
+        print("      (pygame not installed -- pygame client not checked)")
+        return
+    import pygame
+
+    # (physical key, what the layout produced, what the guest must get)
+    cases = [
+        (pygame.K_9, "(", ord("(")),      # US
+        (pygame.K_0, ")", ord(")")),      # US
+        (pygame.K_8, "(", ord("(")),      # Slovak: same physical key, other glyph
+        (pygame.K_9, ")", ord(")")),      # Slovak
+        (pygame.K_8, "*", ord("*")),
+        (pygame.K_6, "^", ord("^")),
+        (pygame.K_a, "A", ord("A")),
+        (pygame.K_9, "9", ord("9")),      # unshifted still works
+        (pygame.K_a, "a", ord("a")),
+    ]
+    for key, typed, want in cases:
+        got = client.to_pigeon_key(key, typed)
+        assert got == want, (
+            f"typing {typed!r} on physical key {key} reached the guest as "
+            f"{got!r}, expected {want!r} ({chr(want)!r})")
+
+
+def test_named_keys_beat_the_character_they_carry():
+    """Return, Escape, Backspace and Tab carry a control character in
+    event.unicode, and Space carries a printable one. The named mapping
+    has to win, or Return would arrive as 0x0D by a different route and
+    Space would depend on which branch ran first."""
+    client = _pygame_client()
+    if client is None:
+        print("      (pygame not installed -- pygame client not checked)")
+        return
+    import pygame
+
+    for key, carried, want in [
+        (pygame.K_RETURN, "\r", K.KEY_ENTER),
+        (pygame.K_ESCAPE, "\x1b", K.KEY_ESC),
+        (pygame.K_BACKSPACE, "\x08", K.KEY_BACKSPACE),
+        (pygame.K_TAB, "\t", K.KEY_TAB),
+        (pygame.K_SPACE, " ", K.KEY_SPACE),
+        (pygame.K_LEFT, "", K.KEY_LEFT),
+    ]:
+        assert client.to_pigeon_key(key, carried) == want
+
+
+def test_the_pygame_client_drops_what_it_cannot_encode():
+    """The key FIFO is one byte wide and the HID device REJECTS anything
+    above 0xFF, so a layout that produces a non-ASCII character must be
+    dropped here rather than truncated into a plausible wrong letter."""
+    client = _pygame_client()
+    if client is None:
+        print("      (pygame not installed -- pygame client not checked)")
+        return
+    assert client.to_pigeon_key(225, "\u00e1") is None       # a-acute
+    assert client.to_pigeon_key(0x11B, "\u010d") is None     # c-caron
 
 
 def test_pigeon_keycodes_do_not_collide():

@@ -12,12 +12,82 @@
  * and it avoids the signed-compare sequence entirely.
  */
 #include <pigeon/display.h>
+#include <pigeon/io.h>
 #include <pigeon/mem.h>
+
+/* Commands on CH_DISPLAY. The DISP_ prefix is not decoration: units are
+ * compiled together with no linker and the preprocessor's macro table is
+ * shared across them, so a bare CMD_FILL here would silently overwrite
+ * input.c's -- the preprocessor does not warn on redefinition. */
+#define DISP_CMD_INFO      1
+#define DISP_CMD_SET_BASE  2
+#define DISP_CMD_FILL      4
+
+#define DISP_BYTES (DISP_W * DISP_H * 4)
 
 /* Where drawing goes: the screen itself, or a back buffer once one has
  * been asked for. A global rather than a function so the per-pixel cost
  * is one load, not a call. */
 unsigned disp_target = DISP_BASE;
+
+/* The heap buffer, 0 until one is asked for.
+ *
+ * This exists because `disp_target != DISP_BASE` STOPPED meaning "I have
+ * a back buffer" once presenting became a page flip: the two surfaces are
+ * the hardware framebuffer and this buffer, so on alternate frames the
+ * draw target legitimately IS DISP_BASE. Gating on that would make
+ * present a no-op every other frame and halve the update rate while
+ * showing stale content. */
+static unsigned disp_back = 0u;
+
+/* 0 = not probed, 1 = the device is there, 2 = software only. */
+static unsigned disp_hw = 0u;
+
+static void disp_call(unsigned rw, unsigned command,
+                      unsigned length, unsigned address) {
+    IO_RW   = rw;
+    IO_CMD  = command;
+    IO_LEN  = length;
+    IO_ADDR = address;
+    IO_CH   = CH_DISPLAY;          /* this store fires it -- must be last */
+}
+
+/* Is there a display device on the bus, and does it agree with us about
+ * how big the screen is?
+ *
+ * Three environments have to be told apart, and the check differs for
+ * each. tests/test_libs.py runs a bare CPU with no IOController at all,
+ * so the software fallbacks below are not defensive padding -- they are
+ * what keeps those tests meaningful. */
+static unsigned disp_probe(void) {
+    disp_call(0u, DISP_CMD_INFO, 12u, 0u);
+
+    /* No controller: the channel store armed a flag nobody services, so
+     * the channel is still set. A real controller always clears it. */
+    if (IO_CH != 0u) { IO_CH = 0u; return 2u; }
+
+    /* A controller, but nothing on this channel. It answers with
+     * ERR_NO_SUCH_CHANNEL, which is 0xFFFFFFFF -- so test that FIRST: as
+     * a length it is enormous, not short, and a `< 12` check alone sails
+     * straight past it into a stale data window. */
+    if (IO_RETLEN == 0xFFFFFFFFu) return 2u;
+    if (IO_RETLEN < 12u) return 2u;
+
+    /* The device's screen must be the size this program was compiled
+     * for, or a hardware fill would write the machine's DISPLAY_SIZE
+     * bytes into a buffer we sized DISP_BYTES and corrupt the heap.
+     * These agree by construction now that the geometry is predefined
+     * from the memory map -- but a .bin built before a resolution change
+     * still runs, and nothing rebuilds it. */
+    if (IO_DATAW[2] != (unsigned)DISP_BYTES) return 2u;
+
+    return 1u;
+}
+
+static int disp_have_hw(void) {
+    if (disp_hw == 0u) disp_hw = disp_probe();
+    return disp_hw == 1u;
+}
 
 /* Rows are contiguous, so walking a pointer along one beats recomputing
  * y*DISP_W + x per pixel -- that is a MUL plus address arithmetic every
@@ -28,19 +98,41 @@ static color_t *row_ptr(unsigned x, unsigned y) {
 
 int disp_use_back_buffer(void) {
     void *buffer;
-    if (disp_target != DISP_BASE) return 1;        /* already have one */
-    buffer = malloc(DISP_W * DISP_H * 4);
+    if (disp_back != 0u) return 1;                 /* already have one */
+    buffer = malloc(DISP_BYTES);
     if (buffer == NULL) return 0;
-    disp_target = (unsigned)buffer;
+    disp_back = (unsigned)buffer;
+    disp_target = disp_back;
     return 1;
 }
 
 void disp_present(void) {
-    color_t *src = (color_t *)disp_target;
-    color_t *dst = (color_t *)DISP_BASE;
-    unsigned n = DISP_W * DISP_H;
-    if (disp_target == DISP_BASE) return;          /* drawing straight to it */
-    while (n > 0u) { *dst = *src; dst++; src++; n--; }
+    if (disp_back == 0u) return;                   /* drawing straight to it */
+
+    if (disp_have_hw()) {
+        /* Hand the display the buffer just drawn. One store each for the
+         * five header fields, instead of a copy of every pixel. */
+        disp_call(0u, DISP_CMD_SET_BASE, 4u, disp_target);
+        if (IO_DATAW[0] != 0u) {
+            /* Draw the next frame into whichever surface just left the
+             * screen. It still holds the frame BEFORE the one now
+             * showing -- see the note in display.h. */
+            disp_target = (disp_target == disp_back) ? DISP_BASE : disp_back;
+            return;
+        }
+        disp_hw = 2u;                              /* refused: stop asking */
+    }
+
+    /* No device, or it would not take the base: copy, as before. The
+     * screen is DISP_BASE again, so drawing goes back to the heap. */
+    {
+        color_t *src = (color_t *)disp_target;
+        color_t *dst = (color_t *)DISP_BASE;
+        unsigned n = DISP_W * DISP_H;
+        if (disp_target == DISP_BASE) return;
+        while (n > 0u) { *dst = *src; dst++; src++; n--; }
+        disp_target = disp_back;
+    }
 }
 
 void disp_set(unsigned x, unsigned y, color_t c) {
@@ -59,9 +151,20 @@ void disp_clear(color_t c) {
     /* disp_target, not DISP_BASE: with a back buffer in play this must
      * clear the buffer being drawn into, or the clear lands on screen
      * while every shape lands in the buffer. */
-    color_t *p = (color_t *)disp_target;
-    unsigned n = DISP_W * DISP_H;
-    while (n > 0u) { *p = c; p++; n--; }
+    if (disp_have_hw()) {
+        IO_DATAW[0] = c;                           /* the colour, in the window */
+        /* 4 is the size of that payload, NOT the size of the fill. The
+         * controller allocates LENGTH bytes before the device is even
+         * called, so putting a fill size -- or a colour -- there is how
+         * you ask for a multi-gigabyte allocation by accident. */
+        disp_call(1u, DISP_CMD_FILL, 4u, disp_target);
+        return;
+    }
+    {
+        color_t *p = (color_t *)disp_target;
+        unsigned n = DISP_W * DISP_H;
+        while (n > 0u) { *p = c; p++; n--; }
+    }
 }
 
 void disp_hline(unsigned x, unsigned y, unsigned w, color_t c) {

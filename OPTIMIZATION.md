@@ -6,7 +6,19 @@
 > tests green. That beat the 1.59× this plan predicted for these steps —
 > see [Results](#results-steps-0-3) at the end for why.
 >
-> Steps 4 and 5 remain open.
+> **Steps 4 and 5 are closed — PyPy superseded both.** The afternoon's
+> experiment recommended at the bottom of this file was worth it:
+> `.pypy/bin/pypy3` runs the unmodified interpreter at **36.1M IPS on the
+> cube (12.7×) and 21.7M on demo (8.3×)**, against 2.05× for the
+> hand-written closure cache step 5 proposed — and it changes no code, so
+> it cannot be subtly wrong. See [PyPy](#pypy-closes-steps-4-and-5).
+>
+> Separately, the real win turned out not to be interpreter speed at all.
+> 87% of the cube's instructions were `disp_clear` and `disp_present`
+> looping over every pixel; those are now hardware (`CH_DISPLAY`), which
+> took the cube from **832,403 to 85,447 instructions per frame** — 9.7×
+> less work to draw the same picture, and it compounds with PyPy instead
+> of competing with it.
 
 Every number here was measured on this machine, running `build/demo.bin`
 (the compiled C demo) through the full `Machine` path — real mixed code,
@@ -259,10 +271,43 @@ block is the next rung, and it would help — but the machine is an
 interpreter for a hobby ISA, and the debuggability you would spend is worth
 more than the 2× you would gain.
 
-**PyPy would be worth an afternoon's experiment** before any of #4 or #5.
-This is exactly the workload its JIT is built for, and it costs nothing but
-a `pypy3 tools/bench.py` to find out. If it gives 5–10× on an unmodified
-interpreter, the calculus for #5 changes completely.
+**PyPy was worth an afternoon's experiment**, and it paid — see below.
+
+---
+
+## PyPy closes steps 4 and 5
+
+Measured after a 5 s warm-up, 5 s window, through `Machine.run()`:
+
+| | CPython 3.13 | PyPy 7.3.23 | |
+|---|---|---|---|
+| synthetic ADD/CMP/JL | 3,555,910 | 92,032,800 | 25.9× |
+| **cube.bin** | **2,851,966** | **36,081,024** | **12.7×** |
+| demo.bin | 2,607,862 | 21,658,242 | 8.3× |
+
+Run it with `./run-pypy.sh cube --run`. Two things to know:
+
+**Warm-up is not optional when measuring.** `tools/bench.py`'s 0.4 s window
+closes before the JIT has done anything, and reports PyPy as *slower*
+(1.5M IPS). The IPS readout climbs ~7M → ~40M over about ten seconds.
+
+**IPS is the wrong metric now, and it was already misleading.** The
+codegen change that made every local access one instruction shorter
+*lowered* reported IPS (2.67M → 2.54M) while *raising* the frame rate
+(3.00 → 3.99 FPS), because the cheap `MOV`s went away and the remaining
+mix is denser in `MRW`/`MWW`. Measure instructions per frame, or frames
+per second. Not instructions per second.
+
+So step 5 (specialised closures) is **not worth doing**: 2.05× measured,
+for a rewrite of the execution core that puts the ISA's semantics in two
+places where a drift is a wrong answer rather than a crash. PyPy is 12.7×
+for nothing. Step 4 (decoded cache) is subsumed.
+
+What is still open, and now matters more than either: under PyPy,
+`Machine.run()`'s own per-instruction bookkeeping — the countdown, the
+clock sample, the `io_pending` check — is roughly 45% of runtime (a lean
+loop over the same handlers reaches 66M IPS against `run()`'s 36M). That
+was noise on CPython. It is also a much safer target than a closure cache.
 
 ---
 

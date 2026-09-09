@@ -19,8 +19,21 @@ from compiler.codegen import generate                 # noqa: E402
 from compiler.lexer import CompileError, tokenize     # noqa: E402
 from compiler.parser import parse                     # noqa: E402
 from compiler.preprocess import Preprocessor          # noqa: E402
+from emulator import memory_map                       # noqa: E402
 
 LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
+
+# The memory map, predefined for every translation unit -- the same names
+# the assembler injects as symbols, from the same rule. Macro bodies are
+# text, so the ints are formatted here.
+#
+# Without this, C had no way to learn the machine's layout and
+# lib/pigeon/display.h carried a hand-written copy of the display
+# geometry. Nothing checked the two against each other, so changing the
+# resolution in memory_map.py left every C program drawing at the old
+# one -- the exact failure the assembler's symbol injection exists to
+# prevent.
+BUILTIN_DEFINES = {name: str(value) for name, value in memory_map.symbols().items()}
 
 
 def _remap(error: CompileError, origins) -> CompileError:
@@ -39,7 +52,7 @@ def _remap(error: CompileError, origins) -> CompileError:
 
 def compile_to_asm(source: str, filename: str = "<source>", include_paths=None) -> str:
     """C text -> pigeon assembly text."""
-    text, origins = Preprocessor(include_paths or [LIB_DIR]).process(
+    text, origins = Preprocessor(include_paths or [LIB_DIR], BUILTIN_DEFINES).process(
         source, filename, Path(filename).parent)
     try:
         program = analyze(parse(tokenize(text, filename)))
@@ -56,7 +69,7 @@ def compile_units(paths, include_paths=None) -> str:
     inventing an object format, and for programs this size costs nothing.
     """
     include_paths = list(include_paths or []) + [LIB_DIR]
-    pre = Preprocessor(include_paths)
+    pre = Preprocessor(include_paths, BUILTIN_DEFINES)
     chunks, origins = [], []
     for path in paths:
         path = Path(path)

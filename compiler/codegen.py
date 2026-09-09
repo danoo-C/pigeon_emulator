@@ -310,13 +310,16 @@ class CodeGen:
         sign bit first, which turns an unsigned compare into a signed one
         (verified across every sign combination).
         """
-        self._binary_operands(node)
+        imm = self._binary_operands(node)
         operand_type = getattr(node, "operand_type", None)
         if operand_type is not None and operand_type.is_signed:
             self.comment("signed compare: bias both sides, then compare unsigned")
             self.emit("XOR A, A, #0x80000000")
-            self.emit("XOR B, B, #0x80000000")
-        self.emit("CMP A, B")
+            if imm is None:
+                self.emit("XOR B, B, #0x80000000")
+            else:
+                imm ^= 0x80000000
+        self.emit(f"CMP A, #{imm}" if imm is not None else "CMP A, B")
 
     # --- expressions --------------------------------------------------------
 
@@ -386,17 +389,22 @@ class CodeGen:
         raise node.token.error(f"unary '{node.op}' is not implemented")
 
     def _binary_operands(self, node: A.Binary):
-        """Leave the left operand in A and the right in B.
+        """Leave the left operand in A, and say where the right one is.
 
-        The peephole matters: when the right side is a constant or a plain
-        variable it cannot clobber A, so the push/pop round trip through
-        the hardware stack is skipped entirely. That is most binary
-        operations in real code.
+        Returns None when the right operand landed in B, or its value when
+        it is a literal the caller should encode as an immediate instead.
+        Every arithmetic instruction takes `OP dst, src1, #imm` directly,
+        so materialising a constant into B first costs an instruction on
+        the majority of binary operations in real code -- callers must
+        honour the return value rather than assuming B.
+
+        The peephole matters too: when the right side is a constant or a
+        plain variable it cannot clobber A, so the push/pop round trip
+        through the hardware stack is skipped entirely.
         """
         if isinstance(node.right, A.IntLiteral):
             self._expr(node.left)
-            self.emit(f"MOV B, #{node.right.value}")
-            return
+            return node.right.value
         if _is_simple(node.right):
             self._expr(node.left)
             self.emit("PUSH A")
@@ -437,14 +445,15 @@ class CodeGen:
             self._pointer_binary(node, scale)
             return
 
-        self._binary_operands(node)
+        imm = self._binary_operands(node)
+        rhs = "B" if imm is None else f"#{imm}"
         if node.op == "%":
             self.comment("a % b  ==  a - (a / b) * b   (no MOD instruction)")
-            self.emit("DIV C, A, B")
-            self.emit("MUL C, C, B")
+            self.emit(f"DIV C, A, {rhs}")
+            self.emit(f"MUL C, C, {rhs}")
             self.emit("SUB A, A, C")
             return
-        self.emit(f"{DIRECT_BINOPS[node.op]} A, A, B")
+        self.emit(f"{DIRECT_BINOPS[node.op]} A, A, {rhs}")
 
         difference = getattr(node, "pointer_diff", None)
         if difference and difference > 1:
@@ -532,13 +541,36 @@ class CodeGen:
         frame = self.function.frame_size
         self.comment(f"call {getattr(node.callee, 'name', '<indirect>')}"
                      f" -- args go at F+{frame}, then F moves up by {frame}")
-        for index, arg in enumerate(node.args):
-            self._expr(arg)
+
+        def slot(index):
             self.emit("MOV C, F")
             offset = frame + index * WORD
             if offset:
                 self.emit(f"ADD C, C, #{offset}")
             self.emit("MWW C, A")
+
+        # A nested call does not just clobber registers -- it writes ITS
+        # arguments to the SAME frame slots this call is filling in, because
+        # both compute them from F plus this function's frame size. So
+        # `two(7, id(3))` wrote 7 into slot 0, then id's own argument
+        # overwrote it, and `two` received (3, 3).
+        #
+        # When a later argument can call something, park every value on the
+        # hardware stack first and only then write the slots. CALL and RET
+        # use that stack in a balanced way, so a nested call cannot disturb
+        # what is already pushed.
+        if any(_contains_call(arg) for arg in node.args[1:]):
+            self.comment("a later argument calls something: stage via the stack")
+            for arg in node.args:
+                self._expr(arg)
+                self.emit("PUSH A")
+            for index in reversed(range(len(node.args))):
+                self.emit("POP A")
+                slot(index)
+        else:
+            for index, arg in enumerate(node.args):
+                self._expr(arg)
+                slot(index)
 
         if isinstance(node.callee, A.Identifier) and node.callee.symbol.storage == "function":
             target = node.callee.symbol.label
@@ -571,9 +603,10 @@ class CodeGen:
         if isinstance(node, A.Identifier):
             symbol = node.symbol
             if symbol.storage in ("local", "param"):
-                self.emit("MOV A, F")
                 if symbol.offset:
-                    self.emit(f"ADD A, A, #{symbol.offset}")
+                    self.emit(f"ADD A, F, #{symbol.offset}")
+                else:
+                    self.emit("MOV A, F")
             else:
                 self.emit(f"MOV A, #{symbol.label}")
             return
@@ -620,14 +653,14 @@ class CodeGen:
         if offset == 0:
             self.emit(f"{_load_op(type_)} A, F")
             return
-        self.emit("MOV C, F")
-        self.emit(f"ADD C, C, #{offset}")
+        self.emit(f"ADD C, F, #{offset}")
         self.emit(f"{_load_op(type_)} A, C")
 
     def _store_to_frame(self, offset: int, type_):
-        self.emit("MOV C, F")
         if offset:
-            self.emit(f"ADD C, C, #{offset}")
+            self.emit(f"ADD C, F, #{offset}")
+        else:
+            self.emit("MOV C, F")
         self.emit(f"{_store_op(type_)} C, A")
 
 
@@ -642,6 +675,26 @@ def _store_op(type_) -> str:
 def _invert(jump: str) -> str:
     return {"JZ": "JNZ", "JNZ": "JZ", "JL": "JGE",
             "JGE": "JL", "JG": "JLE", "JLE": "JG"}[jump]
+
+
+def _contains_call(node) -> bool:
+    """Does evaluating this expression call a function?
+
+    Only matters for arguments: a call inside one overwrites the frame
+    slots the enclosing call has already filled in.
+    """
+    if node is None or not isinstance(node, A.Node):
+        return False
+    if isinstance(node, A.Call):
+        return True
+    for value in vars(node).values():
+        if isinstance(value, A.Node):
+            if _contains_call(value):
+                return True
+        elif isinstance(value, list):
+            if any(_contains_call(item) for item in value):
+                return True
+    return False
 
 
 def _is_simple(node: A.Node) -> bool:

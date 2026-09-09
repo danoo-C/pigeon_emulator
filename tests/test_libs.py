@@ -21,7 +21,7 @@ from compiler.cc import compile_units                             # noqa: E402
 from emulator.cpu import CPU                                      # noqa: E402
 from emulator.devices import keycodes as K                        # noqa: E402
 from emulator.machine import Machine                              # noqa: E402
-from emulator.memory_map import (DISPLAY_START, DISPLAY_W,        # noqa: E402
+from emulator.memory_map import (DISPLAY_H, DISPLAY_START, DISPLAY_W,  # noqa: E402
                                  PROGRAM_LOAD_ADDR, RAM_SIZE, STACK_TOP)
 from emulator.programs import libraries_for                       # noqa: E402
 from emulator.ram import RAM                                      # noqa: E402
@@ -75,6 +75,7 @@ def returns(source: str, expected: int, *libraries):
 MEM = "#include <pigeon/mem.h>\n"
 DISPLAY = "#include <pigeon/display.h>\n"
 INPUT = "#include <pigeon/input.h>\n"
+MATH = "#include <pigeon/math.h>\n"
 
 
 # --- <pigeon/mem.h> ---------------------------------------------------------
@@ -139,8 +140,10 @@ def test_heap_used_grows():
 # --- <pigeon/display.h> -----------------------------------------------------
 
 def framebuffer(ram):
-    size = DISPLAY_W * DISPLAY_W * 4
-    return bytes(ram.mem[DISPLAY_START:DISPLAY_START + size])
+    """The screen, for a bare CPU. run() builds no IO controller, so the
+    display library stays on its software path and DISPLAY_START really is
+    the screen -- see screen_of() for the Machine case, where it is not."""
+    return bytes(ram.mem[DISPLAY_START:DISPLAY_START + DISPLAY_W * DISPLAY_H * 4])
 
 
 def lit_pixels(ram):
@@ -172,9 +175,11 @@ def test_hline_and_vline_lengths():
 
 def test_lines_clip_rather_than_bail():
     """A run that starts on-screen and leaves it draws the visible part."""
-    returns(DISPLAY + "int main(void){ disp_hline(95,0,50,RED); int n=0;"
-                      " for(unsigned i=0;i<100;i++) if(disp_get(i,0)) n++; return n; }",
-            5, "display.c")
+    start, width = DISPLAY_W - 5, 50          # starts on screen, runs off the edge
+    returns(DISPLAY + "int main(void){ disp_hline(%d,0,%d,RED); int n=0;"
+                      " for(unsigned i=0;i<DISP_W;i++) if(disp_get(i,0)) n++;"
+                      " return n; }" % (start, width),
+            DISPLAY_W - start, "display.c")
 
 
 def test_rect_area():
@@ -191,21 +196,24 @@ def test_frame_is_a_perimeter():
 
 def test_clear_fills_every_pixel():
     cpu = run(DISPLAY + "int main(void){ disp_clear(BLUE); return 0; }", "display.c")
-    assert lit_pixels(cpu.ram) == DISPLAY_W * DISPLAY_W
+    assert lit_pixels(cpu.ram) == DISPLAY_W * DISPLAY_H
 
 
 def test_line_reaches_both_ends():
-    returns(DISPLAY + "int main(void){ disp_line(0,0,99,99,WHITE);"
-                      " return disp_get(0,0) && disp_get(99,99) && disp_get(50,50) ? 1:0; }",
+    returns(DISPLAY + "int main(void){ disp_line(0,0,DISP_W-1,DISP_H-1,WHITE);"
+                      " return disp_get(0,0) && disp_get(DISP_W-1,DISP_H-1)"
+                      " && disp_get(DISP_W/2,DISP_H/2) ? 1:0; }",
             1, "display.c")
 
 
 def test_circle_is_centred():
     """Points on the axes must be r away from the centre, and the centre
     itself untouched -- an outline, not a disc."""
-    returns(DISPLAY + "int main(void){ disp_circle(50,50,10,WHITE);"
-                      " return disp_get(60,50) && disp_get(40,50) && disp_get(50,60)"
-                      " && !disp_get(50,50) ? 1 : 0; }", 1, "display.c")
+    returns(DISPLAY + "int main(void){ int cx=DISP_W/2, cy=DISP_H/2;"
+                      " disp_circle(cx,cy,10,WHITE);"
+                      " return disp_get(cx+10,cy) && disp_get(cx-10,cy)"
+                      " && disp_get(cx,cy+10) && !disp_get(cx,cy) ? 1 : 0; }",
+            1, "display.c")
 
 
 def test_text_draws_something_legible():
@@ -303,6 +311,181 @@ def test_hold_to_move_is_what_the_real_time_buffer_is_for():
     assert run_with_hid(source, lambda hid: hid.push_key(K.KEY_RIGHT, True)) == 60
 
 
+# --- <pigeon/math.h> --------------------------------------------------------
+
+def math_returns(body, expected):
+    returns(f"{MATH}int main(void) {{ {body} }}", expected, "math.c")
+
+
+@cases(
+    ("arithmetic shift right",  "return ishr(-256, 8);", -1),
+    ("shift a bigger negative", "return ishr(-1024, 4);", -64),
+    ("shift is unchanged for positives", "return ishr(1024, 4);", 64),
+    ("signed divide",           "return idiv(-256, 2);", -128),
+    ("signed divide, negative divisor", "return idiv(7, -2);", -3),
+    ("remainder follows the dividend",  "return imod(-7, 3);", -1),
+    ("remainder, negative divisor",     "return imod(7, -3);", 1),
+    ("fixed multiply by a negative",    "return fmul(-3, FX_ONE);", -3),
+    ("fixed multiply both negative",    "return fmul(-3, -FX_ONE);", 3),
+    ("fixed divide",            "return fdiv(FX(3), FX(2));", 384),
+)
+def test_sign_safety(label, body, expected):
+    """Every one of these is WRONG with the bare hardware operation.
+
+    SHR is a logical shift and DIV is unsigned, so `-256 >> 8` gives
+    16777215 and `-256 / 256` gives the same. Encapsulating that once is
+    the reason this library exists -- user/cube.c had its own copy, and
+    the next program would have written a third.
+    """
+    math_returns(body, expected)
+
+
+@cases(
+    ("divide by zero",    "return idiv(5, 0);", 0),
+    ("remainder by zero", "return imod(5, 0);", 0),
+    ("fixed divide by zero", "return fdiv(FX(5), 0);", 0),
+)
+def test_divide_by_zero_is_survivable(label, body, expected):
+    """Not tidiness: the emulator raises a Python exception on DIV by
+    zero, so an unguarded divide takes the whole machine down rather than
+    faulting the guest."""
+    math_returns(body, expected)
+
+
+@cases(
+    ("sin 0",     "return isin(0);", 0),
+    ("sin 90",    "return isin(64);", 256),
+    ("sin 180",   "return isin(128);", 0),
+    ("sin 270",   "return isin(192);", -256),
+    ("cos 0",     "return icos(0);", 256),
+    ("cos 90",    "return icos(64);", 0),
+    ("negative angles wrap", "return isin(-64);", -256),
+    ("angles past a full turn", "return isin(256 + 64);", 256),
+)
+def test_trig_quarter_points(label, body, expected):
+    math_returns(body, expected)
+
+
+def test_cos_is_sin_a_quarter_turn_ahead():
+    math_returns("int a; for (a = 0; a < 256; a++)"
+                 " if (icos(a) != isin(a + 64)) return a;"
+                 " return -1;", -1)
+
+
+@cases(("zero", "return isqrt(0);", 0), ("one", "return isqrt(1);", 1),
+       ("rounds down", "return isqrt(2);", 1), ("exact", "return isqrt(100);", 10),
+       ("large", "return isqrt(1000000);", 1000),
+       ("negative is zero", "return isqrt(-9);", 0),
+       ("fixed sqrt of 1.0", "return fsqrt(FX_ONE);", 256),
+       ("fixed sqrt of 4.0", "return fsqrt(FX(4));", 512))
+def test_roots(label, body, expected):
+    math_returns(body, expected)
+
+
+@cases(("+x", "return iatan2(0, 10);", 0),   ("+x+y", "return iatan2(10, 10);", 32),
+       ("+y", "return iatan2(10, 0);", 64),  ("-x+y", "return iatan2(10, -10);", 96),
+       ("-x", "return iatan2(0, -10);", 128),("-x-y", "return iatan2(-10, -10);", 160),
+       ("-y", "return iatan2(-10, 0);", 192),("+x-y", "return iatan2(-10, 10);", 224))
+def test_atan2_directions(label, body, expected):
+    """The axes are where a binary search goes off by one: rounding down
+    put +y at 63 instead of 64."""
+    math_returns(body, expected)
+
+
+def test_atan2_inverts_the_sine_table_exactly():
+    """Round-trip every direction: atan2(sin a, cos a) must give back a."""
+    math_returns("int a; int worst = 0; for (a = 0; a < 256; a++) {"
+                 " int g = iatan2(isin(a), icos(a)); int d = g - a;"
+                 " if (d > 128) d = d - 256; if (d < -128) d = d + 256;"
+                 " d = iabs(d); if (d > worst) worst = d; } return worst;", 0)
+
+
+@cases(("abs", "return iabs(-7);", 7), ("sign negative", "return isign(-9);", -1),
+       ("sign zero", "return isign(0);", 0), ("sign positive", "return isign(9);", 1),
+       ("min", "return imin(3, 9);", 3), ("max", "return imax(3, 9);", 9),
+       ("clamp high", "return iclamp(5, 0, 3);", 3),
+       ("clamp low", "return iclamp(-5, 0, 3);", 0),
+       ("clamp inside", "return iclamp(2, 0, 3);", 2),
+       ("fx_int truncates toward zero", "return fx_int(FX(3) + 128);", 3),
+       ("fx_int on a negative", "return fx_int(-FX(3));", -3),
+       ("fx_round goes to nearest", "return fx_round(FX(3) + 128);", 4))
+def test_integer_helpers(label, body, expected):
+    math_returns(body, expected)
+
+
+def test_random_is_seeded_and_repeatable():
+    math_returns("rand_seed(42); unsigned a = irand();"
+                 " rand_seed(42); return a == irand() ? 1 : 0;", 1)
+
+
+def test_random_stays_in_range():
+    math_returns("int i; rand_seed(7); for (i = 0; i < 300; i++) {"
+                 " int v = irand_range(-5, 5); if (v < -5 || v > 5) return 0; }"
+                 " return 1;", 1)
+
+
+def test_seeding_with_zero_does_not_stick():
+    """Zero is a fixed point of xorshift -- it would return 0 forever."""
+    math_returns("rand_seed(0); return irand() != 0 ? 1 : 0;", 1)
+
+
+def test_vec3_dot_and_cross():
+    math_returns("vec3 a; vec3 b; v3_set(&a,1,2,3); v3_set(&b,4,5,6);"
+                 " return v3_dot(&a,&b);", 32)
+    math_returns("vec3 a; vec3 b; vec3 c; v3_set(&a,1,0,0); v3_set(&b,0,1,0);"
+                 " v3_cross(&c,&a,&b); return c.x*100 + c.y*10 + c.z;", 1)
+
+
+def test_vec3_length_of_a_345_triangle():
+    math_returns("vec3 v; v3_set(&v, 3, 4, 0); return v3_length(&v);", 5)
+
+
+def test_vec3_add_sub_scale():
+    math_returns("vec3 a; vec3 b; vec3 c; v3_set(&a,1,2,3); v3_set(&b,10,20,30);"
+                 " v3_add(&c,&a,&b); return c.x*10000 + c.y*100 + c.z;", 112233)
+    math_returns("vec3 a; vec3 b; vec3 c; v3_set(&a,10,20,30); v3_set(&b,1,2,3);"
+                 " v3_sub(&c,&a,&b); return c.x*10000 + c.y*100 + c.z;", 91827)
+    math_returns("vec3 v; v3_set(&v, 10, 20, 30); v3_scale(&v, &v, FX_HALF);"
+                 " return v.x*10000 + v.y*100 + v.z;", 51015)
+
+
+def test_a_full_turn_returns_to_the_start():
+    math_returns("vec3 v; int i; v3_set(&v, 40, 0, 0);"
+                 " for (i = 0; i < 256; i++) v3_rotate_y(&v, &v, 1);"
+                 " return (iabs(v.x - 40) <= 4 && iabs(v.z) <= 4) ? 1 : 0;", 1)
+
+
+def test_rotation_by_a_quarter_turn():
+    math_returns("vec3 v; v3_set(&v, 100, 0, 0); v3_rotate_y(&v, &v, 64);"
+                 " return (iabs(v.x) <= 1 && iabs(v.z - 100) <= 1) ? 1 : 0;", 1)
+
+
+@cases("v3_rotate_x", "v3_rotate_y", "v3_rotate_z")
+def test_rotation_tolerates_aliasing(name):
+    """The cube chains rotations as v3_rotate_x(&v, &v, a). A version that
+    wrote out->x before reading in->y would corrupt the other two
+    components and give a subtly wrong shape rather than an obvious
+    failure."""
+    math_returns(f"vec3 a; vec3 b; vec3 c;"
+                 f" v3_set(&a, 11, 22, 33); v3_set(&b, 11, 22, 33);"
+                 f" {name}(&c, &a, 37);"
+                 f" {name}(&b, &b, 37);"
+                 f" return (b.x == c.x && b.y == c.y && b.z == c.z) ? 1 : 0;", 1)
+
+
+def test_project_puts_the_origin_at_the_centre():
+    math_returns("vec3 v; int sx; int sy; v3_set(&v, 0, 0, 0);"
+                 " v3_project(&v, 150, 50, 46, &sx, &sy);"
+                 " return sx * 100 + sy;", 5046)
+
+
+def test_project_survives_a_point_behind_the_eye():
+    """Depth is clamped, because a divide by zero would raise a Python
+    exception and take the emulator down, not the guest program."""
+    math_returns("vec3 v; int sx; int sy; v3_set(&v, 10, 10, -1000);"
+                 " v3_project(&v, 150, 50, 46, &sx, &sy); return 1;", 1)
+
+
 # --- the libraries together -------------------------------------------------
 
 def test_two_libraries_in_one_program():
@@ -337,8 +520,7 @@ def run_demo(setup, budget=25_000_000):
 
 
 def demo_pixels(machine):
-    size = DISPLAY_W * DISPLAY_W * 4
-    fb = bytes(machine.ram.mem[DISPLAY_START:DISPLAY_START + size])
+    fb = machine.display_io.snapshot()
     return sum(1 for i in range(0, len(fb), 4) if fb[i:i + 3] != b"\x0a\x0c\x10")
 
 
@@ -383,8 +565,12 @@ def test_demo_navigation_and_activation_stay_in_order():
 
     machine = run_demo(press)
     # BOX draws a filled inner rect at the canvas centre; CIRCLE leaves it clear.
-    centre = DISPLAY_START + ((60 + 16) * DISPLAY_W + 50) * 4
-    pixel = bytes(machine.ram.mem[centre:centre + 3])
+    # These mirror demo.c's layout, which derives from the screen size --
+    # keep them in step with the #defines at the top of that file.
+    canvas_y = DISPLAY_H // 2 + 6
+    canvas_h = DISPLAY_H - canvas_y - 14
+    centre = ((canvas_y + canvas_h // 2) * DISPLAY_W + DISPLAY_W // 2) * 4
+    pixel = machine.display_io.snapshot()[centre:centre + 3]
     assert pixel == b"\x90\x60\x20", (
         f"canvas centre is {pixel.hex()}, expected the BOX fill -- "
         f"ENTER stamped the wrong selection")
@@ -427,7 +613,7 @@ def test_present_copies_the_whole_screen():
     cpu = run(DISPLAY + "int main(void){ disp_use_back_buffer();"
                         " disp_clear(BLUE); disp_present(); return 0; }",
               "display.c", "mem.c")
-    assert lit_pixels(cpu.ram) == DISPLAY_W * DISPLAY_W
+    assert lit_pixels(cpu.ram) == DISPLAY_W * DISPLAY_H
 
 
 def test_without_a_back_buffer_drawing_is_immediate():
@@ -445,8 +631,7 @@ def test_demo_screen_is_stable_when_idle():
     machine = run_demo(lambda hid: [hid.push_key(c) for c in b"hi"],
                        budget=14_000_000)
     def lit():
-        size = DISPLAY_W * DISPLAY_W * 4
-        fb = bytes(machine.ram.mem[DISPLAY_START:DISPLAY_START + size])
+        fb = machine.display_io.snapshot()
         return sum(1 for i in range(0, len(fb), 4) if fb[i:i + 3] != b"\x0a\x0c\x10")
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -484,8 +669,10 @@ def run_cube(setup, budget=25_000_000):
 
 
 def screen_of(machine):
-    size = DISPLAY_W * DISPLAY_W * 4
-    return bytes(machine.ram.mem[DISPLAY_START:DISPLAY_START + size])
+    """Whatever is actually on screen. Not ram.mem[DISPLAY_START:] -- the
+    display library page-flips, so that address is the visible surface
+    only every other frame."""
+    return machine.display_io.snapshot()
 
 
 def test_cube_binary_exists():

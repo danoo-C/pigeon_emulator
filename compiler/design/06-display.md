@@ -1,12 +1,17 @@
 # 6. `<pigeon/display.h>` — the display library
 
-Plain C over the memory-mapped framebuffer. No IO channel, no device driver —
-the screen is just memory, so this library is pointer arithmetic and stores.
+Plain C over the memory-mapped framebuffer. Every *drawing* primitive is
+pointer arithmetic and stores — the screen is just memory. The two whole-screen
+operations are not: `disp_clear` and `disp_present` go through the display
+device on `CH_DISPLAY`, because as C loops they were 87% of the 3D cube's
+executed instructions.
 
 ## The framebuffer
 
-`DISPLAY_START` (`0x1418`), `DISPLAY_W` × `DISPLAY_H` (100 × 100) pixels, 4
-bytes each, 40,000 bytes total. Pixel `(x, y)` is at
+`DISPLAY_START` (`0x1418`), `DISPLAY_W` × `DISPLAY_H` (192 × 108, 16:9) pixels,
+4 bytes each, 82,944 bytes total. Those three names are predefined by the
+compiler from `emulator/memory_map.py`, so this is the only place they are
+written down. Pixel `(x, y)` is at
 
 ```
 DISPLAY_START + (y * DISPLAY_W + x) * 4
@@ -127,10 +132,11 @@ void disp_rect(unsigned x, unsigned y, unsigned w, unsigned h, color_t c) {
 }
 ```
 
-`disp_clear` is the degenerate case and should call `memset`-style word fill
-over the whole 40,000 bytes rather than looping in C — 10,000 stores is about
-40,000 instructions, which at ~2.5M IPS is 16 ms, or half a frame. Clearing
-every frame is affordable; doing it the slow way is not.
+`disp_clear` is the degenerate case, and it is not a loop at all: it fires
+`CMD_FILL` on `CH_DISPLAY` and the device fills the buffer in one slice
+assignment. As C it was 20,736 stores — roughly 660,000 instructions a frame
+once the compiler had spilled every local — which is why it and `disp_present`
+together dominated every profile.
 
 **`disp_line` and `disp_circle` take signed `int`** because Bresenham needs
 negative deltas. They are the only functions here that pay for signed
@@ -138,15 +144,16 @@ comparison, which is the right trade.
 
 **The font** is a 96-entry table of 6 bytes, one per glyph row, 4 bits used —
 576 bytes of static data. `disp_char` reads a row byte and tests bits high to
-low. At 4×6 the 100×100 screen holds 25 columns × 16 rows of text.
+low. At 4×6 the 192×108 screen holds 38 columns × 18 rows of text.
 
 ## What is deliberately not here
 
-No double buffering. The emulator snapshots RAM asynchronously, so a program
-that clears and redraws can be caught mid-frame and will tear. A back buffer
-would be 40,000 bytes of heap plus a `memcpy` per frame — about 10,000 word
-copies, comfortably affordable at 30 FPS. It is left out because nothing needs
-it yet, and it is a library-level change (`disp_present()`) requiring no support
-from the machine.
+~~No double buffering.~~ There is now: `disp_use_back_buffer()` and
+`disp_present()`. It did not stay a library-level change. A `memcpy` per frame
+was 20,736 word copies and showed up as 42% of the cube's instructions, so
+presenting became a page flip — the guest hands the device the address of the
+buffer it just drew (`CMD_SET_BASE`) and gets back the one that was on screen.
+The consequence is in `display.h`: the buffer you draw into after a present
+holds the frame *before* the one now showing, not a clean slate.
 
 No alpha blending, no clipping rectangles, no sprites.
