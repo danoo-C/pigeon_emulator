@@ -148,7 +148,7 @@ unrecognised key is a warning, not an error.
 | | |
 |---|---|
 | `user/demo.c` | ⭐ **start here** — a menu, a textbox and a canvas, in C |
-| `user/cube.c` | a draggable 3D wireframe cube — fixed-point maths, no FP hardware |
+| `user/cube.c` | a draggable 3D wireframe cube, built on `<pigeon/math.h>` |
 | `user/screen.asm` | ✅ runs to `HALT`, fills the screen with a bitwise pattern |
 | `user/sincos.asm` | animated plot; loops forever by design |
 | `user/ui.asm` | two alternating draw routines; loops forever by design |
@@ -177,7 +177,7 @@ emulator/             the machine (importable, no side effects on import)
 assembler/            assembler.py + README.md
 firmware/bios.asm     boot ROM source (loads programs in 4 KB chunks)
 user/                 example programs (.asm and .c alike)
-lib/pigeon/           the C libraries: mem, display, input
+lib/pigeon/           the C libraries: mem, display, input, math
 compiler/             pigeon-cc: C -> assembly
 display/              pygame client + browser front-end (talks HTTP only)
 tools/                disasm.py, bench.py
@@ -209,7 +209,7 @@ silently overlapping.
 |---|---|---|
 | `0x00000000`–`0x000003FF` | 1 KB | BIOS — CPU boots here |
 | `0x00000400`–`0x00001417` | 4 KB + 24 B | IO controller (header + data window) |
-| `0x00001418`–`0x0000B197` | 40 KB | Display framebuffer (100×100 × 4 B) |
+| `0x00001418`–`0x00015817` | 81 KB | Display framebuffer (192×108 × 4 B, 16:9) |
 | `0x00020000`–`0x0011FFFF` | 1 MB | User program (fixed load point) |
 | `0x00120000` → | | Heap, grows **up** |
 | ← `0x07FFFFFC` | | Stack, grows **down** |
@@ -290,6 +290,7 @@ that fires the command.
 | 2 `CH_HDD` | disk | `0` NOP `1` GET_SIZE `2` READ `3` WRITE `4` TRUNCATE `5` FLUSH |
 | 3 `CH_HID` | input | **real-time:** `1` mouse pos (x≪16\|y) `2` button mask `6` one key's state `7` 32-byte held-key bitmap · **FIFO:** `3` pop character `4` pop mouse edge `5` pop key edge |
 | 4 `CH_TIMER` | timers | `1` START `2` STOP `4` RESET `5` STATUS → `(status, remaining_ms)` |
+| 5 `CH_DISPLAY` | framebuffer | `1` INFO → `(w, h, size)` `2` SET_BASE (page flip, ADDRESS = the buffer to scan out) `3` GET_BASE `4` FILL (ADDRESS = destination, colour in the data window) |
 
 Input comes in **two buffers**, because guest code asks two different questions.
 The FIFOs answer *"what happened, in order"* — a key pressed and released

@@ -51,13 +51,53 @@
     }
 
     let HID = null;
-    const post = (path, body) => {
-      if (!HID) return;
-      fetch(HID + path, {method:'POST', headers:{'Content-Type':'application/json'},
-                         body: JSON.stringify(body)}).catch(()=>{});
-    };
 
-    let W=64, H=64, SIZE=64*64*4;
+    // Every update posted from here is ORDERED STATE, and fetch() does not
+    // preserve order: nothing stops several POSTs being in flight at once,
+    // and they complete in whatever sequence the network and the event loop
+    // happen to produce. A stale /mouse_pos landing after a fresh one -- or
+    // after the /mouse_event press it belongs with -- is invisible on the
+    // wire but not in the guest, which reads a drag as the DIFFERENCE
+    // between successive positions. One reordered packet is therefore one
+    // jump across the screen.
+    //
+    // So: one request in flight, with a queue behind it. The pygame client
+    // gets this for free by posting synchronously from its event loop; here
+    // it has to be built, which is why dragging glitched in the browser and
+    // not in the window.
+    //
+    // Consecutive position updates collapse into the newest, because only
+    // the latest position means anything and a fast drag would otherwise
+    // build a backlog that arrives after the gesture is over. Button and key
+    // edges are NEVER collapsed -- each is a discrete event the guest has to
+    // see, and two of them in a row are not the same as one.
+    const outbox = [];
+    let sending = false;
+
+    function post(path, body){
+      if (!HID) return;
+      const last = outbox[outbox.length - 1];
+      if (path === '/mouse_pos' && last && last.path === '/mouse_pos') last.body = body;
+      else outbox.push({path, body});
+      drain();
+    }
+
+    function drain(){
+      if (sending || !outbox.length) return;
+      sending = true;
+      const next = outbox.shift();
+      fetch(HID + next.path, {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(next.body)})
+        .catch(()=>{})
+        .finally(()=>{ sending = false; drain(); });
+    }
+
+    // No default geometry on purpose. /info is the only source of it,
+    // and guessing wrong is invisible: every frame then fails the
+    // length check below and is dropped, so the screen just stays
+    // blank with nothing logged. A stale 64x64 guess sat here through
+    // two resolution changes doing exactly that.
+    let W=0, H=0;
     const canvas = document.getElementById('screen');
     const ctx = canvas.getContext('2d');
     const clearBtn = document.getElementById('clear');
@@ -70,9 +110,13 @@
     async function init(){
       try{
         const info = await fetch('/info').then(r=>r.json());
-        W = info.w; H = info.h; SIZE = info.size;
+        W = info.w; H = info.h;
         if (info.hid_url) HID = info.hid_url;
-      }catch(e){ /* ignore, use defaults */ }
+      }catch(e){
+        document.body.textContent =
+          'Cannot reach the emulator: /info failed. Is it running?';
+        throw e;                      // stop, rather than render a guess
+      }
       wireInput();
       off.width = W; off.height = H;
       canvas.width = W * Number(scaleInput.value || 4);
@@ -99,7 +143,10 @@
         if (!resp.ok) throw new Error('bad');
         const buf = await resp.arrayBuffer();
         const arr = new Uint8ClampedArray(buf);
-        if (arr.length === W*H*4){
+        if (arr.length !== W*H*4){
+          console.warn(`frame is ${arr.length} bytes, expected ${W*H*4} `
+                       + `for ${W}x${H} -- dropping it`);
+        } else {
           const img = new ImageData(arr, W, H);
           offctx.putImageData(img, 0, 0);
           ctx.imageSmoothingEnabled = false;
@@ -122,21 +169,49 @@
     }
 
     function wireInput(){
-      let lastPos = 0;
-      canvas.addEventListener('mousemove', e => {
-        const now = performance.now();
-        if (now - lastPos < 33) return;          // ~30 Hz, same as the pygame client
-        lastPos = now;
-        post('/mouse_pos', toDisplayXY(e));
-      });
       // Browser button 0/1/2 = left/middle/right; HID wants 0/1/2 = left/right/middle.
       const BTN = {0:0, 1:2, 2:1};
+      let held = 0;               // bitmask of buttons currently down
+
+      function overCanvas(e){
+        const r = canvas.getBoundingClientRect();
+        return e.clientX >= r.left && e.clientX < r.right &&
+               e.clientY >= r.top  && e.clientY < r.bottom;
+      }
+
+      // Bound to the window rather than the canvas, but only acted on while
+      // a button is held or the pointer is actually over the screen. A
+      // canvas-only listener stops firing the moment a drag wanders off the
+      // edge, so the guest sees the pointer freeze and then jump when it
+      // comes back. toDisplayXY clamps, so an off-canvas drag pins to the
+      // edge instead -- which is what dragging past the edge should do.
+      //
+      // No rate limit: the outbox already collapses consecutive positions,
+      // so the send rate is bounded by the round trip and every position
+      // that goes out is the newest one. The 33 ms throttle this replaces
+      // did the opposite -- it held the newest position back for up to a
+      // frame, which is how a stale position ended up under a click.
+      window.addEventListener('mousemove', e => {
+        if (held || overCanvas(e)) post('/mouse_pos', toDisplayXY(e));
+      });
+
+      // The position goes first, and through the same queue, so the guest
+      // knows where the pointer was when the button moved. mousedown carried
+      // no position at all before, which left a press anchored to whatever
+      // the last throttled mousemove had reported -- up to a frame of travel
+      // away, and the whole of that gap turned into the first drag delta.
       canvas.addEventListener('mousedown', e => {
         canvas.focus();
-        if (BTN[e.button] !== undefined) post('/mouse_event', {button: BTN[e.button], pressed: true});
+        if (BTN[e.button] === undefined) return;
+        held |= 1 << e.button;
+        post('/mouse_pos', toDisplayXY(e));
+        post('/mouse_event', {button: BTN[e.button], pressed: true});
       });
       window.addEventListener('mouseup', e => {
-        if (BTN[e.button] !== undefined) post('/mouse_event', {button: BTN[e.button], pressed: false});
+        if (BTN[e.button] === undefined) return;
+        held &= ~(1 << e.button);
+        post('/mouse_pos', toDisplayXY(e));
+        post('/mouse_event', {button: BTN[e.button], pressed: false});
       });
       canvas.addEventListener('contextmenu', e => e.preventDefault());
 

@@ -63,10 +63,28 @@ PYGAME_TO_PIGEON = {
 PYGAME_TO_PIGEON.update({getattr(pygame, f"K_F{n}"): K.key_f(n) for n in range(1, 13)})
 
 
-def to_pigeon_key(key_code):
-    """pygame keycode -> pigeon keycode, or None if we do not carry it."""
+def to_pigeon_key(key_code, text=""):
+    """pygame keycode -> pigeon keycode, or None if we do not carry it.
+
+    `text` is the event's `unicode` field, and it is the only part of a
+    pygame key event that knows about the keyboard LAYOUT or about shift.
+    `event.key` is the PHYSICAL key: it reports K_9 whether or not shift
+    is down, and K_9 is 57, which is also ord('9') -- so a client that
+    trusts it passes the guest a '9' when the user typed '('. Reading
+    only event.key is why no shifted character could be typed at all:
+    not '(' or ')', not '*', '^' or '+', and no capital letter.
+
+    Named keys are matched FIRST, before the text. Their unicode is a
+    control character -- '\r' for Return, '\x1b' for Escape, '\x08' for
+    Backspace -- and one of them, Space, is printable and would otherwise
+    take a second path to the same answer.
+
+    `text` is empty on KEYUP, which is what the final branch is for.
+    """
     if key_code in PYGAME_TO_PIGEON:
         return PYGAME_TO_PIGEON[key_code]
+    if len(text) == 1 and K.is_printable(ord(text)):
+        return ord(text)
     if K.is_printable(key_code):        # printable ASCII passes straight through
         return key_code
     return None
@@ -147,6 +165,10 @@ class DisplayClient:
 
         self.status_message = ""
         self.status_ttl = 0
+
+        # Physical pygame key -> the pigeon code sent when it went down,
+        # so the release can match the press. See the KEYUP handler.
+        self._key_sent = {}
 
         # Background frame fetcher
         self._latest_frame = b"\x00" * self.frame_size
@@ -397,10 +419,22 @@ class DisplayClient:
                         hid_button = MOUSE_BUTTON_MAP.get(event.button)
                         if hid_button is not None:
                             self._send_mouse_button(hid_button, False)
-                elif event.type in (pygame.KEYDOWN, pygame.KEYUP):
-                    code = to_pigeon_key(event.key)
+                elif event.type == pygame.KEYDOWN:
+                    code = to_pigeon_key(event.key, event.unicode)
                     if code is not None:
-                        self._send_key(code, event.type == pygame.KEYDOWN)
+                        self._key_sent[event.key] = code
+                        self._send_key(code, True)
+                elif event.type == pygame.KEYUP:
+                    # Release whatever was PRESSED, not what this physical
+                    # key would translate to now. Shift is usually let go
+                    # first, so translating again here would release '9'
+                    # for a '(' that was pressed -- leaving '(' held down
+                    # in the guest's key bitmap for good.
+                    code = self._key_sent.pop(event.key, None)
+                    if code is None:
+                        code = to_pigeon_key(event.key)
+                    if code is not None:
+                        self._send_key(code, False)
 
             frame = self._get_latest_frame()
             self._render(frame, mouse_pos)

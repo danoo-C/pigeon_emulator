@@ -23,6 +23,15 @@ from assembler.assembler import Assembler      # noqa: E402
 # the pre-chunked-loader BIOS kept purely as a fixture: firmware/bios.asm
 # is free to evolve (and has), but the assembler must keep turning that
 # exact source into those exact bytes forever.
+#
+# screen and check are NOT frozen copies, and that is a weakness worth
+# knowing about: both are live programs that assemble DISPLAY_W and
+# DISPLAY_H into immediates, so changing the screen resolution changes
+# their bytes and forces a re-bless. That happened when the display went
+# from 100x100 to 192x108 -- verified first as same size, same opcodes,
+# same instruction count, only the geometry immediates moving. Freezing
+# copies the way bios_v1 is frozen would make this gate hold across a
+# resolution change instead of bending to it.
 GOLDEN = {
     "bios_v1": ("tests/golden/bios_v1.asm", "tests/golden/bios_v1.bin"),
     "screen": ("user/screen.asm", "tests/golden/screen.bin"),

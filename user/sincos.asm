@@ -12,8 +12,8 @@
 
 DISPLAY_WIDTH = DISPLAY_W
 DISPLAY_HEIGHT = DISPLAY_H
-CENTER_X = 50
-CENTER_Y = 50
+CENTER_X = DISPLAY_WIDTH / 2
+CENTER_Y = DISPLAY_HEIGHT / 2
 
 ; Bhaskara I sine approximation, valid for 0-180 degrees, mirrored for
 ; 180-360:
@@ -21,7 +21,7 @@ CENTER_Y = 50
 ; This returns a value in [0,1]; we scale directly by AMPLITUDE so the
 ; subroutine below hands back an already-scaled, already-signed offset
 ; in pixels (peak error is about 1px at this amplitude).
-AMPLITUDE = 45          ; wave swings CENTER_Y +/- this many pixels
+AMPLITUDE = DISPLAY_HEIGHT / 2 - 6   ; wave swings CENTER_Y +/- this, staying on screen
 PHASE_STEP = 24         ; degrees the wave advances per frame
 CROSSHAIR_REDRAW_INTERVAL = 10   ; redraw crosshairs every N frames (~150ms/frame)
 
@@ -61,14 +61,14 @@ VERT_LINE:
     ; Inline draw white pixel
     MOV D #DISPLAY_START
     MOV E C
-    MUL E E #100
+    MUL E E #DISPLAY_WIDTH
     ADD E E A
     MUL E E #4
     ADD D D E
     MWW D #COLOR_WHITE
     
     ADD B B #1
-    CMP B #100
+    CMP B #DISPLAY_HEIGHT
     JNZ VERT_LINE
     
     ; Horizontal line at CENTER_Y
@@ -80,14 +80,14 @@ HORIZ_LINE:
     ; Inline draw white pixel
     MOV D #DISPLAY_START
     MOV E C
-    MUL E E #100
+    MUL E E #DISPLAY_WIDTH
     ADD E E A
     MUL E E #4
     ADD D D E
     MWW D #COLOR_WHITE
     
     ADD B B #1
-    CMP B #100
+    CMP B #DISPLAY_WIDTH
     JNZ HORIZ_LINE
     
     POP F
@@ -160,7 +160,7 @@ SINE_UPDATE_LOOP:
 
     MOV A B
     MUL A A #360
-    DIV A A #100          ; A = base angle for this X (degrees, 0-359)
+    DIV A A #DISPLAY_WIDTH          ; A = base angle for this X (degrees, 0-359)
     ADD A A C             ; A = base angle + phase
 
     MOV E A
@@ -180,7 +180,7 @@ OLD_SINE_RET:
     ; Clamp old Y
     CMP F #0
     JL OLD_CLAMP_LOW
-    CMP F #100
+    CMP F #DISPLAY_HEIGHT
     JG OLD_CLAMP_HIGH
     JMP OLD_Y_READY
     
@@ -197,7 +197,7 @@ OLD_Y_READY:
     
     MOV D #DISPLAY_START
     MOV E C
-    MUL E E #100
+    MUL E E #DISPLAY_WIDTH
     ADD E E A
     MUL E E #4
     ADD D D E
@@ -209,7 +209,7 @@ OLD_Y_READY:
 
     MOV A B
     MUL A A #360
-    DIV A A #100           ; A = base angle for this X (degrees, 0-359)
+    DIV A A #DISPLAY_WIDTH           ; A = base angle for this X (degrees, 0-359)
     ADD A A E              ; A = base angle + phase
 
     MOV D A
@@ -229,7 +229,7 @@ NEW_SINE_RET:
     ; Clamp new Y
     CMP C #0
     JL NEW_CLAMP_LOW
-    CMP C #100
+    CMP C #DISPLAY_HEIGHT
     JG NEW_CLAMP_HIGH
     JMP NEW_Y_READY
     
@@ -245,7 +245,7 @@ NEW_Y_READY:
     
     MOV D #DISPLAY_START
     MOV E C
-    MUL E E #100
+    MUL E E #DISPLAY_WIDTH
     ADD E E A
     MUL E E #4
     ADD D D E
@@ -253,7 +253,7 @@ NEW_Y_READY:
     
     ; Next pixel
     ADD B B #1
-    CMP B #100
+    CMP B #DISPLAY_WIDTH
     JNZ SINE_UPDATE_LOOP
     
     ; ====== Update phases for next frame ======

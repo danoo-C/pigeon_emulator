@@ -3,7 +3,6 @@
 ; ============================================================================
 ; Constants and Memory Map
 ; ============================================================================
-DISPLAY_START = 0x1418    ; Start of display framebuffer in RAM
 DISPLAY_WIDTH = DISPLAY_W
 DISPLAY_HEIGHT = DISPLAY_H
 PIXEL_SIZE = 4
@@ -24,7 +23,7 @@ START:
     ; Initialize D as heap pointer (used to access X and Y variables)
     MOV D #HEAP_ADDRESS
 
-    ; Start the main loop: iterate through all pixels (0-9999 for 100x100 grid)
+    ; Start the main loop: iterate through every pixel on the screen
     MOV B #0                ; B will track current pixel index
 
 PIXEL_LOOP:
@@ -34,19 +33,19 @@ PIXEL_LOOP:
     ; So: Y = pixel_index / 100, X = pixel_index % 100
     ; ========================================================================
     
-    ; Calculate Y = B / DISPLAY_WIDTH (B / 100)
+    ; Calculate Y = B / DISPLAY_WIDTH
     MOV A B                 ; A = pixel_index
-    DIV A A #100            ; A = pixel_index / 100 (integer division)
+    DIV A A #DISPLAY_WIDTH  ; A = pixel_index / WIDTH (integer division)
     
     ; Store Y at HEAP_ADDRESS + Y_OFFSET
     MOV D #HEAP_ADDRESS
     ADD D D #Y_OFFSET       ; D = HEAP_ADDRESS + 4
     MWW D A                 ; Write Y to [D]
     
-    ; Calculate X = pixel_index % 100
-    ; X = pixel_index - (Y * 100)
+    ; Calculate X = pixel_index % DISPLAY_WIDTH
+    ; X = pixel_index - (Y * DISPLAY_WIDTH)
     MOV E A                 ; E = Y (from calculation above)
-    MUL E E #100            ; E = Y * 100
+    MUL E E #DISPLAY_WIDTH  ; E = Y * WIDTH
     MOV A B                 ; A = pixel_index
     SUB A A E               ; A = pixel_index - (Y * 100) = X
     
@@ -80,8 +79,8 @@ DRAW_PIXEL_RET:
     ; Increment pixel index and check if we've drawn all pixels
     ADD B B #1
     
-    ; Total pixels = DISPLAY_WIDTH * DISPLAY_HEIGHT = 100 * 100 = 10000
-    CMP B #10000
+    ; Total pixels = DISPLAY_WIDTH * DISPLAY_HEIGHT
+    CMP B #DISPLAY_WIDTH * DISPLAY_HEIGHT
     JNZ PIXEL_LOOP
     
     ; All pixels drawn, infinite loop

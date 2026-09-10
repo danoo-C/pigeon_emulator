@@ -19,17 +19,24 @@
 #include <pigeon/input.h>
 #include <pigeon/mem.h>
 
-/* --- layout, in a 100x100 screen with a 4x6 font ------------------------ */
-#define TITLE_H     9
-#define MENU_Y      13
-#define MENU_STEP   9
+/* --- layout, with a 4x6 font -------------------------------------------
+ *
+ * Top-anchored rows are absolute; anything that has to sit near the
+ * middle or the bottom is derived from DISP_H, and the text width from
+ * DISP_W. These were all literals for a 100x100 screen, so the whole
+ * lower half of the UI hung off the bottom the moment the screen
+ * changed shape. */
+#define TITLE_H     (GLYPH_H + 3)
+#define MENU_Y      (TITLE_H + 2)
+#define MENU_STEP   (GLYPH_H + 2)
 #define MENU_COUNT  3
-#define BOX_Y       44
-#define BOX_H       13
-#define CANVAS_Y    60
-#define CANVAS_H    32
-#define STATUS_Y    94
-#define TEXT_MAX    17          /* 17 glyphs * 5px = 85px, fits with a margin */
+#define LABEL_Y     (MENU_Y + MENU_COUNT * MENU_STEP + 2)
+#define BOX_Y       (LABEL_Y + GLYPH_H + 1)
+#define BOX_H       (GLYPH_H + 5)
+#define CANVAS_Y    (BOX_Y + BOX_H + 2)
+#define STATUS_Y    (DISP_H - GLYPH_H - 1)
+#define CANVAS_H    (STATUS_Y - 3 - CANVAS_Y)
+#define TEXT_MAX    ((DISP_W - 10) / (GLYPH_W + 1))
 
 #define ACCENT  0xFF30C0FF
 #define DIM     0xFF505868
@@ -51,7 +58,7 @@ static int menu_row_at(unsigned my) {
     int i = 0;
     while (i < MENU_COUNT) {
         unsigned top = MENU_Y + i * MENU_STEP;
-        if (my >= top && my < top + 7u) return i;
+        if (my >= top && my < top + (unsigned)GLYPH_H) return i;
         i++;
     }
     return -1;
@@ -69,7 +76,7 @@ static void draw_menu(void) {
     while (i < MENU_COUNT) {
         unsigned y = MENU_Y + i * MENU_STEP;
         if (i == selected) {
-            disp_rect(2, y - 1, DISP_W - 4, 8, ACCENT);
+            disp_rect(2, y - 1, DISP_W - 4, GLYPH_H + 2, ACCENT);
             disp_text(6, y, MENU[i], 0xFF000000);
             disp_text(1, y, ">", 0xFF000000);
         } else {
@@ -80,11 +87,11 @@ static void draw_menu(void) {
 }
 
 static void draw_textbox(void) {
-    disp_text(2, BOX_Y - 8, "TYPE:", DIM);
+    disp_text(2, LABEL_Y, "TYPE:", DIM);
     disp_frame(2, BOX_Y, DISP_W - 4, BOX_H, DIM);
-    disp_text(5, BOX_Y + 4, text, WHITE);
+    disp_text(5, BOX_Y + 3, text, WHITE);
     /* the caret sits just past the last glyph */
-    disp_vline(5 + text_len * (GLYPH_W + 1), BOX_Y + 3, 7, ACCENT);
+    disp_vline(5 + text_len * (GLYPH_W + 1), BOX_Y + 2, GLYPH_H + 2, ACCENT);
 }
 
 /* The canvas redraws whatever the last ENTER stamped. Each branch uses a
@@ -111,7 +118,7 @@ static void draw_canvas(void) {
     }
 
     /* whatever was typed, echoed across the canvas */
-    if (text_len > 0) disp_text(3, CANVAS_Y + CANVAS_H - 8, text, WHITE);
+    if (text_len > 0) disp_text(3, CANVAS_Y + CANVAS_H - GLYPH_H - 1, text, WHITE);
 }
 
 static void draw_status(void) {
@@ -259,6 +266,6 @@ int main(void) {
     }
 
     disp_clear(0xFF0A0C10);
-    disp_text(20, 45, "BYE", ACCENT);
+    disp_text(DISP_W / 2 - 6, DISP_H / 2 - 3, "BYE", ACCENT);
     return key_count;
 }

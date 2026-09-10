@@ -1,30 +1,11 @@
-/* Keyboard and mouse over IO channel 3. See input.h.
+/* Keyboard and mouse over IO channel CH_HID. See input.h.
  *
- * Every call programs the IO header and then fires the channel. Two
- * properties of the machine make this work, and both are worth knowing:
- *
- * The command completes before the next instruction. Writing the channel
- * arms a pending flag that the main loop services as soon as the store
- * retires, so the reply is in the data window by the time the next C
- * statement runs. There is no completion flag to poll.
- *
- * `volatile` is load-bearing. These are device registers, not memory, and
- * the ORDER of the stores is the protocol -- the channel store must come
- * last. This compiler never caches a load across a statement, so the
- * sequence survives, but the qualifier documents the requirement.
+ * Every call programs the IO header and then fires the channel; the reply
+ * is in the data window by the time the next C statement runs. The bus
+ * rules, and why the channel store must come last, are in <pigeon/io.h>.
  */
 #include <pigeon/input.h>
-
-#define IO_BASE 0x400
-#define CH_HID  3
-
-#define IO_CHANNEL  (*(volatile unsigned *)(IO_BASE +  0))
-#define IO_RW       (*(volatile unsigned *)(IO_BASE +  4))
-#define IO_COMMAND  (*(volatile unsigned *)(IO_BASE +  8))
-#define IO_LENGTH   (*(volatile unsigned *)(IO_BASE + 12))
-#define IO_ADDRESS  (*(volatile unsigned *)(IO_BASE + 16))
-#define IO_RETLEN   (*(volatile unsigned *)(IO_BASE + 20))
-#define IO_DATA     ((volatile unsigned char *)(IO_BASE + 24))
+#include <pigeon/io.h>
 
 #define CMD_MOUSE_POS     1
 #define CMD_MOUSE_BUTTONS 2
@@ -38,10 +19,10 @@
  * that take one (only CMD_KEY_STATE, so far). */
 static void hid_call(unsigned command, unsigned length, unsigned address) {
     IO_RW = 0;                     /* read */
-    IO_COMMAND = command;
-    IO_LENGTH = length;
-    IO_ADDRESS = address;
-    IO_CHANNEL = CH_HID;           /* this store fires it -- must be last */
+    IO_CMD = command;
+    IO_LEN = length;
+    IO_ADDR = address;
+    IO_CH = CH_HID;                /* this store fires it -- must be last */
 }
 
 static unsigned hid_word(unsigned command, unsigned length, unsigned address) {

@@ -435,8 +435,15 @@ committed binaries, faults at the identical PC with the identical register
 state (B = 31,487). Say the word and I'll fix the program and re-bless the
 fixture.
 
+*(The B and PC values above were measured at 100×100. At 192×108 the program
+still paints the whole screen correctly and still runs past its bound into its
+own code — same bug, same mechanism — but it now faults at `0x20020`. The loop
+bound is `DISPLAY_W * DISPLAY_H` rather than a hardcoded `10000` since the
+resolution change, which does not fix it: `JMP DRAW_PIXEL_RET` still skips the
+increment, so the index steps over whatever the bound is.)*
+
 Use `user/screen.asm` for a clean end-to-end demo — it runs to `HALT` and fills
-9,999 of 10,000 pixels.
+the screen.
 
 ### 6.4 📝 Other guest-program bugs
 
@@ -575,7 +582,7 @@ cmp build/bios.bin tests/golden/bios.bin && echo "byte-exact"
 # end to end
 python3 assembler/assembler.py user/screen.asm build/screen.bin
 python3 start_emulator.py --program build/screen.bin --run
-curl -s localhost:8000/info                 # {"w":100,"h":100,"size":40000}
+curl -s localhost:8000/info                 # {"w":192,"h":108,"size":82944,...}
 
 # nothing is pure padding any more
 python3 -c "

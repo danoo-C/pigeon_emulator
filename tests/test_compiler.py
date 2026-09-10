@@ -192,6 +192,36 @@ def test_nested_calls_do_not_corrupt_the_frame():
             "int main(void){ return add(add(1,2), add(3,4)); }", 10)
 
 
+TWO = "int two(int a, int b){ return a*100 + b; } int id(int x){ return x; }"
+
+
+@cases(
+    ("nested in the last argument",  "two(7, id(3))", 703),
+    ("nested in the first argument", "two(id(7), 3)", 703),
+    ("nested in both",               "two(id(7), id(3))", 703),
+    ("no nesting at all",            "two(7, 3)", 703),
+    ("an argument that is an expression containing a call",
+     "two(id(7), id(1) + id(2))", 703),
+)
+def test_a_nested_call_does_not_overwrite_an_earlier_argument(label, expr, expected):
+    """A nested call does not only clobber registers -- it writes ITS
+    arguments to the SAME frame slots the enclosing call is filling in,
+    because both compute them from F plus the caller's frame size.
+
+    `two(7, id(3))` returned 303: 7 went into slot 0, then id's own
+    argument overwrote it, so `two` received (3, 3). The test above only
+    passed by luck -- in `add(add(1,2), add(3,4))` the inner call's first
+    argument happened to equal what the slot was supposed to hold.
+    """
+    returns(f"{TWO} int main(void){{ return {expr}; }}", expected)
+
+
+def test_three_nested_arguments_all_survive():
+    returns("int three(int a,int b,int c){ return a*10000 + b*100 + c; }"
+            "int id(int x){ return x; }"
+            "int main(void){ return three(id(1), id(2), id(3)); }", 10203)
+
+
 def test_deep_recursion_keeps_the_frame_pointer_straight():
     returns("int down(int n){ if(n==0) return 0; return 1 + down(n-1); }"
             "int main(void){ return down(200); }", 200)

@@ -5,71 +5,115 @@
  *   space                     toggle auto-spin
  *   escape                    quit
  *
- * There is no floating point on this machine, so everything here is
- * fixed point: angles are 0..255 around the circle and the sine table
- * below is scaled by 256 (call it Q8).
+ * All the arithmetic lives in <pigeon/math.h>: there is no floating
+ * point on this machine, angles are 0..255 around the circle, and the
+ * fixed-point helpers are the ones that know SHR is a logical shift and
+ * DIV is unsigned. This file is just the cube.
  *
- * Two machine facts drive the odd-looking helpers:
- *
- *   SHR is a LOGICAL shift -- zeros come in at the top -- so `x >> 8` on
- *   a negative number is garbage, not a divide by 256.
- *   DIV is UNSIGNED, so `a / b` with either side negative is wrong too.
- *
- * So smul() and sdiv() take the sign off, do the work on positives where
- * the hardware is correct, and put the sign back.
+ * The auto-spin is paced off the wall clock, not off the frame counter --
+ * see "the clock" below for why.
  *
  * Build:
  *   python3 start_emulator.py cube --run
  */
 #include <pigeon/display.h>
 #include <pigeon/input.h>
+#include <pigeon/io.h>
+#include <pigeon/math.h>
 
-#define FP      8           /* fractional bits */
-#define ONE     256         /* 1.0 in Q8 */
 #define HALF    30          /* half the cube's edge, in world units */
 #define DIST    150         /* eye distance; larger = flatter perspective */
-#define CX      50          /* screen centre */
-#define CY      46
+#define CX      (DISP_W / 2)          /* screen centre */
+#define CY      (DISP_H / 2 - 4)      /* a little high, to clear the caption */
+
+/* A full turn is 256 steps, so a drag across the whole screen should be
+ * about one revolution. The screen is no longer square, so the two axes
+ * do NOT share a gain -- with one, a horizontal drag out-rotates a
+ * vertical one by the aspect ratio. */
+#define YAW_GAIN   (256 / DISP_W)
+#define PITCH_GAIN (256 / DISP_H)
+
+/* Auto-spin rates, in Q8 angle steps per millisecond -- the same Q8 as
+ * <pigeon/math.h>, so 256 of these is one whole step and a turn is 256
+ * steps. 8 is therefore one revolution every 8.2 seconds. The pitch keeps
+ * the 1:4 ratio it had back when it was gated on every fourth frame. */
+#define YAW_RATE    8
+#define PITCH_RATE  2
 
 #define FACE    0xFF30C0FF
 #define EDGE    0xFF60E0FF
 #define BACK    0xFF102030
 #define DIM     0xFF505868
 
-static int SIN[256] = {
-        0,     6,    13,    19,    25,    31,    38,    44,
-       50,    56,    62,    68,    74,    80,    86,    92,
-       98,   104,   109,   115,   121,   126,   132,   137,
-      142,   147,   152,   157,   162,   167,   172,   177,
-      181,   185,   190,   194,   198,   202,   206,   209,
-      213,   216,   220,   223,   226,   229,   231,   234,
-      237,   239,   241,   243,   245,   247,   248,   250,
-      251,   252,   253,   254,   255,   255,   256,   256,
-      256,   256,   256,   255,   255,   254,   253,   252,
-      251,   250,   248,   247,   245,   243,   241,   239,
-      237,   234,   231,   229,   226,   223,   220,   216,
-      213,   209,   206,   202,   198,   194,   190,   185,
-      181,   177,   172,   167,   162,   157,   152,   147,
-      142,   137,   132,   126,   121,   115,   109,   104,
-       98,    92,    86,    80,    74,    68,    62,    56,
-       50,    44,    38,    31,    25,    19,    13,     6,
-        0,    -6,   -13,   -19,   -25,   -31,   -38,   -44,
-      -50,   -56,   -62,   -68,   -74,   -80,   -86,   -92,
-      -98,  -104,  -109,  -115,  -121,  -126,  -132,  -137,
-     -142,  -147,  -152,  -157,  -162,  -167,  -172,  -177,
-     -181,  -185,  -190,  -194,  -198,  -202,  -206,  -209,
-     -213,  -216,  -220,  -223,  -226,  -229,  -231,  -234,
-     -237,  -239,  -241,  -243,  -245,  -247,  -248,  -250,
-     -251,  -252,  -253,  -254,  -255,  -255,  -256,  -256,
-     -256,  -256,  -256,  -255,  -255,  -254,  -253,  -252,
-     -251,  -250,  -248,  -247,  -245,  -243,  -241,  -239,
-     -237,  -234,  -231,  -229,  -226,  -223,  -220,  -216,
-     -213,  -209,  -206,  -202,  -198,  -194,  -190,  -185,
-     -181,  -177,  -172,  -167,  -162,  -157,  -152,  -147,
-     -142,  -137,  -132,  -126,  -121,  -115,  -109,  -104,
-      -98,   -92,   -86,   -80,   -74,   -68,   -62,   -56,
-      -50,   -44,   -38,   -31,   -25,   -19,   -13,    -6
-};
+
+/* --- the clock ------------------------------------------------------------
+ *
+ * The auto-spin used to advance one step per frame, which pinned its
+ * speed to however fast the emulator happened to run -- so the same
+ * binary now whips round tens of times faster than it did before the
+ * interpreter and the codegen were optimised. Spinning by elapsed real
+ * time instead makes the speed a property of the demo rather than of the
+ * host it lands on.
+ *
+ * CH_TIMER counts down in wall-clock milliseconds; <pigeon/io.h> has the
+ * bus rules, and the reply is two words in the data window: the status,
+ * then the milliseconds left. Reading that twice and subtracting gives
+ * the frame's duration. Both readings come off one absolute countdown, so
+ * a frame shorter than a millisecond reads as 0 ms and its remainder
+ * turns up in a later frame instead of being rounded away -- which
+ * matters here, because frames now are that short.
+ */
+#define TIMER_ID      0
+#define TCMD_START    1
+#define TCMD_STATUS   5
+
+#define CLOCK_SPAN    10000u   /* ms per countdown, renewed well before zero */
+#define CLOCK_LOW      1000u   /* renew it once the span is down to this */
+#define CLOCK_MAX_DT    100u   /* a longer gap is a stall, not motion */
+
+static unsigned clock_left;    /* ms left on the countdown, as last read */
+
+static unsigned clock_read(void) {
+    IO_RW = 0;                             /* read */
+    IO_CMD = TCMD_STATUS;
+    IO_LEN = 0;
+    IO_ADDR = TIMER_ID;
+    IO_CH = CH_TIMER;                      /* this store fires it -- last */
+    return IO_DATAW[1];                    /* word 0 is status, word 1 the ms */
+}
+
+static void clock_restart(void) {
+    IO_RW = 0;
+    IO_CMD = TCMD_START;
+    IO_LEN = CLOCK_SPAN;                   /* for START, LEN is a duration */
+    IO_ADDR = TIMER_ID;
+    IO_CH = CH_TIMER;
+    clock_left = CLOCK_SPAN;
+}
+
+/* Milliseconds since the previous call; 0 on the first one. */
+static unsigned clock_delta(void) {
+    unsigned left = clock_read();
+    unsigned dt;
+
+    /* 0 means never started or run out; larger than last time means the
+     * countdown was renewed underneath us. Neither is a measurable gap. */
+    if (left == 0u || left > clock_left) {
+        clock_restart();
+        return 0u;
+    }
+
+    dt = clock_left - left;
+    clock_left = left;
+
+    /* Renew after taking the reading, so the span rolls over without
+     * costing a frame's worth of time. */
+    if (left < CLOCK_LOW) clock_restart();
+
+    if (dt > CLOCK_MAX_DT) dt = CLOCK_MAX_DT;
+    return dt;
+}
+
 
 /* Eight corners of a cube, and the twelve edges joining them. */
 static int VX[8] = { -HALF,  HALF,  HALF, -HALF, -HALF,  HALF,  HALF, -HALF };
@@ -85,65 +129,27 @@ static int PY[8];
 
 int angle_x;
 int angle_y;
+unsigned spin_x_acc;      /* Q8 fractions of a step, waiting to carry */
+unsigned spin_y_acc;
 int spinning;
 int dragging;
 int last_mx;
 int last_my;
 int running;
 
-/* --- sign-safe fixed point ---------------------------------------------- */
-
-/* (a * b) >> FP, correct for negative operands. */
-static int smul(int a, int b) {
-    int negative = 0;
-    int result;
-    if (a < 0) { a = -a; negative = 1; }
-    if (b < 0) { b = -b; negative = !negative; }
-    result = (a * b) >> FP;
-    return negative ? -result : result;
-}
-
-/* a / b, correct for negative operands. */
-static int sdiv(int a, int b) {
-    int negative = 0;
-    int result;
-    if (b == 0) return 0;
-    if (a < 0) { a = -a; negative = 1; }
-    if (b < 0) { b = -b; negative = !negative; }
-    result = a / b;
-    return negative ? -result : result;
-}
-
-static int isin(int angle) { return SIN[angle & 255]; }
-static int icos(int angle) { return SIN[(angle + 64) & 255]; }
-
 /* --- the actual 3D --------------------------------------------------------
  *
  * Rotate about Y, then about X, then divide by depth for perspective.
  */
 static void project(void) {
-    int sy = isin(angle_y);
-    int cy = icos(angle_y);
-    int sx = isin(angle_x);
-    int cx = icos(angle_x);
+    vec3 v;
     int i;
 
     for (i = 0; i < 8; i++) {
-        int x = VX[i];
-        int y = VY[i];
-        int z = VZ[i];
-
-        int x1 = smul(x, cy) - smul(z, sy);      /* yaw   */
-        int z1 = smul(x, sy) + smul(z, cy);
-
-        int y2 = smul(y, cx) - smul(z1, sx);     /* pitch */
-        int z2 = smul(y, sx) + smul(z1, cx);
-
-        /* Perspective. The cube's half-diagonal is about 52, and DIST is
-         * 150, so the denominator cannot reach zero -- no guard needed. */
-        int depth = DIST + z2;
-        PX[i] = CX + sdiv(x1 * DIST, depth * 2);
-        PY[i] = CY + sdiv(y2 * DIST, depth * 2);
+        v3_set(&v, VX[i], VY[i], VZ[i]);
+        v3_rotate_y(&v, &v, angle_y);          /* yaw, then pitch -- the */
+        v3_rotate_x(&v, &v, angle_x);          /* library tolerates out == in */
+        v3_project(&v, DIST, CX, CY, &PX[i], &PY[i]);
     }
 }
 
@@ -153,7 +159,8 @@ static void draw_cube(void) {
 
     /* a floor grid, so the rotation reads as rotation */
     for (i = 0; i < 5; i++) {
-        disp_hline(10, 78 + i * 4, 80, i == 0 ? DIM : 0xFF202838);
+        disp_hline(DISP_W / 10, DISP_H - 30 + i * 4, (DISP_W * 8) / 10,
+                   i == 0 ? DIM : 0xFF202838);
     }
 
     for (i = 0; i < 12; i++) {
@@ -169,7 +176,7 @@ static void draw_cube(void) {
     }
 
     disp_text(2, 2, dragging ? "DRAG" : (spinning ? "SPIN" : "HOLD"), DIM);
-    disp_text(2, 92, "drag to rotate", DIM);
+    disp_text(2, DISP_H - GLYPH_H - 2, "drag to rotate", DIM);
     disp_present();
 }
 
@@ -188,10 +195,8 @@ static void handle_mouse(void) {
 
     if (buttons & MB_LEFT) {
         if (dragging) {
-            /* Screen is 100 px wide and a full turn is 256 steps, so
-             * dragging across the window is a bit over one revolution. */
-            angle_y = angle_y + (mx - last_mx) * 2;
-            angle_x = angle_x + (my - last_my) * 2;
+            angle_y = angle_y + (mx - last_mx) * YAW_GAIN;
+            angle_x = angle_x + (my - last_my) * PITCH_GAIN;
         }
         dragging = 1;
         last_mx = mx;
@@ -217,29 +222,42 @@ int main(void) {
 
     angle_x = 24;
     angle_y = 32;
+    spin_x_acc = 0;
+    spin_y_acc = 0;
     spinning = 1;
     dragging = 0;
     running = 1;
 
+    clock_restart();
+
     while (running) {
+        unsigned dt = clock_delta();
+
         handle_keys();
         handle_mouse();
 
         /* Auto-spin only when the mouse is not driving it, so a drag
-         * feels like it is holding the cube rather than fighting it. */
+         * feels like it is holding the cube rather than fighting it. The
+         * rates are per millisecond and in Q8, so most frames add a
+         * fraction of a step; the accumulators keep what has not carried
+         * into a whole step yet. */
         if (spinning && !dragging) {
-            angle_y = angle_y + 1;
-            if ((frame & 3) == 0) angle_x = angle_x + 1;
+            spin_y_acc = spin_y_acc + YAW_RATE * dt;
+            spin_x_acc = spin_x_acc + PITCH_RATE * dt;
+            angle_y = angle_y + (int)(spin_y_acc >> FX_BITS);
+            angle_x = angle_x + (int)(spin_x_acc >> FX_BITS);
+            spin_y_acc = spin_y_acc & (FX_ONE - 1);
+            spin_x_acc = spin_x_acc & (FX_ONE - 1);
         }
 
-        angle_x = angle_x & 255;
-        angle_y = angle_y & 255;
+        angle_x = angle_x & ANGLE_MASK;
+        angle_y = angle_y & ANGLE_MASK;
 
         project();
         draw_cube();
 
-        frame++;
-        if (frame > 2000000) running = 0;
+        // frame++;
+        // if (frame > 2000000) running = 0;
     }
     return 0;
 }

@@ -16,3 +16,7 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# PyPy, extracted here so it stays out of the system Python and every
+# other project. Delete this folder to remove it entirely.
+.pypy/

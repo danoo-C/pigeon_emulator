@@ -39,18 +39,10 @@ from emulator.memory_map import PROGRAM_MAX_SIZE, REGISTER_COUNT
 REG_NAME_TO_IDX = {chr(ord('A') + i): i for i in range(REGISTER_COUNT)}
 
 
-def _memory_map_symbols() -> Dict[str, int]:
-    """Every uppercase int in memory_map, plus the IO header offsets."""
-    symbols = {n: v for n, v in vars(memory_map).items()
-               if n.isupper() and isinstance(v, int) and not isinstance(v, bool)}
-    for field, value in vars(memory_map.IOHeader).items():
-        if field.isupper() and isinstance(value, int):
-            # IOHeader.COMMAND -> IO_COMMAND; IOHeader.IO_R_W stays IO_R_W
-            symbols[field if field.startswith("IO_") else f"IO_{field}"] = value
-    return symbols
-
-
-BUILTIN_SYMBOLS = _memory_map_symbols()
+# Every uppercase int in the memory map, plus the IO header offsets. The
+# rule lives in memory_map.symbols() rather than here so the C compiler
+# can inject exactly the same names as macros -- see compiler/cc.py.
+BUILTIN_SYMBOLS: Dict[str, int] = memory_map.symbols()
 
 LABEL_RE = re.compile(r'^([A-Za-z_.$][\w.$]*)\s*:\s*')
 DIRECTIVE_RE = re.compile(r'^(\.\w+)\s*(.*)$', re.DOTALL)

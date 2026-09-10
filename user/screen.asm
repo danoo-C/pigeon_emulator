@@ -1,9 +1,9 @@
 ; RGB Fade Display Program
 ; 
 ; Display formula: R = X + Y, G = X, B = Y
-; Creates a smooth gradient fade across the 64x64 display
+; Creates a smooth gradient fade across the display
 ;
-; Pixel format: [B, G, R, A] at DISPLAY_START + (Y*64 + X)*4
+; Pixel format: [B, G, R, A] at DISPLAY_START + (Y*DISPLAY_W + X)*4
  
 .ORG 0x20000
  
@@ -29,7 +29,7 @@ LOOP_X:
     CMP D #DISPLAY_WIDTH
     JGE NEXT_Y
     
-    ; Calculate pixel offset: (Y * 64 + X) * 4
+    ; Calculate pixel offset: (Y * DISPLAY_WIDTH + X) * 4
     ; offset = (Y * WIDTH + X) * PIXEL_SIZE
     
     MOV A E               ; A = Y

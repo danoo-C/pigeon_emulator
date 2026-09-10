@@ -1,6 +1,6 @@
 # The C libraries
 
-Three headers, compiled by `pigeon-cc` and covered by execution tests in
+Four headers, compiled by `pigeon-cc` and covered by execution tests in
 `tests/test_libs.py` — every test compiles the C and *runs* it.
 
 | Header | What it gives you |
@@ -8,6 +8,7 @@ Three headers, compiled by `pigeon-cc` and covered by execution tests in
 | `<pigeon/mem.h>` | `memcpy` `memmove` `memset` `memcmp`, `malloc` `calloc` `free`, `heap_used` |
 | `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped |
 | `<pigeon/input.h>` | mouse position/buttons/edges, keyboard characters, key edges, held-key state |
+| `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
 
 There is no linker: units are compiled together, so pass the library
 sources on the command line.
@@ -26,7 +27,8 @@ Adequate here because the other two libraries allocate nothing at runtime.
 
 `memcpy` and `memset` move a word at a time while both pointers are aligned,
 then finish byte by byte. That is not a micro-optimisation: the byte loop is
-about four instructions per byte and the framebuffer is 40,000 bytes.
+about four instructions per byte and the framebuffer is 82,944 bytes.
+(`disp_clear` no longer pays that: it is a hardware fill on CH_DISPLAY.)
 
 ## display
 
@@ -70,3 +72,44 @@ and released inside one frame. Use the right one.
 Keycodes are one byte: printable ASCII passes through, named keys live in
 `0x80`–`0x9F`. Front ends translate into that space; the device rejects
 anything wider rather than truncating it.
+
+## math
+
+Fixed point is **Q8** — one unit is 256 — and that is forced, not chosen.
+`MUL` truncates to 32 bits, so a Qn multiply needs both raw operands under
+about 46,340: Q8 leaves ±181 units of range, Q16 leaves ±0.7.
+
+The library exists because **three operations are wrong on negatives**, and
+all three appear throughout 3D maths:
+
+```
+-256 >> 8    gives 16777215     SHR is a LOGICAL shift
+-256 / 256   gives 16777215     DIV is unsigned
+-256 * 2     gives -512         MUL is fine
+```
+
+Only the shift is genuinely broken — the machine multiplies the low 32 bits
+in two's complement, which is what C wants. So `fmul` is one sign-safe
+shift, not the two sign-strips `user/cube.c` used to carry.
+
+Angles are **0..255 for a full turn**, so wrapping is one `AND` rather than
+the DIV+MUL+SUB that `% 360` compiles to. `isin`/`icos` return Q8 in
+[-256, 256]; `iatan2` inverts them exactly, with zero error across all 256
+directions.
+
+**Every divide guards against zero** — not for tidiness, but because the
+emulator raises a Python exception on `DIV` by zero, so an unguarded divide
+takes the whole machine down rather than faulting the guest.
+
+Vectors are passed by pointer, never by value: six registers and
+memory-passed arguments make copying twelve bytes per call pure waste. Every
+`v3_*` tolerates `out == in`, so chaining works:
+
+```c
+v3_rotate_y(&v, &v, yaw);
+v3_rotate_x(&v, &v, pitch);
+v3_project(&v, DIST, CX, CY, &sx, &sy);
+```
+
+That is exactly what `user/cube.c` does, and why the aliasing rule is a
+documented guarantee rather than an accident.

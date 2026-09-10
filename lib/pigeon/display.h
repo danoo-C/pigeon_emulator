@@ -12,9 +12,15 @@
 #ifndef PIGEON_DISPLAY_H
 #define PIGEON_DISPLAY_H
 
-#define DISP_W 100
-#define DISP_H 100
-#define DISP_BASE 0x1418
+/* The geometry comes from the machine, not from here. DISPLAY_W,
+ * DISPLAY_H and DISPLAY_START are predefined by the compiler out of
+ * emulator/memory_map.py -- the same names the assembler injects. These
+ * three were literals until the screen changed shape, and nothing
+ * checked them against the machine; a resolution change updated the
+ * emulator and left every C program drawing at the old size. */
+#define DISP_W    DISPLAY_W
+#define DISP_H    DISPLAY_H
+#define DISP_BASE DISPLAY_START
 
 typedef unsigned int color_t;
 
@@ -39,8 +45,26 @@ typedef unsigned int color_t;
  *     for (;;) { draw_everything(); disp_present(); }
  *
  * The buffer comes from the heap, so it costs nothing in the program
- * image -- 40,000 bytes of `.space` would otherwise be copied by the
- * BIOS on every boot.
+ * image -- a screen of `.space` would otherwise be copied by the BIOS on
+ * every boot.
+ *
+ * disp_present() is a PAGE FLIP, not a copy. It hands the display the
+ * address of the buffer you just drew and hands you back the one that
+ * was on screen. Both surfaces are real and both keep their contents, so
+ *
+ *     the buffer you draw into after a present still holds the frame
+ *     BEFORE the one now showing -- not a clean slate.
+ *
+ * Clear it, or write every pixel. disp_clear() is a hardware fill and
+ * costs about six instructions, so there is no reason not to. The one
+ * pattern this breaks is redrawing only what changed: the parts you skip
+ * are two frames old, not one.
+ *
+ * disp_get() reads through the draw target, so after a present it reads
+ * that same two-frames-ago image, not what is on screen.
+ *
+ * With no display device on the bus -- a bare CPU, as tests/test_libs.py
+ * builds -- present falls back to copying and none of the above applies.
  */
 int  disp_use_back_buffer(void);   /* 0 if the heap could not provide one */
 void disp_present(void);           /* copy the back buffer to the screen  */
@@ -58,9 +82,19 @@ void disp_frame(unsigned x, unsigned y, unsigned w, unsigned h, color_t c);
 void disp_line(int x0, int y0, int x1, int y1, color_t c);
 void disp_circle(int cx, int cy, int r, color_t c);
 
-/* --- text: a 4x6 font over printable ASCII ----------------------------- */
-#define GLYPH_W 4
-#define GLYPH_H 6
+/* --- text: a 5x7 font over printable ASCII -----------------------------
+ *
+ * GLYPH_W x GLYPH_H is the CELL, not the ink. The glyph body is 5x7 on
+ * rows 0..6 with the baseline on row 6; row 7 carries the descenders of
+ * g j p q y and the tails of , ; _. Leave a column between cells --
+ * disp_text() advances by GLYPH_W + 1 -- and a row between lines.
+ *
+ * Lay text out from these two names rather than from 5 and 8. The font
+ * was 4x6 until it became unreadable, and every caller that had baked
+ * the old numbers into a y-offset drew its next line through the
+ * descenders. */
+#define GLYPH_W 5
+#define GLYPH_H 8
 void disp_char(unsigned x, unsigned y, int ch, color_t fg);
 void disp_text(unsigned x, unsigned y, char *s, color_t fg);
 

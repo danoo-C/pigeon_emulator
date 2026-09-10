@@ -20,7 +20,8 @@ from .devices.hid import HID
 from .devices.timer import Timer
 from .io_controller import IOChannel, IOController
 from .memory_map import (
-    CH_HDD, CH_HID, CH_TIMER, CH_USERPROG, RAM_SIZE, REGISTER_COUNT,
+    CH_DISPLAY, CH_HDD, CH_HID, CH_TIMER, CH_USERPROG, RAM_SIZE,
+    REGISTER_COUNT,
 )
 from .ram import RAM
 
@@ -59,15 +60,18 @@ class Machine:
         self.hdd = HDD(disk_path)
         self.hid = HID()
         self.timer = Timer()
+        # Constructed before the loop below, not after: it is a device on
+        # the bus now (scanout base, framebuffer fill), not only the thing
+        # that serves frames over HTTP.
+        self.display_io = DisplayIO(self.ram)
         for channel_id, device, name in (
             (CH_HDD, self.hdd, "HDD"),
             (CH_HID, self.hid, "HID"),
             (CH_TIMER, self.timer, "TIMER"),
+            (CH_DISPLAY, self.display_io, "DISPLAY"),
         ):
             self.io_controller.register_channel(
                 channel_id, IOChannel(device.callback, name=name))
-
-        self.display_io = DisplayIO(self.ram)
 
         self.bios = BIOS.from_file(bios_path)
         self.bios.write_bios(self.ram)
@@ -158,10 +162,10 @@ class Machine:
                 break
 
             pc = cpu.pc
-            try:
-                opcode, dst, src1, src2, imm = unpack(memory, pc)
-            except struct.error:
-                raise RuntimeError(f"Fetch past end of memory at PC={pc:#06x}") from None
+            # try:
+            opcode, dst, src1, src2, imm = unpack(memory, pc)
+            # except struct.error:
+            #     raise RuntimeError(f"Fetch past end of memory at PC={pc:#06x}") from None
             cpu.pc = pc + instruction_size
 
             handler = handlers[opcode]

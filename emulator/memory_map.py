@@ -14,7 +14,7 @@ and silently drew into the IO region instead of the screen.
 
     0x00000000 - 0x000003FF   BIOS              (1 KB)   <- CPU boots here
     0x00000400 - 0x00001417   IO controller     (4 KB + 24 B header)
-    0x00001418 - 0x0000B197   display           (40 KB, 100x100 x 4 B)
+    0x00001418 - 0x00015817   display           (81 KB, 192x108 x 4 B, 16:9)
     0x00020000 - 0x0011FFFF   program (static)  (1 MB, fixed load point)
     0x00120000 - ...          HEAP -- grows UP toward higher addresses
                                   ... free space ...
@@ -67,7 +67,7 @@ IO_SIZE  = 0x00001000 + IOHeader.USABLE_AFTER  # 4 KB + 24 bytes for the header,
 # --- Display (memory-mapped video) ---
 DISPLAY_START = IO_START + IO_SIZE  # right after the IO region
 
-DISPLAY_W, DISPLAY_H = 100, 100
+DISPLAY_W, DISPLAY_H = 192, 108   # 16:9
 DISPLAY_SIZE  = DISPLAY_W * DISPLAY_H * 4   # 4 bytes per pixel
 
 
@@ -90,5 +90,28 @@ CH_USERPROG = 1   # disk holding the user program; the BIOS boots from here
 CH_HDD      = 2   # general-purpose file-backed disk
 CH_HID      = 3   # mouse + keyboard
 CH_TIMER    = 4   # wall-clock countdown timers
+CH_DISPLAY  = 5   # framebuffer: scanout base, block fill
+
+
+def symbols():
+    """This module's constants, as the toolchains see them.
+
+    The assembler injects these as predefined symbols and the C compiler
+    as predefined macros, so a source can say DISPLAY_W instead of
+    retyping 100 -- which is how user/ui.asm ended up drawing into the IO
+    region after someone hand-copied a stale address.
+
+    One rule, defined here rather than in either toolchain, because the
+    two must not disagree about what a name means. lib/pigeon/display.h
+    used to carry its own copy of the display geometry with nothing
+    checking it against this file.
+    """
+    found = {n: v for n, v in globals().items()
+             if n.isupper() and isinstance(v, int) and not isinstance(v, bool)}
+    for field, value in vars(IOHeader).items():
+        if field.isupper() and isinstance(value, int):
+            # IOHeader.COMMAND -> IO_COMMAND; IOHeader.IO_R_W stays IO_R_W
+            found[field if field.startswith("IO_") else f"IO_{field}"] = value
+    return found
 
 
