@@ -80,9 +80,9 @@ void disp_frame(unsigned x, unsigned y, unsigned w, unsigned h, color_t c);
 void disp_line(int x0, int y0, int x1, int y1, color_t c);   /* Bresenham */
 void disp_circle(int cx, int cy, int r, color_t c);
 
-/* --- text: a 4x6 font, 96 printable ASCII glyphs ---------------------- */
-#define GLYPH_W 4
-#define GLYPH_H 6
+/* --- text: a 5x7 font in a 6x8 cell, 95 printable ASCII glyphs -------- */
+#define GLYPH_W 5
+#define GLYPH_H 8
 void disp_char(unsigned x, unsigned y, char ch, color_t fg);
 void disp_text(unsigned x, unsigned y, const char *s, color_t fg);
 
@@ -142,9 +142,18 @@ together dominated every profile.
 negative deltas. They are the only functions here that pay for signed
 comparison, which is the right trade.
 
-**The font** is a 96-entry table of 6 bytes, one per glyph row, 4 bits used —
-576 bytes of static data. `disp_char` reads a row byte and tests bits high to
-low. At 4×6 the 192×108 screen holds 38 columns × 18 rows of text.
+**The font** is a 95-entry table of 8 bytes, one per glyph row, 5 bits used —
+760 bytes of static data. `disp_char` reads a row byte and tests bits high to
+low. At 6×9 per cell the 192×108 screen holds 32 columns × 12 rows of text.
+
+It was 4×6 first, and the glyphs inside it were really 3×5: the fourth column
+was set on 14 of 570 rows, so `M`, `W` and `N` were the same blob and `E` and
+`F` differed by one pixel. Legibility was the whole point of having text at
+all, so the cell grew. GLYPH_W and GLYPH_H are the CELL, not the ink — the
+body is 5×7 on rows 0..6 with the baseline on row 6, and row 7 carries the
+descenders of `g j p q y` and the tails of `, ; _`. Callers must lay text out
+from those two names: every caller that had baked 4 and 6 into a y-offset drew
+its next line straight through the descenders when the font changed.
 
 ## What is deliberately not here
 

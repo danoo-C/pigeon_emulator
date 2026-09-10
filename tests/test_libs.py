@@ -220,7 +220,8 @@ def test_text_draws_something_legible():
     cpu = run(DISPLAY + 'int main(void){ disp_clear(BLACK); disp_text(1,1,"Hi",WHITE);'
                         ' return 0; }', "display.c")
     drawn = lit_pixels(cpu.ram)
-    assert 6 <= drawn <= 2 * 6 * 4, f"two glyphs drew {drawn} pixels"
+    # at most two full glyph cells; the bound tracks GLYPH_W x GLYPH_H
+    assert 6 <= drawn <= 2 * 8 * 5, f"two glyphs drew {drawn} pixels"
 
 
 def test_alpha_zero_is_invisible():

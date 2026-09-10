@@ -176,7 +176,7 @@ static void draw_cube(void) {
     }
 
     disp_text(2, 2, dragging ? "DRAG" : (spinning ? "SPIN" : "HOLD"), DIM);
-    disp_text(2, DISP_H - 8, "drag to rotate", DIM);
+    disp_text(2, DISP_H - GLYPH_H - 2, "drag to rotate", DIM);
     disp_present();
 }
 

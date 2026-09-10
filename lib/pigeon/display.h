@@ -82,9 +82,19 @@ void disp_frame(unsigned x, unsigned y, unsigned w, unsigned h, color_t c);
 void disp_line(int x0, int y0, int x1, int y1, color_t c);
 void disp_circle(int cx, int cy, int r, color_t c);
 
-/* --- text: a 4x6 font over printable ASCII ----------------------------- */
-#define GLYPH_W 4
-#define GLYPH_H 6
+/* --- text: a 5x7 font over printable ASCII -----------------------------
+ *
+ * GLYPH_W x GLYPH_H is the CELL, not the ink. The glyph body is 5x7 on
+ * rows 0..6 with the baseline on row 6; row 7 carries the descenders of
+ * g j p q y and the tails of , ; _. Leave a column between cells --
+ * disp_text() advances by GLYPH_W + 1 -- and a row between lines.
+ *
+ * Lay text out from these two names rather than from 5 and 8. The font
+ * was 4x6 until it became unreadable, and every caller that had baked
+ * the old numbers into a y-offset drew its next line through the
+ * descenders. */
+#define GLYPH_W 5
+#define GLYPH_H 8
 void disp_char(unsigned x, unsigned y, int ch, color_t fg);
 void disp_text(unsigned x, unsigned y, char *s, color_t fg);
 

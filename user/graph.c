@@ -767,16 +767,21 @@ static int eval(int x) {
 
 /* --- layout ------------------------------------------------------------ */
 
-#define BOX_H     9                             /* the expression bar   */
-#define BOX_TX    13                            /* text starts here     */
-#define BOX_COLS  ((DISP_W - BOX_TX - 2) / (GLYPH_W + 1))
-#define PLOT_Y    10
-#define PLOT_H    (DISP_H - PLOT_Y - 9)
-#define PLOT_W    DISP_W
-#define PLOT_BOT  (PLOT_Y + PLOT_H - 1)
-#define PLOT_CX   (PLOT_W / 2)
-#define PLOT_CY   (PLOT_Y + PLOT_H / 2)
-#define STATUS_Y  (DISP_H - 7)
+/* Every row here is derived from GLYPH_H rather than from the numbers a
+ * 4x6 font happened to make true. The bars were literals until the font
+ * grew, and a taller glyph does not push a literal down -- it draws
+ * through the rule under it. */
+#define BOX_H       (GLYPH_H + 3)                 /* the expression bar */
+#define BOX_TX      (2 + 2 * (GLYPH_W + 1) + 1)   /* just past the y=   */
+#define BOX_COLS    ((DISP_W - BOX_TX - 2) / (GLYPH_W + 1))
+#define STATUS_Y    (DISP_H - GLYPH_H - 1)
+#define STATUS_COLS ((DISP_W - 4) / (GLYPH_W + 1))
+#define PLOT_Y      (BOX_H + 2)
+#define PLOT_H      (STATUS_Y - 2 - PLOT_Y)
+#define PLOT_W      DISP_W
+#define PLOT_BOT    (PLOT_Y + PLOT_H - 1)
+#define PLOT_CX     (PLOT_W / 2)
+#define PLOT_CY     (PLOT_Y + PLOT_H / 2)
 
 #define BG      0xFF0B0E14
 #define PANEL   0xFF161B26
@@ -1020,7 +1025,7 @@ static void draw_grid(void) {
 
 /* A tick label with a one-pixel hole punched around it, so it stays
  * readable where the curve runs behind it. Drawing the glyphs four times
- * in the background colour and once in ink costs five 4x6 blits per
+ * in the background colour and once in ink costs five 5x7 blits per
  * label -- nothing against the 192 evaluations a redraw already pays --
  * and unlike a filled box behind the text it takes out only the glyph
  * outline rather than a rectangle of the curve.
@@ -1167,7 +1172,7 @@ static void draw_box(void) {
     disp_text(BOX_TX, 1, win, ink);
 
     cx = BOX_TX + (caret - scroll) * (GLYPH_W + 1);
-    if (cx >= BOX_TX && cx < DISP_W) disp_vline((unsigned)cx, 0, 8, TRACE);
+    if (cx >= BOX_TX && cx < DISP_W) disp_vline((unsigned)cx, 0, BOX_H - 1, TRACE);
 
     /* A rule under the character the parser stopped at -- more use than
      * a message that only says what went wrong and not where. */
@@ -1187,10 +1192,11 @@ static int str_put(char *dst, int at, char *src) {
 }
 
 static void draw_status(void) {
-    char line[48];
+    char line[64];
     int n = 0;
+    int dec;
 
-    disp_hline(0, DISP_H - 9, DISP_W, GRID);
+    disp_hline(0, STATUS_Y - 2, DISP_W, GRID);
 
     if (p_err != NULL) {
         disp_text(2, STATUS_Y, p_err, ERRC);
@@ -1202,17 +1208,24 @@ static void draw_status(void) {
         n = str_put(line, n, "   y ");
         if (yok[trace_col]) n = n + fmt_fx(line + n, ys[trace_col], 3);
         else                n = str_put(line, n, "undefined");
+        if (n > STATUS_COLS) line[STATUS_COLS] = 0;
         disp_text(2, STATUS_Y, line, TRACE);
         return;
     }
+    /* The same precision the tick labels chose, so the readout and the
+     * axis never disagree about how far apart two ticks are -- and so a
+     * zoomed-out view spends no characters on decimals it cannot show. */
     n = str_put(line, n, "x ");
-    n = n + fmt_fx(line + n, view_cx - view_sx, 2);
+    dec = label_decimals(nice_step(view_sx + view_sx));
+    n = n + fmt_fx(line + n, view_cx - view_sx, dec);
     n = str_put(line, n, "..");
-    n = n + fmt_fx(line + n, view_cx + view_sx, 2);
+    n = n + fmt_fx(line + n, view_cx + view_sx, dec);
     n = str_put(line, n, "  y ");
-    n = n + fmt_fx(line + n, view_cy - view_sy, 2);
+    dec = label_decimals(nice_step(view_sy + view_sy));
+    n = n + fmt_fx(line + n, view_cy - view_sy, dec);
     n = str_put(line, n, "..");
-    n = n + fmt_fx(line + n, view_cy + view_sy, 2);
+    n = n + fmt_fx(line + n, view_cy + view_sy, dec);
+    if (n > STATUS_COLS) line[STATUS_COLS] = 0;
     disp_text(2, STATUS_Y, line, DIM);
 }
 
