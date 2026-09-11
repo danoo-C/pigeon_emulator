@@ -27,8 +27,11 @@ Command list:
   CMD_TRUNCATE = 4    - Truncate/resize disk to `address` bytes (length ignored).
   CMD_FLUSH = 5       - Flush OS buffers to disk; returns zero-length bytes.
 
-The module creates `build/pigeon_hard_drive.bin` at the repo root if it
-does not exist. Defaults to a small initial size (1 MiB) when creating a new image.
+The module creates `disks/hdd.img` at the repo root if it does not exist.
+That is outside build/ on purpose: it is a disk, and what programs save
+on it (docs/filesystem.md) has to survive a clean build. A new image is
+DEFAULT_SIZE bytes of zeros -- blank, so a program's fs_format() or
+`pfs mkfs` formats it without having to be forced.
 """
 
 import logging
@@ -40,7 +43,10 @@ log = logging.getLogger(__name__)
 
 # The repo root: devices/ -> emulator/ -> root
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DISK = REPO_ROOT / "build" / "pigeon_hard_drive.bin"
+DEFAULT_DISK = REPO_ROOT / "disks" / "hdd.img"
+# The size of a newly created image. tools/pfs.py gives a new image the
+# same size, and tests/test_pfs.py checks that the two agree.
+DEFAULT_SIZE = 4 * 1024 * 1024
 
 
 CMD_NOP = 0
@@ -52,7 +58,7 @@ CMD_FLUSH = 5
 
 
 class HDD:
-    def __init__(self, path: Optional[str] = None, create_size: int = 1024 * 1024):
+    def __init__(self, path: Optional[str] = None, create_size: int = DEFAULT_SIZE):
         self.path = Path(path) if path is not None else DEFAULT_DISK
         self.create_size = create_size
         self._f = None

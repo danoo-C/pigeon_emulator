@@ -1,5 +1,9 @@
-# Build output: assembled binaries and the disk image
+# Build output: assembled binaries. Safe to delete.
 build/
+
+# Disk images. Ignored, but NOT build output: what programs save lives
+# here and has to survive a clean build (docs/filesystem.md).
+disks/
 
 # Crash/debug dumps
 ram.bin

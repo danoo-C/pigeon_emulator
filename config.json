@@ -6,7 +6,7 @@
   "program_dirs": ["user"],
 
   "build_dir": "build",
-  "disk": "build/pigeon_hard_drive.bin",
+  "disk": "disks/hdd.img",
 
   "bios_source": "firmware/bios.asm",
   "bios_binary": "build/bios.bin",

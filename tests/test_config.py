@@ -133,6 +133,15 @@ def test_flags_override_config_and_none_means_untouched():
     assert config.host == load_config().host, "host=None should not have changed it"
 
 
+def test_the_disk_is_not_build_output():
+    """The channel-2 disk holds what programs save (docs/filesystem.md),
+    so it must not live where a clean build deletes things -- in the
+    shipped config or in the defaults a missing config falls back to."""
+    shipped = load_config()
+    assert shipped.build_dir not in shipped.disk.parents
+    assert not Path(DEFAULTS["disk"]).is_relative_to(DEFAULTS["build_dir"])
+
+
 def test_override_resolves_paths_too():
     config = load_config().override(build_dir="elsewhere")
     assert config.build_dir == REPO_ROOT / "elsewhere"

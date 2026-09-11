@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -730,6 +731,21 @@ def test_cli_explains_an_unformatted_image():
         assert code == 1 and "pfs mkfs" in err
         code, _, err = cli("mkfs", "--image", disk, "--size", "banana")
         assert code == 1 and "not a size" in err
+
+
+def test_the_emulator_makes_a_blank_disk_the_size_pfs_would():
+    """A missing channel-2 image is created by the HDD device, and it has
+    to come out blank -- so fs_format() and `pfs mkfs` take it without
+    being forced -- and the same size pfs gives a new image, so it does
+    not matter which of the two made it."""
+    from emulator.devices.hdd import DEFAULT_SIZE, HDD
+    assert DEFAULT_SIZE == pfs.DEFAULT_SIZE
+    with scratch() as d:
+        path = d / "disks" / "hdd.img"          # the folder does not exist yet
+        HDD(str(path)).close()
+        assert path.stat().st_size == 4 * MiB
+        with PgfsImage.mkfs(path) as img:       # no force needed: it is blank
+            assert img.total == 8192
 
 
 def test_the_default_image_is_the_emulators_disk():

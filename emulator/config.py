@@ -31,9 +31,12 @@ DEFAULTS = {
     # lists everything it finds across all of them.
     "program_dirs": ["user"],
 
-    # Assembled output and the channel-2 disk image.
+    # Assembled output: anything in it can be rebuilt, so a clean may
+    # delete it at any time.
     "build_dir": "build",
-    "disk": "build/pigeon_hard_drive.bin",
+    # The channel-2 disk. NOT under build/: it is a disk, and what
+    # programs save on it (docs/filesystem.md) must survive a clean.
+    "disk": "disks/hdd.img",
 
     # The BIOS. Rebuilt automatically when the binary is older than the
     # source, since build/ is gitignored and a fresh clone has neither.

@@ -117,7 +117,7 @@ partial or missing file is fine.
   "program_dirs": ["user"],
 
   "build_dir": "build",
-  "disk": "build/pigeon_hard_drive.bin",
+  "disk": "disks/hdd.img",
 
   "bios_source": "firmware/bios.asm",
   "bios_binary": "build/bios.bin",
@@ -130,7 +130,7 @@ partial or missing file is fine.
 | `host`, `display_port`, `hid_port` | where the two HTTP servers listen. **The pygame client reads these too**, so changing a port here moves both ends. |
 | `program_dirs` | folders the launcher scans. Add your own; they're all listed together. |
 | `build_dir` | where assembled output and RAM dumps go |
-| `disk` | image for IO channel 2 |
+| `disk` | the disk on IO channel 2. It lives outside `build/` so that what programs save survives a clean build, and it is created blank, at 4 MiB, if missing. `tools/pfs.py` formats it and shows what's on it ([docs/filesystem.md](docs/filesystem.md)) |
 | `bios_source` / `bios_binary` | the BIOS and where it builds to |
 | `auto_build` | reassemble stale sources automatically (`--no-autobuild` to skip) |
 
@@ -184,7 +184,8 @@ tools/                disasm.py, bench.py, pfs.py (PigeonFS disk images)
 tests/                test_golden.py, test_smoke.py, test_config.py, golden/
 compiler/design/      design for a C compiler + stdlib/display/input libraries
 docs/ideas/           older sketches toward a C compiler; neither builds
-build/                assembled output + disk image (gitignored)
+build/                assembled output (gitignored, safe to delete)
+disks/                the channel-2 disk image (gitignored, survives a clean)
 ```
 
 ### Boot sequence

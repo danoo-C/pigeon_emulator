@@ -1,6 +1,7 @@
 # PigeonFS: a filesystem for the pigeon machine
 
-> **Status: phases 0 and 1 are done** (the string library and the host tool);
+> **Status: phases 0 to 2 are done** (the string library, the host tool, and
+> the disk's new home);
 > **the guest library is not written yet. Every decision is settled** (the log is in
 > [§14](#14-decision-log)). The numbers in §1 and §7 were **measured** on this
 > emulator: a probe program was compiled, run and counted. Anything that was
@@ -36,7 +37,7 @@ Because it is 32 bits wide, no disk can be bigger than 4 GiB.
 | Channel | Backed by | Notes |
 |---|---|---|
 | 1 `CH_USERPROG` | the program's own `.bin`, opened `r+b` | The BIOS reads it until a short chunk comes back, so it loads **the whole file** into RAM. Nothing checks the size |
-| 2 `CH_HDD` | the image named by `"disk"` in `config.json` | The HDD device creates it full of zeros if it is missing (1 MiB today, 4 MiB after §11) |
+| 2 `CH_HDD` | the image named by `"disk"` in `config.json` | The HDD device creates it full of zeros, at 4 MiB, if it is missing |
 
 **Everything passes through the 4 KB window.** The device returns bytes and
 the CPU copies them. One command moves at most 4096 bytes. On a write the
@@ -856,7 +857,7 @@ assertion catches most allocator bugs.
    Python implementation is the oracle for every guest test after this.
    *Done.*
 2. **Move the disk image.** Config, `hdd.py` (path and 4 MiB), `.gitignore`,
-   README.
+   README. *Done.*
 3. **`fs.c`, bottom-up**, with each layer's tests passing before the next is
    written:
    1. block device and cache
