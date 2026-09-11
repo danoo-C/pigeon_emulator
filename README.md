@@ -180,7 +180,7 @@ user/                 example programs (.asm and .c alike)
 lib/pigeon/           the C libraries: mem, string, display, input, math
 compiler/             pigeon-cc: C -> assembly
 display/              pygame client + browser front-end (talks HTTP only)
-tools/                disasm.py, bench.py
+tools/                disasm.py, bench.py, pfs.py (PigeonFS disk images)
 tests/                test_golden.py, test_smoke.py, test_config.py, golden/
 compiler/design/      design for a C compiler + stdlib/display/input libraries
 docs/ideas/           older sketches toward a C compiler; neither builds
@@ -317,11 +317,13 @@ python3 tests/test_config.py      # config.json + program discovery
 python3 tests/test_input.py       # HID: both buffers, keycode translation
 python3 tests/test_directives.py  # data directives + the anti-drift guard
 python3 tests/test_loader.py      # programs larger than one DMA window
+python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
 python3 -m pytest tests/          # all 149, if you have pytest
 
 python3 tools/bench.py            # interpreter throughput
 python3 tools/disasm.py build/bios.bin
 python3 tools/disasm.py build/check.bin --org 0x20000 --check
+python3 tools/pfs.py tree         # what is on the channel-2 disk (docs/filesystem.md)
 ```
 
 The suite runs without pytest — `tests/_runner.py` provides a minimal runner,

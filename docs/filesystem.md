@@ -1,6 +1,7 @@
 # PigeonFS: a filesystem for the pigeon machine
 
-> **Status: design, not implemented. Every decision is settled** (the log is in
+> **Status: phases 0 and 1 are done** (the string library and the host tool);
+> **the guest library is not written yet. Every decision is settled** (the log is in
 > [§14](#14-decision-log)). The numbers in §1 and §7 were **measured** on this
 > emulator: a probe program was compiled, run and counted. Anything that was
 > reasoned but not run is marked *unverified*.
@@ -147,7 +148,7 @@ blocks F+1 ..      data: files and directories; the root directory starts at F+1
 | 24 | `data_start` | `fat_start + fat_blocks` |
 | 28 | `free_blocks` | a hint: updated by every allocate and free, recomputed by `fsck` |
 | 32 | `next_free` | a hint: where the next-fit search starts |
-| 36 | `label` | 16 bytes, NUL-padded |
+| 36 | `label` | up to 15 bytes, NUL-terminated and NUL-padded to 16 |
 | 52 | reserved | 0 |
 | 64 | `root` | **a 64-byte directory entry that describes the root directory** |
 | 128 | reserved | 0 up to 511 |
@@ -618,20 +619,29 @@ module as their oracle.
 python3 tools/pfs.py mkfs  [--size 4M] [--label NAME] [--force]
 python3 tools/pfs.py info
 python3 tools/pfs.py ls    [-l] [/path]
-python3 tools/pfs.py tree
-python3 tools/pfs.py put   local_file /dest/path      (-r for a folder)
-python3 tools/pfs.py get   /src/path local_file
+python3 tools/pfs.py tree  [/path]
+python3 tools/pfs.py put   [-r] local /dest       (-r for a folder)
+python3 tools/pfs.py get   [-r] /src local        (-r for a directory)
 python3 tools/pfs.py cat   /path
-python3 tools/pfs.py mkdir /path
-python3 tools/pfs.py rm    [-r] /path
+python3 tools/pfs.py mkdir [-p] /path ...
+python3 tools/pfs.py rm    [-r] /path ...
 python3 tools/pfs.py mv    /from /to
 python3 tools/pfs.py fsck  [--repair]
 ```
 
+`put`, `get` and `mv` behave like `cp` and `mv`: if the destination is an
+existing directory, the item goes inside it and keeps its name. `put` onto
+an existing file replaces it the way `fs_save` does, truncating it first and
+then writing.
+
 - Every command takes `--image PATH`. The default is `"disk"` from
   `config.json` (read with `emulator.config.load_config`), so `pfs ls` shows the
   same disk the emulator puts on channel 2. On the host, paths are always
-  absolute. `.` and `..` are normalised exactly as in the guest.
+  absolute. `.` and `..` are normalised exactly as in the guest. A channel
+  prefix such as `2:/` is refused, because the image is itself the volume.
+- **Exit status:** 0 on success and 1 on any error. For `fsck`, 1 means
+  problems remain: without `--repair` that is any problem, and with it, only
+  the problems it can't fix safely.
 - **`mkfs` sizing:** a missing image is created at **4 MiB**. An existing image
   keeps its current size unless `--size` is given.
 - **`mkfs` follows the same rule as the guest.** It formats an all-zero image
@@ -651,8 +661,10 @@ python3 tools/pfs.py fsck  [--repair]
   - that names are valid and unique within each directory
 
   `--repair` frees leaked blocks, trims chains that are longer than their size,
-  resolves a rename that was interrupted (§6.3), and rewrites the hints. It
-  reports cross-links but doesn't try to fix them.
+  resolves a rename that was interrupted (§6.3), restores the reserved FAT
+  region, and rewrites the hints. It only reports anything where a fix would
+  have to guess which data to throw away: cross-links, broken chains,
+  chains shorter than their size, and bad names.
 
 ---
 
@@ -839,9 +851,10 @@ assertion catches most allocator bugs.
 
 ## 13. Phases
 
-0. **`<pigeon/string.h>`** and its tests.
+0. **`<pigeon/string.h>`** and its tests. *Done.*
 1. **The format and the host tool.** `tools/pfs.py` and `test_pfs.py`. The
    Python implementation is the oracle for every guest test after this.
+   *Done.*
 2. **Move the disk image.** Config, `hdd.py` (path and 4 MiB), `.gitignore`,
    README.
 3. **`fs.c`, bottom-up**, with each layer's tests passing before the next is
