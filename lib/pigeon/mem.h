@@ -1,7 +1,7 @@
 /* <pigeon/mem.h> -- memory operations.
  *
- * The whole standard library, for now: block moves and a heap. No
- * strings, no formatted output, no math.
+ * Block moves and a heap. Strings and numbers-as-text are in
+ * <pigeon/string.h>, maths in <pigeon/math.h>.
  */
 #ifndef PIGEON_MEM_H
 #define PIGEON_MEM_H

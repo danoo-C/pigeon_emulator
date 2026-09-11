@@ -1,11 +1,12 @@
 # The C libraries
 
-Four headers, compiled by `pigeon-cc` and covered by execution tests in
+Five headers, compiled by `pigeon-cc` and covered by execution tests in
 `tests/test_libs.py` — every test compiles the C and *runs* it.
 
 | Header | What it gives you |
 |---|---|
 | `<pigeon/mem.h>` | `memcpy` `memmove` `memset` `memcmp`, `malloc` `calloc` `free`, `heap_used` |
+| `<pigeon/string.h>` | `strlen` `strcmp` `strlcpy` `strlcat` `strchr` …, numbers as text (`utoa` `itoa` `strtou` `atoi`), `isdigit` and friends |
 | `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped |
 | `<pigeon/input.h>` | mouse position/buttons/edges, keyboard characters, key edges, held-key state |
 | `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
@@ -29,6 +30,32 @@ Adequate here because the other two libraries allocate nothing at runtime.
 then finish byte by byte. That is not a micro-optimisation: the byte loop is
 about four instructions per byte and the framebuffer is 82,944 bytes.
 (`disp_clear` no longer pays that: it is a hardware fill on CH_DISPLAY.)
+
+## string
+
+Strings, numbers as text, and character classes. The names are the
+standard C ones, cut down to what this machine needs. There is no printf, so
+to show a number you write it into a buffer first:
+
+```c
+char line[32];
+unsigned n = strlcpy(line, "score ", sizeof(line));
+itoa(score, line + n);
+disp_text(2, 2, line, WHITE);
+```
+
+**Copies are bounded.** `strlcpy` and `strlcat` always leave the result
+terminated. They return the length they *tried* to make, so a result
+`>= size` means the copy was cut short. There is no `strcat` and no
+`strncpy`. With no memory protection, an overrun doesn't fault; it
+overwrites whatever comes next.
+
+**Bytes compare as unsigned.** `char` is signed here, so compared as `char`,
+`0xE9` would sort below `'a'`. `strtou` saturates at `0xFFFFFFFF`, as
+`strtoul` does, while `atoi` wraps.
+
+**It stands alone.** It uses no heap and doesn't need `mem.c`, so a program
+that only formats numbers doesn't pull in an allocator.
 
 ## display
 

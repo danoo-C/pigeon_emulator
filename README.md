@@ -177,7 +177,7 @@ emulator/             the machine (importable, no side effects on import)
 assembler/            assembler.py + README.md
 firmware/bios.asm     boot ROM source (loads programs in 4 KB chunks)
 user/                 example programs (.asm and .c alike)
-lib/pigeon/           the C libraries: mem, display, input, math
+lib/pigeon/           the C libraries: mem, string, display, input, math
 compiler/             pigeon-cc: C -> assembly
 display/              pygame client + browser front-end (talks HTTP only)
 tools/                disasm.py, bench.py
