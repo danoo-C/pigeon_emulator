@@ -532,9 +532,13 @@ class PgfsImage:
         return data[:e.size]
 
     def write_file(self, path: str, data: bytes):
-        """Create or replace, as the guest's fs_save() does: an existing file
-        is truncated first, then written. A crash in between leaves it
-        empty, never half old and half new."""
+        """Create or replace, as the guest's fs_save() does -- which is
+        fs_open(FS_CREATE | FS_TRUNC) and then fs_write(). A new file gets
+        its empty entry before any data, and an existing one is truncated
+        before it is written, so a crash in between leaves an empty file,
+        never half old and half new. The order also decides which blocks
+        a growing directory and the data get, and it has to match the
+        guest's for the two to leave identical images."""
         parts = split_path(path)
         parent, name = self._parent(parts)
         check_name(name)
@@ -549,24 +553,23 @@ class PgfsImage:
             raise PgfsError("ENOSPC", f"{_show(parts)}: {needed + grows} blocks needed, "
                                       f"{self.free_count() + reclaimed} free")
 
-        if e is not None and e.first:
+        if e is None:
+            e = Entry(name, TYPE_FILE, 0, 0)
+            self._add_entry(parent, e)           # fs_open(FS_CREATE)
+        elif e.first or e.size:
             old = e.first
             e.first, e.size = 0, 0
             self._write_entry(e)                 # unreachable first...
-            self._free_chain(old)                # ...then freed
-            self._flush_fat()
+            if old:
+                self._free_chain(old)            # ...then freed
+                self._flush_fat()
 
         blocks = self._alloc(needed)
         for i, block in enumerate(blocks):
             self._write_block(block, data[i * BLOCK:(i + 1) * BLOCK].ljust(BLOCK, b"\0"))
         self._flush_fat()                        # data, then the FAT, then the entry
-
-        first = blocks[0] if blocks else 0
-        if e is None:
-            self._add_entry(parent, Entry(name, TYPE_FILE, first, len(data)))
-        else:
-            e.first, e.size = first, len(data)
-            self._write_entry(e)
+        e.first, e.size = (blocks[0] if blocks else 0), len(data)
+        self._write_entry(e)
         self._write_super()
 
     def mkdir(self, path: str, parents: bool = False):

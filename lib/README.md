@@ -1,12 +1,14 @@
 # The C libraries
 
-Five headers, compiled by `pigeon-cc` and covered by execution tests in
-`tests/test_libs.py` — every test compiles the C and *runs* it.
+Six headers, compiled by `pigeon-cc` and covered by execution tests in
+`tests/test_libs.py` and `tests/test_fs.py`. Every test compiles the C and
+*runs* it.
 
 | Header | What it gives you |
 |---|---|
 | `<pigeon/mem.h>` | `memcpy` `memmove` `memset` `memcmp`, `malloc` `calloc` `free`, `heap_used` |
 | `<pigeon/string.h>` | `strlen` `strcmp` `strlcpy` `strlcat` `strchr` …, numbers as text (`utoa` `itoa` `strtou` `atoi`), `isdigit` and friends |
+| `<pigeon/fs.h>` | files and directories on the HDD channels: `fs_open`/`read`/`write`/`seek`, `fs_mkdir`/`readdir`/`rename`, `fs_load`/`fs_save`, a current directory |
 | `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped |
 | `<pigeon/input.h>` | mouse position/buttons/edges, keyboard characters, key edges, held-key state |
 | `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
@@ -140,3 +142,28 @@ v3_project(&v, DIST, CX, CY, &sx, &sy);
 
 That is exactly what `user/cube.c` does, and why the aliasing rule is a
 documented guarantee rather than an accident.
+
+## fs
+
+PigeonFS keeps files and directories on the HDD channels, in a FAT-style
+format that `tools/pfs.py` can also read and write from the host. A disk is
+named by its IO channel. You mount `CH_HDD`, and a path can pick a disk
+explicitly with a prefix, as in `2:/saves/a`.
+
+```c
+if (fs_mount(CH_HDD) == FS_ENOFS) {      /* a blank disk: format it once */
+    fs_format(CH_HDD, "PIGEON", 0);
+    fs_mount(CH_HDD);
+}
+fs_save("/saves/score", &score, 4);
+```
+
+**Every call writes through before it returns**, so stopping the emulator
+between two calls loses nothing. **A disk is only formatted on purpose:**
+`fs_format` refuses anything that isn't blank unless you force it. The
+design, the limits and every error code are in
+[docs/filesystem.md](../docs/filesystem.md).
+
+It's the biggest library here. A program that includes it is about 99 KB,
+and moving one 512-byte block through the IO window costs about 4,350
+instructions, so a 100 KB file takes about 0.4 s to load.

@@ -1,8 +1,8 @@
 # PigeonFS: a filesystem for the pigeon machine
 
-> **Status: phases 0 to 2 are done** (the string library, the host tool, and
-> the disk's new home);
-> **the guest library is not written yet. Every decision is settled** (the log is in
+> **Status: phases 0 to 4 are done**: the string library, the host tool, the
+> disk's new home, and the guest library with its tests. What's left is the
+> demo program (phase 5) and HDD DMA (phase 6). **Every decision is settled** (the log is in
 > [§14](#14-decision-log)). The numbers in §1 and §7 were **measured** on this
 > emulator: a probe program was compiled, run and counted. Anything that was
 > reasoned but not run is marked *unverified*.
@@ -216,6 +216,9 @@ can still be moved 8 blocks, or 4 KB, per command (§6.1).
 
 ## 4. The C API: `<pigeon/fs.h>`
 
+The authoritative version, with a comment on every call, is
+`lib/pigeon/fs.h`.
+
 ```c
 #ifndef PIGEON_FS_H
 #define PIGEON_FS_H
@@ -230,7 +233,7 @@ can still be moved 8 blocks, or 4 KB, per command (§6.1).
 #define FS_EISDIR       (-4)
 #define FS_ENOTEMPTY    (-5)
 #define FS_ENOSPC       (-6)    /* disk full                            */
-#define FS_EMFILE       (-7)    /* too many open files                  */
+#define FS_EMFILE       (-7)    /* too many open handles, or volumes    */
 #define FS_EBADF        (-8)    /* not an open handle, or wrong mode    */
 #define FS_EINVAL       (-9)
 #define FS_ENAMETOOLONG (-10)   /* a name over 31 bytes, a path over 255 */
@@ -593,20 +596,27 @@ reported by GET_SIZE.
 
 ---
 
-## 7. Performance budget
+## 7. Performance
 
-The estimates below take the measured 4,350 instructions per block copy and
-assume a cold cache.
+These are measured on the finished library: whole guest programs on a 4 MiB
+disk, each starting with a cold cache, with the program's own startup
+subtracted.
 
-| Operation | Blocks copied | ≈ time |
+| Operation | Instructions | ≈ time at 2.5M IPS |
 |---|---|---|
-| `fs_mount` | 1 | 2 ms |
-| `fs_open("/a/b/c.txt")`, small directories | 3 | 5 ms |
-| read 4 KB sequentially | 8 (one command) + 1 FAT | 16 ms |
-| read or `fs_save` 100 KB | ~200 + a little metadata | 0.35 s |
-| an allocation that must scan all 64 FAT blocks of a full 4 MiB disk | 64 | 0.11 s |
+| `fs_mount` | 6,269 | 2.5 ms |
+| `fs_open("/a/b/c.txt")`, cold cache | 21,687 | 8.7 ms |
+| `fs_load`, 4 KB | 50,565 | 20 ms |
+| `fs_save`, 4 KB, a new file | 84,609 | 34 ms |
+| `fs_load`, 100 KB | 932,437 | 0.37 s |
+| `fs_save`, 100 KB, a new file | 1,094,893 | 0.44 s |
+| `fs_format`, 4 MiB | 1,148,704 | 0.46 s |
 
-The disk isn't what is slow; the copy loop is. Phase 6 (§9) removes it.
+The disk isn't what is slow; the copy loop is, and phase 6 (§9) removes it.
+
+The code isn't small either. A program that includes `<pigeon/fs.h>`
+compiles to about 99 KB together with `mem.c` and `string.c`, and the BIOS
+copies every byte of that on every boot.
 
 ---
 
@@ -631,9 +641,12 @@ python3 tools/pfs.py fsck  [--repair]
 ```
 
 `put`, `get` and `mv` behave like `cp` and `mv`: if the destination is an
-existing directory, the item goes inside it and keeps its name. `put` onto
-an existing file replaces it the way `fs_save` does, truncating it first and
-then writing.
+existing directory, the item goes inside it and keeps its name. `put`
+writes exactly the way `fs_save` does. A new file gets its empty entry
+before any data, as `fs_open(FS_CREATE)` does, and an existing file is
+truncated before it's written. The order matters beyond crash safety: it
+decides which blocks a growing directory and the data end up in, and the
+two implementations have to agree on that.
 
 - Every command takes `--image PATH`. The default is `"disk"` from
   `config.json` (read with `emulator.config.load_config`), so `pfs ls` shows the
@@ -845,8 +858,9 @@ assertion catches most allocator bugs.
 | Full disk | fill it → `FS_ENOSPC` with a short write; delete → the space can be used again |
 | Two volumes | PGFS images on channels 1 and 2: `1:/x` and `2:/x` are different files |
 | Cross-implementation | the host `put`s a file and the guest reads the same bytes; the guest `fs_save`s and the host `get`s the same bytes |
+| **Oracle** | the guest and `pfs.py` run the same operations on two images, which must match **byte for byte**. This runs twice: on a fresh disk, and on a 32-block disk where next-fit wraps around into reused blocks. Only reused blocks expose a directory block left un-zeroed, a last block's tail left un-zeroed, or a write assuming its blocks are contiguous |
 | **Persistence** | the guest writes, the `Machine` is closed, a new `Machine` opens the same image, and the guest reads everything back |
-| Crash | stop the machine in the middle of an `fs_write` (a step budget); `fsck` finds leaked blocks at worst |
+| Crash | a program that creates, replaces, renames and removes, with a copy of the disk kept after **every** write it makes. Stopping the emulator can only land between two writes, so these copies are every state a crash can leave. Each must be fully repaired by `fsck --repair`, with every file still readable. Sampling a few moments instead missed a planted "free before unlink" bug, because the write that matters is one of dozens. Being repairable isn't enough on its own, since a file left with no name looks like nothing worse than leaked blocks. So once the file being renamed back and forth exists, it has to exist under some name in every later state |
 
 ---
 
@@ -868,7 +882,10 @@ assertion catches most allocator bugs.
    5. open / read / write / seek / close
    6. mkdir / rmdir / remove / rename / readdir / stat / chdir / getcwd
    7. gets / puts / load / save / strerror
-4. **Cross-implementation, persistence and crash tests.**
+
+   *Done.*
+4. **Cross-implementation, persistence and crash tests.** *Done*, in
+   `tests/test_fs.py`.
 5. **`user/files.c`**, a file browser: the arrow keys move around, Enter goes
    into a directory or opens a text file on screen, Backspace goes to `..`,
    and `n` lets you type a note and save it. Plus the docs.

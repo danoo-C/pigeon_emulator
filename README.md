@@ -177,7 +177,7 @@ emulator/             the machine (importable, no side effects on import)
 assembler/            assembler.py + README.md
 firmware/bios.asm     boot ROM source (loads programs in 4 KB chunks)
 user/                 example programs (.asm and .c alike)
-lib/pigeon/           the C libraries: mem, string, display, input, math
+lib/pigeon/           the C libraries: mem, string, fs, display, input, math
 compiler/             pigeon-cc: C -> assembly
 display/              pygame client + browser front-end (talks HTTP only)
 tools/                disasm.py, bench.py, pfs.py (PigeonFS disk images)
@@ -319,6 +319,7 @@ python3 tests/test_input.py       # HID: both buffers, keycode translation
 python3 tests/test_directives.py  # data directives + the anti-drift guard
 python3 tests/test_loader.py      # programs larger than one DMA window
 python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
+python3 tests/test_fs.py          # PigeonFS on the guest, checked against pfs.py
 python3 -m pytest tests/          # all 149, if you have pytest
 
 python3 tools/bench.py            # interpreter throughput
