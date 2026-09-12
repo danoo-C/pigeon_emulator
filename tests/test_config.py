@@ -106,6 +106,13 @@ def test_urls():
 
 @cases(
     ({"display_port": 8000, "hid_port": 8000}, "must differ"),
+    ({"cd_port": 8001}, "must differ"),              # clashes with hid_port
+    ({"cd_port": "nope"}, "whole number"),
+    ({"cd_max_upload": "lots"}, "not a size"),
+    ({"cd_max_upload": 0}, "must be positive"),
+    ({"cd_dirs": "cds"}, None),                      # a bare string is allowed
+    ({"cd_dirs": [1]}, "list of folder names"),
+    ({"cd_root": 7}, "folder name"),
     ({"display_port": 99999}, "between 1 and 65535"),
     ({"display_port": 0}, "between 1 and 65535"),
     ({"display_port": "8000"}, "whole number"),
@@ -116,13 +123,17 @@ def test_urls():
     ([1, 2, 3], "must contain a JSON object"),
 )
 def test_bad_config_is_rejected_with_a_useful_message(settings, expected):
+    """expected=None means the value is fine and must NOT be rejected."""
     with tempfile.TemporaryDirectory() as d:
         try:
             load_config(write_config(d, settings))
         except ConfigError as e:
+            if expected is None:
+                raise AssertionError(f"{settings!r} should have been accepted: {e}")
             assert expected in str(e), f"expected {expected!r} in: {e}"
             return
-    raise AssertionError(f"{settings!r} should have been rejected")
+    if expected is not None:
+        raise AssertionError(f"{settings!r} should have been rejected")
 
 
 # --- flag overrides ---------------------------------------------------------

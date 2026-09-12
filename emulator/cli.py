@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import programs as programs_mod
 from .config import DEFAULTS, Config, ConfigError, load_config
+from .devices.cd import CD
 from .instruction_set import INSTR_SIZE, disassemble, disassemble_range
 from .machine import Machine
 from .memory_map import PROGRAM_LOAD_ADDR
@@ -217,6 +218,8 @@ def build_parser():
     net.add_argument("--host")
     net.add_argument("--display-port", type=int)
     net.add_argument("--hid-port", type=int)
+    net.add_argument("--cd-port", type=int,
+                     help="port for the CD drive's endpoints (docs/cd-drive.md)")
     net.add_argument("--headless", action="store_true",
                      help="don't bind the display/input HTTP servers")
 
@@ -248,6 +251,7 @@ def main(argv=None):
 
     config = config.override(
         host=args.host, display_port=args.display_port, hid_port=args.hid_port,
+        cd_port=args.cd_port,
         program_dirs=args.program_dirs, bios_binary=args.bios_binary, disk=args.disk,
         auto_build=False if args.no_autobuild else None)
 
@@ -299,9 +303,13 @@ def main(argv=None):
         print("\nNo program selected -- the BIOS will boot into an empty load address.")
 
     # --- run ----------------------------------------------------------------
+    # The drive is built from the config here rather than inside Machine,
+    # so machine.py needs to know nothing about config.json.
+    drive = CD(root=config.cd_root, dirs=config.cd_dirs,
+               upload_dir=config.cd_upload_dir, max_upload=config.cd_max_upload)
     machine = Machine(bios_path=str(config.bios_binary),
                       program_path=str(program_path) if program_path else None,
-                      disk_path=str(config.disk))
+                      disk_path=str(config.disk), cd=drive)
     try:
         if args.disasm_bios:
             print(f"\n=== BIOS ({len(machine.bios.bios_bytes)} bytes) ===")
@@ -312,8 +320,10 @@ def main(argv=None):
         if not args.headless:
             machine.start_servers(host=config.host,
                                   display_port=config.display_port,
-                                  hid_port=config.hid_port)
-            print(f"Display: {config.display_url}   HID: {config.hid_url}")
+                                  hid_port=config.hid_port,
+                                  cd_port=config.cd_port)
+            print(f"Display: {config.display_url}   HID: {config.hid_url}   "
+                  f"CD: {config.cd_url}")
 
         console = Console(machine, config)
         if args.run:

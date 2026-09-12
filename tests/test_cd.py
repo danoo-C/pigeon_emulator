@@ -68,12 +68,17 @@ def media(device):
 
 
 class drive:
-    """A CD and a directory to put discs in, with the root pinned to it."""
+    """A CD and a directory to put discs in, with the root pinned to it.
+
+    upload_dir is that same directory, which is what the shipped config
+    does too: cd_upload_dir is one of cd_dirs, so an uploaded disc shows
+    up in the picker afterwards.
+    """
 
     def __enter__(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self._tmp.name)
-        self.cd = CD(root=self.dir, dirs=[self.dir])
+        self.cd = CD(root=self.dir, dirs=[self.dir], upload_dir=self.dir)
         return self
 
     def __exit__(self, *exc):
@@ -486,6 +491,122 @@ def test_the_drive_is_on_the_bus_of_every_machine():
             assert media(machine.cd)[:2] == (MEDIA_MAGIC, 0), "should boot with no disc"
         finally:
             machine.close()
+
+
+# --- uploads -----------------------------------------------------------------
+#
+# A browser cannot hand over a path -- input.files[0] is bytes with a name
+# -- so this is the only way the browser front end can put a disc in. The
+# routes around it are three lines each; everything worth testing is here.
+
+def test_an_upload_is_written_down_and_inserted():
+    with drive() as d:
+        status = d.cd.save_upload("note.txt", b"uploaded bytes")
+        assert status["present"] and status["name"] == "note.txt"
+        assert (d.dir / "note.txt").read_bytes() == b"uploaded bytes"
+        # And the guest can read it immediately, through the bus.
+        assert read(d.cd, CMD_READ, 14, 0) == b"uploaded bytes"
+
+
+def test_an_upload_keeps_its_name_so_it_can_be_re_inserted():
+    """cd_upload_dir defaults to one of cd_dirs, so an uploaded disc turns
+    up in the picker afterwards: upload once, re-insert forever."""
+    with drive() as d:
+        d.cd.save_upload("keeper.bin", b"x" * 8)
+        assert "keeper.bin" in [e["name"] for e in d.cd.list_discs()]
+
+
+@cases(
+    ("a path, not a name", "../../etc/passwd", "passwd"),
+    ("an absolute path",   "/etc/hostname",    "hostname"),
+    ("a windows path",     "C:\\Users\\me\\d.bin", "d.bin"),
+)
+def test_an_upload_name_is_reduced_to_a_basename(label, sent, expected):
+    """The name comes from a browser and is never trusted as a path."""
+    with drive() as d:
+        status = d.cd.save_upload(sent, b"x")
+        assert status["name"] == expected, label
+        assert (d.dir / expected).is_file()
+
+
+@cases("", ".", "..", "/")
+def test_an_upload_with_no_usable_name_is_refused(sent):
+    with drive() as d:
+        try:
+            d.cd.save_upload(sent, b"x")
+        except ValueError:
+            return
+        raise AssertionError(f"{sent!r} was accepted as a file name")
+
+
+def test_an_upload_over_the_limit_is_refused_and_writes_nothing():
+    with tempfile.TemporaryDirectory() as tmp:
+        room = Path(tmp)
+        cd = CD(root=room, dirs=[room], upload_dir=room, max_upload=16)
+        try:
+            cd.save_upload("fits.bin", b"x" * 16)
+            try:
+                cd.save_upload("toobig.bin", b"x" * 17)
+            except ValueError as e:
+                assert "cd_max_upload" in str(e), "the error should name the setting"
+            else:
+                raise AssertionError("an oversize upload was accepted")
+            assert not (room / "toobig.bin").exists(), "it was written anyway"
+            assert cd.status()["name"] == "fits.bin", "the good disc was disturbed"
+        finally:
+            cd.close()
+
+
+def test_an_upload_dir_outside_the_root_is_refused_before_anything_is_written():
+    with tempfile.TemporaryDirectory() as inside, tempfile.TemporaryDirectory() as outside:
+        cd = CD(root=Path(inside), dirs=[], upload_dir=Path(outside))
+        try:
+            try:
+                cd.save_upload("sneaky.bin", b"x")
+            except PermissionError:
+                assert not any(Path(outside).iterdir()), "it wrote the file first"
+                return
+            raise AssertionError("an upload outside cd_root was accepted")
+        finally:
+            cd.close()
+
+
+# --- the config the drive is built from ------------------------------------------
+
+def test_the_shipped_config_points_the_picker_at_the_upload_folder():
+    """An uploaded disc is only re-insertable if cd_upload_dir is one of
+    cd_dirs. Nothing else checks that the two agree, and they are set in
+    different places."""
+    from emulator.config import load_config
+
+    config = load_config()
+    assert config.cd_upload_dir in config.cd_dirs, (
+        f"cd_upload_dir ({config.cd_upload_dir}) is not in cd_dirs "
+        f"({config.cd_dirs}) -- uploads would vanish from the picker")
+
+
+def test_a_drive_built_from_the_config_agrees_with_it():
+    from emulator.config import load_config
+
+    config = load_config()
+    cd = CD(root=config.cd_root, dirs=config.cd_dirs,
+            upload_dir=config.cd_upload_dir, max_upload=config.cd_max_upload)
+    try:
+        assert cd.root == config.cd_root
+        assert cd.dirs == list(config.cd_dirs)
+        assert cd.upload_dir == config.cd_upload_dir
+        assert cd.max_upload == config.cd_max_upload
+        # The default root is the repo, so the project is reachable...
+        assert cd.resolve("build/bios.bin") == (REPO_ROOT / "build/bios.bin").resolve()
+        # ...and nothing above it is.
+        try:
+            cd.resolve("/etc/hostname")
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError("cd_root did not restrict anything")
+    finally:
+        cd.close()
 
 
 if __name__ == "__main__":

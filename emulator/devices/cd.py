@@ -1,8 +1,8 @@
 """CD -- a removable, read-only disc the host puts in and takes out.
 
 The design, with the reasoning for every choice here, is in
-docs/cd-drive.md. This is phase 0 of it: the device and nothing else. No
-HTTP server, no front-end buttons, no guest library.
+docs/cd-drive.md. Phases 0 and 1 of it: the device, and the HTTP surface
+the front ends put discs in through.
 
 It is hdd.py with three differences, and they are the whole device:
 
@@ -48,7 +48,7 @@ know to report FS_EROFS instead of pretending the write worked.
 import logging
 import struct
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Optional
 
 from ..memory_map import IO_SIZE, IOHeader
@@ -89,9 +89,14 @@ NAME_FIELD = 32
 # act on instead of a log line it cannot see.
 WINDOW = IO_SIZE - IOHeader.USABLE_AFTER
 
-#: Where /cd/list looks, relative to the repo root. Phase 2 makes this
-#: configurable; the device just holds it.
+#: Where /cd/list looks, relative to the repo root. config.json overrides
+#: all four of these; the defaults are what a Machine built without a
+#: Config gets.
 DEFAULT_DIRS = ("cds", "build")
+DEFAULT_UPLOAD_DIR = "cds"
+#: The only path here that writes to the host disk, so it is the only one
+#: that needs a ceiling.
+DEFAULT_MAX_UPLOAD = 64 * 1024 * 1024
 
 
 def _disc_name(basename: str) -> str:
@@ -112,7 +117,8 @@ def _disc_name(basename: str) -> str:
 class CD:
     """A CD drive. Empty until something is put in it."""
 
-    def __init__(self, root=REPO_ROOT, dirs=DEFAULT_DIRS):
+    def __init__(self, root=REPO_ROOT, dirs=DEFAULT_DIRS,
+                 upload_dir=DEFAULT_UPLOAD_DIR, max_upload=DEFAULT_MAX_UPLOAD):
         # insert/eject arrive on the HTTP thread once phase 2 lands;
         # callback() runs on the emulator thread out of
         # IOController.update(). One lock over the handle and the
@@ -129,6 +135,10 @@ class CD:
         self.root = None if root is None else Path(root).resolve()
         self.dirs = [Path(d) if Path(d).is_absolute() else REPO_ROOT / d
                      for d in dirs]
+        self.upload_dir = (Path(upload_dir) if Path(upload_dir).is_absolute()
+                           else REPO_ROOT / upload_dir)
+        self.max_upload = int(max_upload)
+        self._server_thread = None
 
     # --- the drive ---------------------------------------------------------
 
@@ -176,6 +186,38 @@ class CD:
             self._bump()
         log.info("CD: inserted %s (%d bytes)", target, size)
         return self.status()
+
+    def save_upload(self, name, data):
+        """Write an uploaded disc down, then insert it.
+
+        A browser cannot hand over a path -- input.files[0] is bytes with
+        a name and nothing else -- so this is the only way the browser
+        front end can put a disc in. It is not an asymmetry anyone chose;
+        it is the sandbox.
+
+        The bytes land in upload_dir under their own basename,
+        overwriting, which means an uploaded disc turns up in
+        list_discs() afterwards: upload once, re-insert forever. The
+        folder grows until someone empties it.
+        """
+        # Both separators, because this name arrives over HTTP from
+        # whatever the client happens to be running. A browser only ever
+        # sends a basename, but "C:\\Users\\me\\d.bin" is not a basename
+        # to a POSIX Path -- the backslash is an ordinary character here,
+        # so the whole string would become one very strange file name.
+        safe = Path(str(name).replace("\\", "/")).name
+        if not safe or safe in (".", ".."):
+            raise ValueError(f"{name!r} is not a usable file name")
+        if len(data) > self.max_upload:
+            raise ValueError(f"{len(data)} bytes is over the {self.max_upload}-byte "
+                             f"limit; raise cd_max_upload in config.json")
+        # Checked BEFORE anything is written: an upload_dir outside
+        # cd_root is refused like any other path, and refusing it after
+        # the write would leave the file behind anyway.
+        target = self.resolve(self.upload_dir / safe)
+        self.upload_dir.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return self.insert(target)
 
     def eject(self):
         """Take the disc out. Empty already is a no-op, generation included."""
@@ -256,6 +298,111 @@ class CD:
                 found.append({"name": entry.name, "path": str(resolved),
                               "size": size})
         return found
+
+    # --- the HTTP surface ---------------------------------------------------
+
+    def start_fastapi(self, host: str = "127.0.0.1", port: int = 8002,
+                      allow_origins=None):
+        """Serve the endpoints the front ends put discs in through.
+
+        Its own port, on its own daemon thread, exactly like HID: several
+        uvicorn instances coexist happily as long as each has its own
+        thread (so its own event loop) and its own port.
+
+        The routes are deliberately THIN. Every decision they make --
+        which paths are allowed, what a listing contains, what an upload
+        is called -- lives on CD above, where tests/test_cd.py can reach
+        it without a network. That is what makes it defensible not to
+        pull in fastapi.testclient (and httpx) to test the routes
+        themselves; if a route ever grows a decision of its own, that is
+        the moment to revisit it.
+        """
+        if self._server_thread is not None and self._server_thread.is_alive():
+            return
+
+        # Checked on the caller's thread -- an ImportError inside the
+        # daemon thread below is swallowed, leaving the drive silently
+        # unreachable with no explanation.
+        try:
+            from fastapi import FastAPI, HTTPException, Request
+            from fastapi.middleware.cors import CORSMiddleware
+            from pydantic import BaseModel
+            import uvicorn
+        except ImportError as e:
+            raise RuntimeError(
+                "FastAPI/uvicorn/pydantic not installed: pip install -r "
+                "requirements.txt") from e
+
+        def _run():
+            app = FastAPI()
+            app.add_middleware(
+                CORSMiddleware,
+                # The browser front end is served from the DISPLAY port,
+                # so that origin has to be listed here or every POST from
+                # the page fails preflight. Origins compare with the
+                # port: "http://127.0.0.1" does not match
+                # "http://127.0.0.1:1234".
+                allow_origins=allow_origins or [f"http://{host}:{port}"],
+                allow_methods=["GET", "POST", "OPTIONS"],
+                allow_headers=["*"],
+            )
+
+            class Insert(BaseModel):
+                path: str
+
+            @app.get("/cd/status")
+            async def cd_status():
+                return self.status()
+
+            @app.get("/cd/list")
+            async def cd_list():
+                return self.list_discs()
+
+            @app.post("/cd/insert")
+            async def cd_insert(body: Insert):
+                try:
+                    return self.insert(body.path)
+                except PermissionError as e:
+                    raise HTTPException(status_code=403, detail=str(e))
+                except (FileNotFoundError, IsADirectoryError) as e:
+                    raise HTTPException(status_code=404, detail=str(e))
+                except OSError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+
+            @app.post("/cd/upload")
+            async def cd_upload(request: Request, name: str = "disc.bin"):
+                """A raw body, with the file name in a query parameter.
+
+                Not multipart: UploadFile needs python-multipart, which is
+                not in requirements.txt, and a raw body is less work at
+                both ends -- the browser posts the File object itself.
+                """
+                declared = request.headers.get("content-length")
+                if declared is not None and declared.isdigit():
+                    if int(declared) > self.max_upload:      # before reading it
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"{declared} bytes is over the "
+                                   f"{self.max_upload}-byte limit; raise "
+                                   f"cd_max_upload in config.json")
+                data = await request.body()
+                try:
+                    return self.save_upload(name, data)
+                except ValueError as e:
+                    raise HTTPException(status_code=413, detail=str(e))
+                except PermissionError as e:
+                    raise HTTPException(status_code=403, detail=str(e))
+                except OSError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+
+            @app.post("/cd/eject")
+            async def cd_eject():
+                return self.eject()
+
+            uvicorn.run(app, host=host, port=port, log_level="warning")
+
+        self._server_thread = Thread(target=_run, daemon=True)
+        self._server_thread.start()
 
     # --- what the guest asks -----------------------------------------------
 

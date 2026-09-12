@@ -2,6 +2,7 @@
   "host": "127.0.0.1",
   "display_port": 1234,
   "hid_port": 1235,
+  "cd_port": 1236,
 
   "program_dirs": ["user"],
 

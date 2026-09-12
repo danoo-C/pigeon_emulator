@@ -113,6 +113,7 @@ partial or missing file is fine.
   "host": "127.0.0.1",
   "display_port": 8000,
   "hid_port": 8001,
+  "cd_port": 8002,
 
   "program_dirs": ["user"],
 
@@ -127,12 +128,16 @@ partial or missing file is fine.
 
 | Key | Meaning |
 |---|---|
-| `host`, `display_port`, `hid_port` | where the two HTTP servers listen. **The pygame client reads these too**, so changing a port here moves both ends. |
+| `host`, `display_port`, `hid_port`, `cd_port` | where the three HTTP servers listen. Each is its own uvicorn instance and needs its own port. **The pygame client reads these too**, so changing a port here moves both ends. |
 | `program_dirs` | folders the launcher scans. Add your own; they're all listed together. |
 | `build_dir` | where assembled output and RAM dumps go |
 | `disk` | the disk on IO channel 2. It lives outside `build/` so that what programs save survives a clean build, and it is created blank, at 4 MiB, if missing. `tools/pfs.py` formats it and shows what's on it ([docs/filesystem.md](docs/filesystem.md)) |
 | `bios_source` / `bios_binary` | the BIOS and where it builds to |
 | `auto_build` | reassemble stale sources automatically (`--no-autobuild` to skip) |
+| `cd_root` | discs may be inserted from anywhere under here. `"."` is the repo root, so the whole project is reachable and nothing outside it is; `null` allows the entire filesystem ([docs/cd-drive.md](docs/cd-drive.md)) |
+| `cd_dirs` | folders the "Load from server" picker lists, non-recursively |
+| `cd_upload_dir` | where a browser upload is written before it is inserted. Keep it inside `cd_dirs`, or an uploaded disc will not appear in the picker afterwards |
+| `cd_max_upload` | the ceiling on an upload — the one path here that writes to the host disk. `"64M"`, `"512K"` or a byte count |
 
 Relative paths are resolved against the repo root, so the file means the same
 thing whichever directory you run from. A malformed value is reported with the

@@ -83,6 +83,9 @@ class DisplayIO:
         # Told to the browser front end via /info so it knows where to POST
         # input. Keeps config.json the single source of truth for ports.
         self.hid_url: Optional[str] = None
+        # Both are set by Machine.start_servers, so config.json stays the
+        # single source of truth for ports and index.html hardcodes none.
+        self.cd_url: Optional[str] = None
 
     # --- the framebuffer ---------------------------------------------------
 
@@ -247,7 +250,8 @@ class DisplayIO:
             @app.get("/info")
             async def info():
                 return {"w": DISPLAY_W, "h": DISPLAY_H, "size": self.display_size,
-                        "scanout": self.scanout_base, "hid_url": self.hid_url}
+                        "scanout": self.scanout_base, "hid_url": self.hid_url,
+                        "cd_url": self.cd_url}
 
             if serve_frontend:
                 @app.get("/", response_class=HTMLResponse)

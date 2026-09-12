@@ -383,7 +383,22 @@ Uploads land in `cd_upload_dir` (default `cds/`) under the file's own
 basename, overwriting. So an uploaded disc **appears in `/cd/list`
 afterwards** — upload once, re-insert forever — and the folder grows until you
 clean it out, which is the accepted trade. `cd_max_upload` (default 64 MiB)
-caps it, because this is the one path that writes to the host disk.
+caps it, because this is the one path that writes to the host disk -- checked
+against `Content-Length` before the body is read, and again against what
+actually arrived.
+
+**Keep `cd_upload_dir` inside `cd_dirs`.** "It stays in the picker" is only
+true while it is, the two are set independently, and nothing else would
+notice -- so `tests/test_cd.py` asserts that the shipped config keeps them
+agreeing.
+
+**Not multipart.** `UploadFile` needs `python-multipart`, which is not in
+`requirements.txt`. The upload is a raw body with the name in a query
+parameter, which is also less work in the browser: `fetch(url, {method:
+'POST', body: file})` posts the `File` object directly. The name is reduced
+to a basename on **both** separators, because it arrives over HTTP from
+whatever the client is running and `\` is an ordinary character to a POSIX
+`Path`.
 
 ---
 

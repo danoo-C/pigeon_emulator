@@ -40,7 +40,7 @@ class Machine:
     """A wired-up pigeon computer, ready to run."""
 
     def __init__(self, bios_path="build/bios.bin", program_path=None,
-                 disk_path=None, ram_size=RAM_SIZE):
+                 disk_path=None, ram_size=RAM_SIZE, cd=None):
         self.ram = RAM(ram_size)
         self.cpu = CPU(self.ram, REGISTER_COUNT)
         self.io_controller = IOController(self.ram)
@@ -67,7 +67,9 @@ class Machine:
         # disc. Always present, the guest can tell those apart -- which is
         # what <pigeon/cd.h> uses to run on a machine built before this
         # device existed. It starts empty; the host puts a disc in.
-        self.cd = CD()
+        # Passed in when there is a Config to build it from (cli.py), so
+        # this module needs to know nothing about config.json.
+        self.cd = cd if cd is not None else CD()
         # Constructed before the loop below, not after: it is a device on
         # the bus now (scanout base, framebuffer fill), not only the thing
         # that serves frames over HTTP.
@@ -91,10 +93,13 @@ class Machine:
 
     # --- lifecycle --------------------------------------------------------
 
-    def start_servers(self, host="127.0.0.1", display_port=8000, hid_port=8001):
-        """Bind the display and input HTTP servers. Separate from __init__
-        so a test can build a Machine without touching the network."""
+    def start_servers(self, host="127.0.0.1", display_port=8000, hid_port=8001,
+                      cd_port=8002):
+        """Bind the display, input and CD HTTP servers. Separate from
+        __init__ so a test can build a Machine without touching the
+        network."""
         self.display_io.hid_url = f"http://{host}:{hid_port}"
+        self.display_io.cd_url = f"http://{host}:{cd_port}"
         self.display_io.start_fastapi(host=host, port=display_port)
         # The browser front end is served from the display port and posts
         # input to the HID port, so the display origin has to be on the HID
@@ -103,6 +108,12 @@ class Machine:
             host=host, port=hid_port,
             allow_origins=[f"http://{host}:{display_port}",
                            f"http://{host}:{hid_port}",
+                           f"http://localhost:{display_port}"])
+        # Same reason, same trap: the page lives on the display port.
+        self.cd.start_fastapi(
+            host=host, port=cd_port,
+            allow_origins=[f"http://{host}:{display_port}",
+                           f"http://{host}:{cd_port}",
                            f"http://localhost:{display_port}"])
 
     def close(self):
