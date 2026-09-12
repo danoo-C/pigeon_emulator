@@ -1,8 +1,8 @@
 # PigeonFS: a filesystem for the pigeon machine
 
-> **Status: phases 0 to 4 are done**: the string library, the host tool, the
-> disk's new home, and the guest library with its tests. What's left is the
-> demo program (phase 5) and HDD DMA (phase 6). **Every decision is settled** (the log is in
+> **Status: phases 0 to 5 are done**: the string library, the host tool, the
+> disk's new home, the guest library with its tests, and the demo program.
+> What's left is HDD DMA (phase 6). **Every decision is settled** (the log is in
 > [§14](#14-decision-log)). The numbers in §1 and §7 were **measured** on this
 > emulator: a probe program was compiled, run and counted. Anything that was
 > reasoned but not run is marked *unverified*.
@@ -802,12 +802,36 @@ int tolower(int c);  int toupper(int c);
 | `emulator/devices/hdd.py` | `DEFAULT_DISK` and the docstring point to `disks/hdd.img`; `create_size` becomes 4 MiB. **Read behaviour is unchanged**: the BIOS relies on short reads |
 | `.gitignore` | add `disks/` |
 | `README.md`, `lib/README.md` | string and filesystem sections, the config table, the layout |
-| `user/files.c` | the demo program (phase 5) |
+| `user/files.c`, `tests/test_files.py` | the demo program and its tests (phase 5) |
+| `firmware/bios.asm`, `tests/test_loader.py` | the boot progress bar, clamped (phase 5, §11.1) |
 | `emulator/devices/hdd.py`, `README.md` | the DMA commands and the IO bus text (phase 6) |
 
-Nothing changes in the BIOS, the IO controller, the memory map or the
-compiler. No test mentions the old disk path. `build/pigeon_hard_drive.bin`
-has no PGFS superblock, so there is nothing to migrate from it.
+Nothing changes in the IO controller, the memory map or the compiler. No test
+mentions the old disk path. `build/pigeon_hard_drive.bin` has no PGFS
+superblock, so there is nothing to migrate from it.
+
+### 11.1 The one change to the BIOS
+
+This was not planned. The demo is the first program on this machine big
+enough to reach a second ceiling in the boot loader, and it could not run
+until that was fixed.
+
+The BIOS painted a boot progress bar — one framebuffer word per word of the
+program copied, starting at `DISPLAY_START` — and then cleared exactly the
+range it had painted. Neither was bounded by the framebuffer. That is safe
+only while the program is smaller than the gap from `DISPLAY_START` to
+`PROGRAM_LOAD_ADDR`, which is **125,928 bytes**. `user/files.c` compiles to
+169,076: the bar ran off the bottom of the screen and into the load area, and
+the clear then zeroed the first 43 KB of the program that had just been
+loaded. The machine booted into zeros and ran until a `RET` found a return
+address nothing had pushed — `Fetch past end of memory at PC=0xffff0001`,
+with no hint of where it came from.
+
+Both loops are now clamped to the framebuffer, and `tests/test_loader.py`
+covers the ceiling with sizes derived from the memory map rather than typed
+in, so a resolution change cannot quietly move it back. Nothing in `fs.c`
+was involved; it is recorded here because it is the reason phase 5 touched
+the firmware at all.
 
 ---
 
@@ -862,6 +886,26 @@ assertion catches most allocator bugs.
 | **Persistence** | the guest writes, the `Machine` is closed, a new `Machine` opens the same image, and the guest reads everything back |
 | Crash | a program that creates, replaces, renames and removes, with a copy of the disk kept after **every** write it makes. Stopping the emulator can only land between two writes, so these copies are every state a crash can leave. Each must be fully repaired by `fsck --repair`, with every file still readable. Sampling a few moments instead missed a planted "free before unlink" bug, because the write that matters is one of dozens. Being repairable isn't enough on its own, since a file left with no name looks like nothing worse than leaked blocks. So once the file being renamed back and forth exists, it has to exist under some name in every later state |
 
+**`tests/test_files.py`** (the demo: `user/files.c` driven on the emulator).
+The program never halts on its own, so the harness boots it on a temporary
+disk, pushes keys into the HID FIFO, and lets it settle before looking. Every
+test checks **both** the screen and the image, and ends with an `fsck` — a
+browser that draws the right listing over a disk it corrupted would otherwise
+pass half of it.
+
+The screen is read back **as text**: `screen_text()` parses `FONT[]` out of
+`lib/pigeon/display.c` and reverses it, so a test says `"readme.txt" in
+body(screen)` rather than counting pixels of some colour, and a changed glyph
+cannot quietly make the assertions mean something else.
+
+| Area | Cases |
+|---|---|
+| First run | a blank disk is formatted, seeded and listed; directories sort before files; the status line's count and free space match `pfs info` |
+| **Lifetime** | a disk that already holds a PigeonFS is mounted, never reformatted, and its files are still there; what the program writes survives the `Machine` being closed and reopened |
+| Walking | `enter` into a directory and `bksp` back; `..` at the root stays there; the viewer opens a text file, scrolls, and closes; a file with control bytes in it is refused rather than drawn as dots |
+| Writing | a note lands in the directory you are standing in, with the bytes typed; `esc` in the editor writes nothing; a new directory appears on the disk |
+| Refusals | delete asks first and a key other than `y` cancels; `rmdir` on a non-empty directory reaches the status line as the library's own `FS_ENOTEMPTY` |
+
 ---
 
 ## 13. Phases
@@ -888,7 +932,13 @@ assertion catches most allocator bugs.
    `tests/test_fs.py`.
 5. **`user/files.c`**, a file browser: the arrow keys move around, Enter goes
    into a directory or opens a text file on screen, Backspace goes to `..`,
-   and `n` lets you type a note and save it. Plus the docs.
+   and `n` lets you type a note and save it. Plus the docs. *Done*, with
+   `d` for a new directory, `x` to delete, `?` for the key list, and a
+   `statvfs` readout on the status line. Two things came out of writing it
+   that the plan did not have: the BIOS fix in §11.1, and the decision to
+   take every key from the character FIFO alone — the HID device pushes
+   named keys into it too, so a browser needs only one ordered stream where
+   `user/demo.c` needed two.
 6. **HDD DMA commands** and the library's fast path (§9), then a new
    measurement.
 

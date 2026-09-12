@@ -167,3 +167,7 @@ design, the limits and every error code are in
 It's the biggest library here. A program that includes it is about 99 KB,
 and moving one 512-byte block through the IO window costs about 4,350
 instructions, so a 100 KB file takes about 0.4 s to load.
+
+`user/files.c` is the worked example — a file browser that walks
+directories, reads text files and writes notes, and reports every refusal
+through `fs_strerror()`. Run it with `python3 start_emulator.py files --run`.

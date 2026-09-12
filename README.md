@@ -148,6 +148,7 @@ unrecognised key is a warning, not an error.
 | | |
 |---|---|
 | `user/demo.c` | ⭐ **start here** — a menu, a textbox and a canvas, in C |
+| `user/files.c` | a file browser for the channel-2 disk: walk directories, read text files, write notes. Formats and seeds a blank disk on first run, then never formats again |
 | `user/cube.c` | a draggable 3D wireframe cube, built on `<pigeon/math.h>` |
 | `user/screen.asm` | ✅ runs to `HALT`, fills the screen with a bitwise pattern |
 | `user/sincos.asm` | animated plot; loops forever by design |
