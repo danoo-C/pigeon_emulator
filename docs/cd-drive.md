@@ -1,9 +1,10 @@
 # A CD drive: removable discs the host picks
 
-> **Status: phases 0 and 1 are done** — the device
-> (`emulator/devices/cd.py`, `tests/test_cd.py`, 40 tests) and read-only
-> volumes in `fs.c` (`FS_EROFS`, 13 tests). What is left is the HTTP layer,
-> the two front ends, the guest library and the demo. **Every decision is
+> **Status: phases 0 to 3 are done** — the device
+> (`emulator/devices/cd.py`, `tests/test_cd.py`), read-only volumes in
+> `fs.c` (`FS_EROFS`), the HTTP surface with its config, and the browser
+> front end. What is left is the pygame front end, the guest library and
+> the demo. **Every decision is
 > settled**; the log is in [§15](#15-decision-log).
 >
 > Phase 0 **measured the two claims §3 and §5 rest on**, and both held: a
@@ -371,13 +372,23 @@ width, or to wrap onto a second row.
 <span id="cd-status">no disc</span>
 ```
 
-- **Load from server** fetches `/cd/list` and shows it — a `<select>` is
-  enough and needs no new styling.
+- **Load from server** fetches `/cd/list` and reveals a `<select>`; picking
+  a row inserts it and hides the list again. An empty listing says so
+  rather than showing an empty box.
 - **Load from PC** is a hidden `<input type="file">`. A browser cannot hand
   over a path: `input.files[0]` is bytes with a name and nothing else. So this
   button **uploads**, and the server writes the bytes down before inserting
   them. That asymmetry with pygame is not a design choice, it is the sandbox,
   and it belongs in a comment in `index.html` so nobody "fixes" it later.
+
+The page **polls `/cd/status` every two seconds**. It is not the only thing
+that can work the drive — the pygame client drives the same device — and
+without the poll the two front ends disagree about what is in it until you
+touch a button. That costs one request every two seconds next to a frame
+fetch at 30 FPS, and it pauses while the tab is hidden.
+
+An emulator with no drive serves no `cd_url`; the page then disables the
+three buttons and says so, rather than failing on the first click.
 
 Uploads land in `cd_upload_dir` (default `cds/`) under the file's own
 basename, overwriting. So an uploaded disc **appears in `/cd/list`
@@ -620,10 +631,21 @@ Each one runs and is testable before the next.
    Mutating the probe to answer "read-only" for everything fails 40 of the
    64, which is the regression that would matter.
 2. **The HTTP layer**: the server, the five endpoints, `cd_url` on `/info`,
-   the config keys, the CLI flag.
+   the config keys, the CLI flag. ***Done***, and driven against a live
+   uvicorn once to prove the whole path: insert by name, 404 on a missing
+   path, 403 outside `cd_root` with the disc that was in still in, an
+   upload the guest could read through the bus on the next command, 413
+   over the limit, and eject.
 3. **The browser front end.** Before pygame, because it needs no new
    dependency and so proves the endpoints end to end before tkinter is in the
-   picture.
+   picture. ***Done***, and it did earn that place in the order: the page's
+   own logic was run against a live server with a stubbed DOM — 14 checks,
+   including that a 403 and a 413 reach the user as the server's own words
+   rather than a bare status code. That harness needs node, which is not a
+   dependency here, so what is committed is the static agreement check
+   `tests/test_input.py` already makes for the keycode table: every `/cd/`
+   path the page calls must be one `cd.py` serves, and every `cd-` element
+   it looks up must be one the markup declares.
 4. **The pygame front end**: the overlay list, then the tkinter dialog with
    its graceful absence, then the button-bar width.
 5. **`<pigeon/cd.h>`** and its tests on the emulator.

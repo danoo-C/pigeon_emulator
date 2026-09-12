@@ -22,6 +22,7 @@ real HDD and through the real bus rather than asserted about.
 
     python3 tests/test_cd.py      (or: python3 -m pytest tests/)
 """
+import re
 import struct
 import sys
 import tempfile
@@ -607,6 +608,54 @@ def test_a_drive_built_from_the_config_agrees_with_it():
             raise AssertionError("cd_root did not restrict anything")
     finally:
         cd.close()
+
+
+# --- the browser front end ---------------------------------------------------
+#
+# The page is JavaScript and this suite is Python, so these are the same
+# kind of check tests/test_input.py makes against the keycode table: the
+# two files have to agree, and nothing else would notice if they stopped.
+# Running the page's logic for real needs a browser (or node, which is not
+# a dependency here); what drift actually looks like is a renamed endpoint
+# or a mistyped element id, and both are visible from here.
+
+INDEX_HTML = REPO_ROOT / "display" / "index.html"
+CD_PY = REPO_ROOT / "emulator" / "devices" / "cd.py"
+
+
+def test_every_endpoint_the_page_calls_is_one_the_device_serves():
+    page = set(re.findall(r"'(/cd/[a-z]+)", INDEX_HTML.read_text()))
+    served = set(re.findall(r'@app\.(?:get|post)\("(/cd/[a-z]+)"\)', CD_PY.read_text()))
+
+    assert page, f"{INDEX_HTML} calls no /cd endpoints at all"
+    assert served, f"{CD_PY} registers no /cd routes at all"
+    assert page <= served, (
+        f"{INDEX_HTML} calls {sorted(page - served)}, which "
+        f"{CD_PY.name} does not serve (it serves {sorted(served)})")
+
+
+def test_the_page_wires_the_elements_it_declares():
+    html = INDEX_HTML.read_text()
+    declared = set(re.findall(r'id="(cd-[a-z]+)"', html))
+    looked_up = set(re.findall(r"getElementById\('(cd-[a-z]+)'\)", html))
+
+    assert declared, "the CD controls are gone from index.html"
+    assert looked_up == declared, (
+        f"getElementById and id= disagree: only in the markup "
+        f"{sorted(declared - looked_up)}, only in the script "
+        f"{sorted(looked_up - declared)}")
+
+
+def test_the_page_is_told_where_the_drive_is():
+    """index.html hardcodes no ports. It learns the CD server's address
+    from /info, the same way it learns HID's -- so if display_io stops
+    sending cd_url, every button on the page quietly goes dead."""
+    display_io = (REPO_ROOT / "emulator" / "devices" / "display_io.py").read_text()
+    assert '"cd_url": self.cd_url' in display_io, "/info no longer carries cd_url"
+    assert "info.cd_url" in INDEX_HTML.read_text(), "the page no longer reads cd_url"
+
+    machine = (REPO_ROOT / "emulator" / "machine.py").read_text()
+    assert "self.display_io.cd_url" in machine, "start_servers no longer sets cd_url"
 
 
 if __name__ == "__main__":

@@ -10,6 +10,11 @@
     canvas:focus { outline:2px solid #4a90d9 }
     canvas { image-rendering: pixelated; border:1px solid #444 }
     button { margin-right:8px }
+    button:disabled { opacity:.45; cursor:not-allowed }
+    #cd { margin-top:8px }
+    #cd-status { color:#888; font-size:12px; margin-left:4px }
+    #cd-status.bad { color:#e08070 }
+    #cd-list { margin-right:8px; max-width:22em }
   </style>
 </head>
 <body>
@@ -17,6 +22,18 @@
     <button id="clear">Clear</button>
     <label>Scale: <input id="scale" type="number" value="4" min="1" max="16" /></label>
     <label><input id="running" type="checkbox" checked/> Live</label>
+  </div>
+  <div id="cd">
+    <button id="cd-server">Load from server</button>
+    <select id="cd-list" hidden></select>
+    <button id="cd-pc">Load from PC</button>
+    <!-- A browser cannot hand over a PATH: input.files[0] is bytes with a
+         name and nothing else. So this button UPLOADS, while the pygame
+         client sends a path from a native dialog. That asymmetry is the
+         sandbox, not a design choice -- please don't "fix" it. -->
+    <input id="cd-file" type="file" hidden />
+    <button id="cd-eject">Eject</button>
+    <span id="cd-status">no drive</span>
   </div>
   <canvas id="screen" tabindex="0"></canvas>
   <p id="hint">Click the canvas to give it focus, then use the mouse and keyboard.</p>
@@ -51,6 +68,130 @@
     }
 
     let HID = null;
+
+    // The CD drive's endpoints, on their own port, discovered from /info
+    // the same way HID is. Deliberately NOT routed through post() below:
+    // that queue exists to keep ordered input state in order, and putting
+    // a disc in is neither ordered against a mouse move nor allowed to be
+    // collapsed into one.
+    let CD = null;
+
+    const cdServerBtn = document.getElementById('cd-server');
+    const cdPcBtn     = document.getElementById('cd-pc');
+    const cdEjectBtn  = document.getElementById('cd-eject');
+    const cdList      = document.getElementById('cd-list');
+    const cdFile      = document.getElementById('cd-file');
+    const cdStatus    = document.getElementById('cd-status');
+
+    function fmtSize(n){
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      return (n / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function cdSay(text, bad){
+      cdStatus.textContent = text;
+      cdStatus.classList.toggle('bad', !!bad);
+    }
+
+    // 4xx from these endpoints carries FastAPI's {detail: "..."}, and the
+    // detail is the whole point -- "outside cd_root" names the setting to
+    // change. Losing it to a bare status code would make the 403 useless.
+    async function cdCall(path, opts){
+      const r = await fetch(CD + path, opts);
+      const body = await r.json().catch(() => null);
+      if (!r.ok) throw new Error((body && body.detail) || (r.status + ' ' + r.statusText));
+      return body;
+    }
+
+    function cdShow(status){
+      const present = !!(status && status.present);
+      cdEjectBtn.disabled = !present;
+      cdSay(present ? 'disc: ' + status.name + '  (' + fmtSize(status.size) + ')'
+                    : 'no disc');
+      return status;
+    }
+
+    async function cdRefresh(){
+      try { cdShow(await cdCall('/cd/status')); }
+      catch (e) { cdSay(e.message, true); }
+    }
+
+    function wireCD(){
+      if (!CD){
+        // An emulator built before the drive existed serves no cd_url.
+        for (const b of [cdServerBtn, cdPcBtn, cdEjectBtn]) b.disabled = true;
+        cdSay('no drive on this emulator');
+        return;
+      }
+
+      cdServerBtn.addEventListener('click', async () => {
+        try {
+          const discs = await cdCall('/cd/list');
+          cdList.innerHTML = '';
+          if (!discs.length){
+            cdList.hidden = true;
+            cdSay('nothing in cd_dirs -- drop a file in cds/', true);
+            return;
+          }
+          const first = document.createElement('option');
+          first.textContent = 'pick a disc...';
+          first.value = '';
+          cdList.appendChild(first);
+          for (const d of discs){
+            const o = document.createElement('option');
+            o.value = d.path;
+            o.textContent = d.name + '  (' + fmtSize(d.size) + ')';
+            cdList.appendChild(o);
+          }
+          cdList.hidden = false;
+          cdList.focus();
+        } catch (e) { cdSay(e.message, true); }
+      });
+
+      cdList.addEventListener('change', async () => {
+        if (!cdList.value) return;
+        try {
+          cdShow(await cdCall('/cd/insert', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({path: cdList.value}),
+          }));
+          cdList.hidden = true;
+        } catch (e) { cdSay(e.message, true); }
+      });
+
+      cdPcBtn.addEventListener('click', () => cdFile.click());
+
+      cdFile.addEventListener('change', async () => {
+        const file = cdFile.files && cdFile.files[0];
+        if (!file) return;
+        cdSay('uploading ' + file.name + '...');
+        try {
+          // The File goes as the raw body. Not multipart: UploadFile would
+          // need python-multipart on the emulator side, and this is less
+          // work at both ends.
+          cdShow(await cdCall('/cd/upload?name=' + encodeURIComponent(file.name), {
+            method: 'POST',
+            headers: {'Content-Type': 'application/octet-stream'},
+            body: file,
+          }));
+        } catch (e) { cdSay(e.message, true); }
+        cdFile.value = '';            // so the same file can be picked again
+      });
+
+      cdEjectBtn.addEventListener('click', async () => {
+        try { cdShow(await cdCall('/cd/eject', {method: 'POST'})); }
+        catch (e) { cdSay(e.message, true); }
+      });
+
+      cdRefresh();
+      // The pygame client can work the same drive, so this page is not the
+      // only thing that changes what is in it. A poll every two seconds is
+      // nothing next to the frame fetch and keeps the two front ends from
+      // disagreeing about what is loaded.
+      setInterval(() => { if (!document.hidden) cdRefresh(); }, 2000);
+    }
 
     // Every update posted from here is ORDERED STATE, and fetch() does not
     // preserve order: nothing stops several POSTs being in flight at once,
@@ -112,12 +253,14 @@
         const info = await fetch('/info').then(r=>r.json());
         W = info.w; H = info.h;
         if (info.hid_url) HID = info.hid_url;
+        if (info.cd_url) CD = info.cd_url;
       }catch(e){
         document.body.textContent =
           'Cannot reach the emulator: /info failed. Is it running?';
         throw e;                      // stop, rather than render a guess
       }
       wireInput();
+      wireCD();
       off.width = W; off.height = H;
       canvas.width = W * Number(scaleInput.value || 4);
       canvas.height = H * Number(scaleInput.value || 4);
