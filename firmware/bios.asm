@@ -10,6 +10,19 @@
 ; silently truncated any program over 4 KB: the tail never arrived, the
 ; CPU ran into whatever followed, and there was no diagnostic at all.
 ;
+; The progress bar is CLAMPED to the framebuffer, and the clear that
+; follows wipes exactly the framebuffer. Both used to walk one word per
+; word copied, from DISPLAY_START, with no upper bound -- which is only
+; safe while the program is smaller than the distance from DISPLAY_START
+; to PROGRAM_LOAD_ADDR. Past that the bar runs off the bottom of the
+; screen and into the load area, and the clear then zeroes the front of
+; the program it just loaded. The ceiling was 125,928 bytes and nothing
+; announced it: user/files.c compiled to 169,076, booted into 43 KB of
+; zeros, and ran until a RET found a return address that was never
+; pushed. It is a clamp and not a bigger gap on purpose -- the gap is
+; whatever the display happens to need, so the next resolution change
+; would move the ceiling again.
+;
 ; PROGRAM_LOAD_ADDR, IO_START, DISPLAY_START, HEAP_START and the IO_*
 ; header offsets are all predefined by the assembler from
 ; emulator/memory_map.py -- do not retype them here. user/ui.asm hardcoded
@@ -21,6 +34,9 @@
 ; hardcoded: the old PROG_SIZE = 0x1000 happened to end exactly at
 ; DISPLAY_START, so a one-byte overrun landed in the framebuffer.
 WINDOW = IO_SIZE - IO_USABLE_AFTER
+
+; How many words the screen holds -- the bound on both loops below.
+DISPLAY_WORDS = DISPLAY_SIZE / 4
 
 IO_POINTER = IO_START
 IO_PROG_CHANEL = CH_USERPROG
@@ -79,9 +95,13 @@ CHUNK:
 COPY_LOOP:
     MRW A B                         ; next word out of the IO window
 
-    ; progress bar: paint this word at the next pixel, ascending
+    ; progress bar: paint this word at the next pixel, ascending, until
+    ; the screen is full -- past that the pixel would land outside the
+    ; framebuffer, and on a big enough program inside the program.
     MOV E #HEAP_ADDRESS + #DSZE
     MRW F E                         ; F = words copied so far
+    CMP F #DISPLAY_WORDS
+    JGE STORE_WORD
     MUL F F #4
     MOV E #DISPLAY_START
     ADD E E F
@@ -89,6 +109,7 @@ COPY_LOOP:
     ADD E E #3
     MW E #0xFF                      ; force alpha opaque
 
+STORE_WORD:
     MWW D A                         ; write the word to the load address
 
     ; bump the copied-words counter
@@ -137,10 +158,11 @@ WAIT_L:
     JNZ WAIT_L
 
 ; ---------------------------------------------------------------- clear
+; The whole screen, not "as many words as the bar painted". The bar's
+; count is the program's size, which is not a screen and is not bounded
+; by one.
 CLEAR:
-    MOV A #HEAP_ADDRESS + #DSZE
-    MRW C A
-    ADD C C #1
+    MOV C #DISPLAY_WORDS
     MOV B #0
 CLEAR_L:
     MOV E #DISPLAY_START

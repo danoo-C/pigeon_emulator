@@ -5,6 +5,14 @@ bigger was silently truncated: the tail never reached RAM, the CPU ran
 into whatever followed, and there was no error. A C program with a
 stdlib and a font table exceeds 4 KB immediately.
 
+There was a second, much higher ceiling behind it. The boot progress bar
+painted one screen word per word copied, and the clear afterwards wiped
+the same range -- neither bounded by the framebuffer. Past
+PROGRAM_LOAD_ADDR - DISPLAY_START bytes the bar ran off the screen into
+the load area and the clear zeroed the front of the program. That is
+what DISPLAY_CEILING below is about, and it is why these tests compare
+the whole image rather than only the tail.
+
     python3 tests/test_loader.py      (or: python3 -m pytest tests/)
 """
 import contextlib
@@ -21,11 +29,15 @@ from _runner import cases, run_module                                 # noqa: E4
 from emulator.instruction_set import NONE_REG, encode                 # noqa: E402
 from emulator.machine import Machine                                  # noqa: E402
 from emulator.memory_map import (                                     # noqa: E402
-    IO_SIZE, IOHeader, PROGRAM_LOAD_ADDR)
+    DISPLAY_SIZE, DISPLAY_START, IO_SIZE, IOHeader, PROGRAM_LOAD_ADDR)
 
 BIOS = REPO_ROOT / "build" / "bios.bin"
 WINDOW = IO_SIZE - IOHeader.USABLE_AFTER      # 4096: one DMA transfer
 SENTINEL = 0xC0FFEE
+
+# The size at which an unclamped progress bar first reaches the program
+# it is loading. Derived, not typed: it moves with the display geometry.
+DISPLAY_CEILING = PROGRAM_LOAD_ADDR - DISPLAY_START
 
 
 def program_of(instruction_count):
@@ -80,6 +92,55 @@ def test_the_old_ceiling_is_really_gone():
     result, loaded, _ = boot(program)
     assert loaded[-8:] == program[-8:], "the tail never arrived"
     assert result == SENTINEL
+
+
+@cases(
+    ("just under the display ceiling", DISPLAY_CEILING - 4096),
+    ("just over the display ceiling",  DISPLAY_CEILING + 4096),
+    ("well over it",                   DISPLAY_CEILING * 3 // 2),
+)
+def test_a_program_bigger_than_the_screen_loads_whole(label, size):
+    """The boot progress bar must not paint into the program.
+
+    user/files.c is 169,076 bytes -- <pigeon/fs.h> plus display, input
+    and string. It booted into 43 KB of zeros and ran until a RET found a
+    return address nothing had pushed. The bar painted word N of the
+    program at DISPLAY_START + 4N, which passes PROGRAM_LOAD_ADDR once
+    the program is bigger than the gap between the two, and the clear
+    that follows then zeroed everything the bar had touched.
+    """
+    program = program_of(size // 8 - 2)
+    assert len(program) > DISPLAY_SIZE, "must exceed the framebuffer to mean anything"
+    result, loaded, halted = boot(program, max_steps=40_000_000)
+
+    assert loaded == program, (
+        f"{label} ({len(program)} bytes): image differs from the file at byte "
+        f"{next(i for i in range(len(program)) if loaded[i] != program[i])} "
+        f"-- the loader wrote over the program it was loading")
+    assert halted, f"{label}: never reached HALT"
+    assert result == SENTINEL, f"{label}: A={result:#x}, want {SENTINEL:#x}"
+
+
+def test_the_screen_is_clear_when_the_program_starts():
+    """A program bigger than the screen must still find a clean
+    framebuffer -- and nothing zeroed past the end of it."""
+    program = program_of(DISPLAY_CEILING // 8)       # comfortably over
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "p.bin"
+        path.write_bytes(program)
+        machine = Machine(bios_path=str(BIOS), program_path=str(path))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                for _ in range(40_000_000):
+                    if machine.step() == 1:
+                        break
+            screen = bytes(machine.ram.mem[DISPLAY_START:DISPLAY_START + DISPLAY_SIZE])
+            assert screen == b"\x00" * DISPLAY_SIZE, "the boot bar was left on screen"
+            loaded = bytes(machine.ram.mem[PROGRAM_LOAD_ADDR:
+                                           PROGRAM_LOAD_ADDR + len(program)])
+            assert loaded == program
+        finally:
+            machine.close()
 
 
 def test_exact_window_multiple_terminates():

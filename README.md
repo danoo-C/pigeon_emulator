@@ -195,7 +195,9 @@ disks/                the channel-2 disk image (gitignored, survives a clean)
    the user program.
 3. The controller DMAs it into the IO data window; the BIOS copies it word by
    word to `0x20000`, painting each word into the framebuffer as it goes — a
-   boot progress bar made of program bytes.
+   boot progress bar made of program bytes. The bar stops at the bottom of
+   the screen: unclamped, a program larger than the gap from the framebuffer
+   to `0x20000` painted over the program it was loading.
 4. It waits 2 s on **channel 4**, clears the screen, and jumps to `0x20000`.
 
 ---
