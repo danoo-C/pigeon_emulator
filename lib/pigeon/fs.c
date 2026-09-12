@@ -52,6 +52,17 @@
 #define FS__HDD_WRITE    3u
 #define FS__HDD_FLUSH    5u
 
+/* The CD drive answers 0-5 exactly as a disk does, which is the whole
+ * reason a disc mounts through the code above without knowing it is a
+ * disc. Command 8 is the one thing a disk cannot answer, and its first
+ * word is a magic number -- so it doubles as the probe for "is this
+ * disk read-only": a disc replies with the magic, a disk replies with
+ * hdd.py's unknown-command zeros, and an empty channel replies
+ * 0xFFFFFFFF. See docs/cd-drive.md section 3.1. */
+#define FS__CD_MEDIA     8u
+#define FS__CD_MEDIA_LEN 48u
+#define FS__CD_MAGIC     0x44434750u    /* "PGCD" in byte order */
+
 /* What a dirty cache block holds -- which is also the order a flush
  * writes them in. Contents first, then the FAT that links them, then
  * the entries that point at them, then the superblock: a block becomes
@@ -101,6 +112,7 @@ struct __fs_volume {
     unsigned next_free;
     unsigned hints_dirty;
     unsigned open;                      /* handles open on this volume */
+    unsigned readonly;                  /* a disc: every write is FS_EROFS */
 };
 
 struct __fs_file {
@@ -254,7 +266,7 @@ static void __fs_flush(void) {
      * written once, in the last pass. */
     for (i = 0u; i < FS__VOLUMES; i++) {
         v = &__fs_vols[i];
-        if (v->used && v->hints_dirty) {
+        if (v->used && v->hints_dirty && !v->readonly) {
             s = __fs_cached(v->channel, 0u);
             if (s != FS__NO_SLOT) __fs_put_hints(v, s);
         }
@@ -263,7 +275,15 @@ static void __fs_flush(void) {
         for (i = 0u; i < FS__SLOTS; i++) {
             s = &__fs_cache[i];
             if (s->dirty && s->kind == kind) {
-                __fs_blk_write(s->channel, s->block, 1u, s->data);
+                /* A read-only volume cannot legitimately have a dirty
+                 * block: every path that would make one returns FS_EROFS
+                 * above. Drop it rather than send a write the device will
+                 * refuse -- and rather than leave it dirty forever, which
+                 * would have every later flush retry it. */
+                v = __fs_volume_of(s->channel);
+                if (v == FS__NO_VOL || !v->readonly) {
+                    __fs_blk_write(s->channel, s->block, 1u, s->data);
+                }
                 s->dirty = 0u;
             }
         }
@@ -461,6 +481,24 @@ static unsigned __fs_disk_blocks(unsigned channel) {
     return IO_DATAW[0] >> 9;
 }
 
+/* Is the disk on this channel one that cannot be written to?
+ *
+ * Asked once per mount, and once by fs_format() on a channel with no
+ * volume. It has to be asked at all because __fs_blk_write() has no
+ * return value to check: the device simply refuses, so without this
+ * every write to a disc would report the success it did not have.
+ *
+ * Both callers reach it only after __fs_disk_blocks() has said there is
+ * a disk here, which is what keeps §6.6's rule intact: command 8 is
+ * never sent to a channel that might be the timer, where it would mean
+ * something else entirely. */
+static unsigned __fs_readonly(unsigned channel) {
+    if (__fs_io(channel, 0u, FS__CD_MEDIA, FS__CD_MEDIA_LEN, 0u) != FS__CD_MEDIA_LEN) {
+        return 0u;
+    }
+    return (IO_DATAW[0] == FS__CD_MAGIC) ? 1u : 0u;
+}
+
 int fs_format(unsigned channel, char *label, unsigned flags) {
     unsigned total;
     unsigned fat_blocks;
@@ -479,6 +517,7 @@ int fs_format(unsigned channel, char *label, unsigned flags) {
     if (total == 0u) return FS_ENODEV;
     if (__fs_volume_of(channel) != FS__NO_VOL) return FS_EBUSY;
     if (total < FS__MIN_BLOCKS) return FS_EINVAL;
+    if (__fs_readonly(channel)) return FS_EROFS;
     __fs_drop(channel);
 
     /* A disk lives until it is deliberately reformatted: without the
@@ -573,6 +612,7 @@ int fs_mount(unsigned channel) {
     v->next_free = w[8];
     v->hints_dirty = 0u;
     v->open = 0u;
+    v->readonly = __fs_readonly(channel);
     if (__fs_cwd_vol == 0u) {
         __fs_cwd_vol = index + 1u;
         strcpy(__fs_cwd, "/");
@@ -1001,6 +1041,9 @@ int fs_open(char *path, unsigned flags) {
     r = __fs_locate(path, __fs_path_a, &w, &parent);
     if (r < 0) return r;
     v = &__fs_vols[w.vol];
+    if (v->readonly && (flags & (FS_WRITE | FS_CREATE | FS_TRUNC)) != 0u) {
+        return FS_EROFS;
+    }
     if (__fs_name_len(&w) == 0u) return FS_EISDIR;
 
     r = __fs_find(v, &parent, __fs_name(&w), __fs_name_len(&w), &e, &b, &o);
@@ -1111,6 +1154,7 @@ int fs_write(int fd, void *buf, unsigned n) {
     unsigned full = 0u;
 
     if (f == FS__NO_FILE) return FS_EBADF;
+    if (__fs_vols[f->vol].readonly) return FS_EROFS;
     v = &__fs_vols[f->vol];
     if ((f->flags & FS_APPEND) != 0u) f->pos = f->size;
     old_first = f->first;
@@ -1293,6 +1337,7 @@ int fs_mkdir(char *path) {
 
     if (r < 0) return r;
     v = &__fs_vols[w.vol];
+    if (v->readonly) return FS_EROFS;
     if (__fs_name_len(&w) == 0u) return FS_EEXIST;
     r = __fs_find(v, &parent, __fs_name(&w), __fs_name_len(&w), &e, &b, &o);
     if (r == FS_OK) return FS_EEXIST;
@@ -1334,6 +1379,7 @@ int fs_remove(char *path) {
     unsigned o;
     int r = __fs_locate(path, __fs_path_a, &w, &parent);
     if (r < 0) return r;
+    if (__fs_vols[w.vol].readonly) return FS_EROFS;
     r = __fs_target(&w, &parent, &e, &b, &o);
     if (r < 0) return r;
     if (e.type == FS_TYPE_DIR) return FS_EISDIR;
@@ -1352,6 +1398,7 @@ int fs_rmdir(char *path) {
     unsigned so;
     int r = __fs_locate(path, __fs_path_a, &w, &parent);
     if (r < 0) return r;
+    if (__fs_vols[w.vol].readonly) return FS_EROFS;
     if (__fs_name_len(&w) == 0u) return FS_EBUSY;           /* the root */
     r = __fs_target(&w, &parent, &e, &b, &o);
     if (r < 0) return r;
@@ -1380,6 +1427,7 @@ int fs_rename(char *from, char *to) {
 
     r = __fs_locate(from, __fs_path_a, &src, &sparent);
     if (r < 0) return r;
+    if (__fs_vols[src.vol].readonly) return FS_EROFS;
     if (__fs_name_len(&src) == 0u) return FS_EBUSY;         /* the root */
     v = &__fs_vols[src.vol];
     r = __fs_find(v, &sparent, __fs_name(&src), __fs_name_len(&src), &e, &sb, &so);
@@ -1540,5 +1588,6 @@ char *fs_strerror(int err) {
     if (err == FS_E2BIG) return "too big for the buffer";
     if (err == FS_ECORRUPT) return "disk is corrupt";
     if (err == FS_ENOMEM) return "out of memory";
+    if (err == FS_EROFS) return "read-only disk";
     return "unknown error";
 }

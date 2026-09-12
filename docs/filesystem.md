@@ -246,6 +246,7 @@ The authoritative version, with a comment on every call, is
 #define FS_E2BIG        (-16)   /* the result is bigger than the buffer */
 #define FS_ECORRUPT     (-17)   /* inconsistent on disk: run pfs fsck   */
 #define FS_ENOMEM       (-18)   /* the heap could not provide the cache */
+#define FS_EROFS        (-19)   /* a read-only disk: a disc, not a disk  */
 
 char *fs_strerror(int err);     /* for disp_text()                      */
 
@@ -344,6 +345,19 @@ int main(void) {
 The first run formats the disk, and every later run finds the files the
 previous one left. A disk holding data is never formatted by this code: without
 `FS_FORMAT_FORCE`, `fs_format` refuses anything that isn't blank (§6.6).
+
+**`FS_EROFS` was added later**, with the CD drive
+([cd-drive.md](cd-drive.md)). A disk on a channel that refuses writes --
+today only a disc in the drive on channel 6 -- mounts, reads and walks
+normally, and everything that would write returns it: `fs_format`,
+`fs_open` with `FS_WRITE`/`FS_CREATE`/`FS_TRUNC`, `fs_write`, `fs_mkdir`,
+`fs_rmdir`, `fs_remove`, `fs_rename`.
+
+It is not a convenience. `__fs_blk_write()` has no return value to check,
+so before the flag existed a write to such a disk did nothing and every
+call above it reported success -- `fs_save()` handed back the byte count
+for bytes that went nowhere. `fs_mount()` now asks the device once, with a
+command a disk cannot answer, and records the answer on the volume.
 
 ### The rules
 

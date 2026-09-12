@@ -25,6 +25,13 @@
  * Every call leaves the disk written through to the host file before it
  * returns, so stopping the emulator between two calls loses nothing.
  * fs_sync() adds an fsync on the host, for the host losing power.
+ *
+ * A disk may be READ-ONLY -- a disc in the CD drive is (docs/cd-drive.md).
+ * Mounting, reading and walking one all work; everything that would write
+ * returns FS_EROFS. That is worth stating because the alternative was
+ * worse: the device simply refuses the write, so before this existed
+ * fs_save() on a disc returned the byte count for bytes that went
+ * nowhere.
  */
 #ifndef PIGEON_FS_H
 #define PIGEON_FS_H
@@ -52,6 +59,8 @@
 #define FS_E2BIG        (-16)   /* the result is bigger than the buffer  */
 #define FS_ECORRUPT     (-17)   /* inconsistent on disk: run pfs fsck    */
 #define FS_ENOMEM       (-18)   /* the heap could not provide the cache  */
+#define FS_EROFS        (-19)   /* a read-only disk: a disc in the CD
+                                   drive, not a disk on an HDD channel  */
 
 char *fs_strerror(int err);     /* for disp_text()                       */
 

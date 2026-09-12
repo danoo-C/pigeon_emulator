@@ -87,9 +87,15 @@ def pattern(n):
 _build = functools.lru_cache(maxsize=None)(build)
 
 
-def machine_for(disk, boot=None):
-    return Machine(bios_path=str(BIOS), program_path=str(boot) if boot else None,
-                   disk_path=str(disk))
+def machine_for(disk, boot=None, disc=None):
+    machine = Machine(bios_path=str(BIOS), program_path=str(boot) if boot else None,
+                      disk_path=str(disk))
+    if disc is not None:
+        # Temporary images live outside the repo, which is where the
+        # drive will only take discs from by default.
+        machine.cd.root = None
+        machine.cd.insert(disc)
+    return machine
 
 
 def load(machine, source):
@@ -97,9 +103,9 @@ def load(machine, source):
     machine.cpu.pc = PROGRAM_LOAD_ADDR
 
 
-def run_fs(source, disk, boot=None, inspect=None, seconds=120):
+def run_fs(source, disk, boot=None, inspect=None, seconds=120, disc=None):
     """Run a program to HALT and return main()'s result, signed."""
-    machine = machine_for(disk, boot)
+    machine = machine_for(disk, boot, disc)
     try:
         load(machine, source)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -128,6 +134,16 @@ def disks():
 def formatted(d, name="disk.img", size=MiB, label=""):
     path = d / name
     PgfsImage.mkfs(path, size, label=label).close()
+    return path
+
+
+def disc_image(d, name="disc.img", size=MiB, label="DISC", files=()):
+    """A PigeonFS image to put in the CD drive: a read-only volume."""
+    path = d / name
+    PgfsImage.mkfs(path, size, label=label).close()
+    with PgfsImage(path) as img:
+        for where, data in files:
+            img.write_file(where, data)
     return path
 
 
@@ -1036,6 +1052,189 @@ def test_every_crash_point_is_repairable():
                 f"after write {i + 1} of {len(states)}: the file being renamed "
                 f"has no name at all")
         assert committed, "the 2500-byte file never appeared"
+
+
+# --- read-only volumes: a disc in the CD drive -------------------------------
+#
+# The device on channel 6 answers 0-5 exactly as a disk does, so a disc
+# mounts through the same code a disk does and nothing here is about
+# mounting working. It is about what happens when something tries to
+# WRITE to one.
+#
+# __fs_blk_write() has no return value to check -- the device simply
+# refuses -- so before FS_EROFS existed, fs_save() on a disc returned the
+# byte count for bytes that went nowhere and the guest had no way to find
+# out. Every refusal below is checked against the host image being
+# byte-identical afterwards, because "it returned an error" and "it did
+# not write" are two different claims.
+
+DISC_FILES = (("/hello.txt", b"read off a disc\n"),
+              ("/sub/deep.txt", b"deeper\n"))
+
+
+def with_subdir(d, **kw):
+    path = disc_image(d, **kw)
+    with PgfsImage(path) as img:
+        img.mkdir("/sub")
+        img.write_file("/hello.txt", DISC_FILES[0][1])
+        img.write_file("/sub/deep.txt", DISC_FILES[1][1])
+    return path
+
+
+def test_a_disc_mounts_and_reads_like_any_other_volume():
+    with disks() as d:
+        image = with_subdir(d)
+        before = image.read_bytes()
+        expect(run_fs(program("""
+            char buf[64];
+            char cwd[64];
+            fs_volinfo info;
+            fs_stat_t st;
+            int fd, n;
+
+            TRY(fs_mount(CH_CD));
+            TRY(fs_statvfs(CH_CD, &info));
+            if (strcmp(info.label, "DISC") != 0) return -2;
+            TRY(fs_getcwd(cwd, 64u));
+            if (strcmp(cwd, "6:/") != 0) return -3;
+
+            n = fs_load("/hello.txt", buf, 64u);
+            if (n < 0) return -4;
+            buf[n] = 0;
+            if (strcmp(buf, "read off a disc\\n") != 0) return -5;
+
+            TRY(fs_stat("/sub", &st));
+            if (st.type != FS_TYPE_DIR) return -6;
+            TRY(fs_chdir("/sub"));
+            fd = fs_open("deep.txt", FS_READ);
+            if (fd < 0) return fd;
+            n = fs_read(fd, buf, 64u);
+            if (n != 7) return -7;
+            TRY(fs_seek(fd, 0, FS_SEEK_SET));
+            TRY(fs_close(fd));
+            return 0;"""), blank(d), disc=image), 0)
+        assert image.read_bytes() == before, "reading a disc changed it"
+        clean(image)
+
+
+@cases(
+    ("format",  'fs_format(CH_CD, "NEW", FS_FORMAT_FORCE)'),
+    ("open",    'fs_open("6:/new.txt", FS_WRITE | FS_CREATE)'),
+    ("truncate", 'fs_open("6:/hello.txt", FS_WRITE | FS_TRUNC)'),
+    ("mkdir",   'fs_mkdir("6:/newdir")'),
+    ("rmdir",   'fs_rmdir("6:/sub")'),
+    ("remove",  'fs_remove("6:/hello.txt")'),
+    ("rename",  'fs_rename("6:/hello.txt", "6:/other.txt")'),
+    ("save",    'fs_save("6:/new.txt", "x", 1u)'),
+)
+def test_every_write_to_a_disc_is_refused_and_changes_nothing(label, call):
+    """fs_format is the one that must be tried UNMOUNTED: mounted, it is
+    refused as FS_EBUSY before it ever looks at the media."""
+    with disks() as d:
+        image = with_subdir(d)
+        before = image.read_bytes()
+        mount = "" if label == "format" else "TRY(fs_mount(CH_CD));\n"
+        expect(run_fs(program(f"""
+            {mount}r = {call};
+            return r;"""), blank(d), disc=image), FS["FS_EROFS"])
+        assert image.read_bytes() == before, f"{label} returned FS_EROFS but wrote anyway"
+        clean(image)
+
+
+def test_a_disc_is_still_refused_when_it_is_the_only_volume():
+    """Nothing above depends on a writable volume being mounted too --
+    the guard is on the volume, not on there being a better one."""
+    with disks() as d:
+        image = with_subdir(d)
+        before = image.read_bytes()
+        expect(run_fs(program("""
+            TRY(fs_mount(CH_CD));
+            return fs_save("/anywhere.txt", "x", 1u);"""), blank(d), disc=image),
+               FS["FS_EROFS"])
+        assert image.read_bytes() == before
+        clean(image)
+
+
+def test_a_disc_can_be_copied_onto_the_disk():
+    """The whole point of the drive: read there, write here."""
+    with disks() as d:
+        image = with_subdir(d)
+        disk = formatted(d, label="HDD")
+        expect(run_fs(program("""
+            char buf[64];
+            int n;
+
+            TRY(fs_mount(CH_HDD));
+            TRY(fs_mount(CH_CD));
+            n = fs_load("6:/hello.txt", buf, 64u);
+            if (n < 0) return n;
+            TRY(fs_mkdir("2:/from_disc"));
+            r = fs_save("2:/from_disc/hello.txt", buf, (unsigned)n);
+            if (r != n) return -2;
+            return 0;"""), disk, disc=image), 0)
+        with host(disk) as img:
+            assert img.read_file("/from_disc/hello.txt") == DISC_FILES[0][1]
+        clean(disk)
+        clean(image)
+
+
+def test_the_same_name_on_a_disc_and_a_disk_is_two_files():
+    with disks() as d:
+        image = with_subdir(d)
+        disk = formatted(d)
+        expect(run_fs(program("""
+            char buf[64];
+            int n;
+
+            TRY(fs_mount(CH_HDD));
+            TRY(fs_mount(CH_CD));
+            TRY(fs_save("2:/hello.txt", "on the disk", 11u));
+            n = fs_load("6:/hello.txt", buf, 64u);
+            if (n < 0) return n;
+            buf[n] = 0;
+            if (strcmp(buf, "read off a disc\\n") != 0) return -2;
+            n = fs_load("2:/hello.txt", buf, 64u);
+            if (n != 11) return -3;
+            return 0;"""), disk, disc=image), 0)
+        clean(disk)
+        clean(image)
+
+
+def test_an_empty_drive_is_not_a_disk():
+    """GET_SIZE is 0 with no disc, so fs.c's existing "is this a disk"
+    probe answers no -- with nothing added to it."""
+    with disks() as d:
+        expect(run_fs(program("""
+            if (fs_format(CH_CD, "", FS_FORMAT_FORCE) != FS_ENODEV) return -1;
+            return fs_mount(CH_CD);"""), blank(d)), FS["FS_ENODEV"])
+
+
+def test_a_writable_disk_did_not_become_read_only():
+    """The probe answers "not a disc" for an HDD, and this is the test
+    that fails if it ever stops doing so."""
+    with disks() as d:
+        image = with_subdir(d)
+        disk = formatted(d)
+        expect(run_fs(program("""
+            TRY(fs_mount(CH_HDD));
+            TRY(fs_mount(CH_CD));
+            TRY(fs_mkdir("2:/still_writable"));
+            TRY(fs_save("2:/still_writable/a.txt", "yes", 3u));
+            TRY(fs_remove("2:/still_writable/a.txt"));
+            return fs_rmdir("2:/still_writable");"""), disk, disc=image), 0)
+        clean(disk)
+
+
+def test_strerror_names_the_new_error():
+    with disks() as d:
+        image = with_subdir(d)
+        expect(run_fs(program("""
+            char *msg;
+            TRY(fs_mount(CH_CD));
+            if (fs_mkdir("6:/x") != FS_EROFS) return -1;
+            msg = fs_strerror(FS_EROFS);
+            if (strcmp(msg, "read-only disk") != 0) return -2;
+            return 0;"""), blank(d), disc=image), 0)
 
 
 if __name__ == "__main__":

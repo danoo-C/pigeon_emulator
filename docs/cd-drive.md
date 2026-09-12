@@ -1,8 +1,10 @@
 # A CD drive: removable discs the host picks
 
-> **Status: phase 0 is done** — `emulator/devices/cd.py`, the channel, and
-> `tests/test_cd.py` (40 tests). Everything else is still design. **Every
-> decision is settled**; the log is in [§15](#15-decision-log).
+> **Status: phases 0 and 1 are done** — the device
+> (`emulator/devices/cd.py`, `tests/test_cd.py`, 40 tests) and read-only
+> volumes in `fs.c` (`FS_EROFS`, 13 tests). What is left is the HTTP layer,
+> the two front ends, the guest library and the demo. **Every decision is
+> settled**; the log is in [§15](#15-decision-log).
 >
 > Phase 0 **measured the two claims §3 and §5 rest on**, and both held: a
 > PigeonFS disc mounts on channel 6 with `fs.c` untouched, and a write to it
@@ -597,7 +599,11 @@ Each one runs and is testable before the next.
    docstring is fixed.
 1. **`fs.c`: read-only volumes.** On its own, with its own run of
    `tests/test_fs.py`, because it is the only part of this that can break
-   something that already works.
+   something that already works. ***Done*** — `FS_EROFS`, a `readonly` flag
+   on the volume set by the `MEDIA` probe at mount, eight guards, and the
+   flush skip. 13 tests, and the 51 that were already there still pass.
+   Mutating the probe to answer "read-only" for everything fails 40 of the
+   64, which is the regression that would matter.
 2. **The HTTP layer**: the server, the five endpoints, `cd_url` on `/info`,
    the config keys, the CLI flag.
 3. **The browser front end.** Before pygame, because it needs no new
