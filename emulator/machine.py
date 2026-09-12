@@ -14,13 +14,14 @@ from typing import Optional
 from .bios import BIOS
 from .cpu import _HANDLERS, _UNPACK, CPU
 from .instruction_set import INSTR_SIZE
+from .devices.cd import CD
 from .devices.display_io import DisplayIO
 from .devices.hdd import HDD
 from .devices.hid import HID
 from .devices.timer import Timer
 from .io_controller import IOChannel, IOController
 from .memory_map import (
-    CH_DISPLAY, CH_HDD, CH_HID, CH_TIMER, CH_USERPROG, RAM_SIZE,
+    CH_CD, CH_DISPLAY, CH_HDD, CH_HID, CH_TIMER, CH_USERPROG, RAM_SIZE,
     REGISTER_COUNT,
 )
 from .ram import RAM
@@ -60,6 +61,13 @@ class Machine:
         self.hdd = HDD(disk_path)
         self.hid = HID()
         self.timer = Timer()
+        # Registered unconditionally, unlike CH_USERPROG: an unregistered
+        # channel answers 0xFFFFFFFF, which is the right answer for a
+        # machine with no drive and the wrong one for a drive with no
+        # disc. Always present, the guest can tell those apart -- which is
+        # what <pigeon/cd.h> uses to run on a machine built before this
+        # device existed. It starts empty; the host puts a disc in.
+        self.cd = CD()
         # Constructed before the loop below, not after: it is a device on
         # the bus now (scanout base, framebuffer fill), not only the thing
         # that serves frames over HTTP.
@@ -69,6 +77,7 @@ class Machine:
             (CH_HID, self.hid, "HID"),
             (CH_TIMER, self.timer, "TIMER"),
             (CH_DISPLAY, self.display_io, "DISPLAY"),
+            (CH_CD, self.cd, "CD"),
         ):
             self.io_controller.register_channel(
                 channel_id, IOChannel(device.callback, name=name))
@@ -98,7 +107,7 @@ class Machine:
 
     def close(self):
         """Release the disk file handles."""
-        for disk in (self.user_prog, self.hdd):
+        for disk in (self.user_prog, self.hdd, self.cd):
             if disk is not None:
                 disk.close()
 

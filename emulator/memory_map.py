@@ -91,6 +91,9 @@ CH_HDD      = 2   # general-purpose file-backed disk
 CH_HID      = 3   # mouse + keyboard
 CH_TIMER    = 4   # wall-clock countdown timers
 CH_DISPLAY  = 5   # framebuffer: scanout base, block fill
+CH_CD       = 6   # removable read-only disc, swapped from the host
+# 7 is free. <pigeon/cd.h> takes a channel, so a second drive is a
+# one-line change here and nowhere else.
 
 
 def symbols():

@@ -16,7 +16,10 @@ Parameters provided by the `IOController`:
   empty/zeroed bytearray for reads.
 
 Behavior:
-- Reads return exactly `length` bytes (zero-filled if past EOF).
+- Reads come back SHORT past EOF -- they are not zero-filled, whatever an
+  older version of this line said. Both the BIOS loader and fs.c's
+  __fs_blk_read find the end of a program that way, by comparing
+  IO_RETURN_DATA against what they asked for.
 - Writes extend the file if necessary.
 
 Command list:
