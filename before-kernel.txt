@@ -1,0 +1,2109 @@
+ ▐▛███▛█   Claude Code v2.1.270
+▝▜██████▀  Opus 5 · Claude Max
+  ▝▝ ▝▝    ~/IT/pigeon_emulator
+
+
+● Found the issue: build/ has both the disc image pigeonos.img and a same-named
+  folder pigeonos/ that neither disc picker can select since they only handle
+  files, plus a leftover testos/ folder from my earlier test. Before making
+  changes, I'll check the browser and pygame picker code to rule out an actual
+  bug in how they list/scroll files.
+
+  Searched for 1 pattern, read 4 files, listed 1 directory, ran 1 shell command (ctrl+o to expand)
+  ⎿  Referenced file docs/os_cd.md
+  ⎿  Read ../../../../tmp/claude-1000/-home-dano-IT-pigeon-emulator/5608e1c2-f09
+     f-4b1c-95e6-939a21f08084/tasks/bq45kocry.output (4 lines)
+  ⎿  Read ../../../../tmp/claude-1000/-home-dano-IT-pigeon-emulator/5608e1c2-f09
+     f-4b1c-95e6-939a21f08084/tasks/bczu8alca.output (30 lines)
+  ⎿  Read compiler/README.md (112 lines)
+  ⎿  Referenced file README.md
+
+● Next I'll gather several independent pieces of context at once: the list tests
+  in test_cd.py, cc.py's _build_project, the pygame client's
+  _cd_call/_insert_path, the top of index.html, whether build/ is gitignored,
+  and any tests covering the picker.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● I'm adding folder browsing to the "Load from server" disc picker since it
+  currently only lists files, which is why folders in build/ can't be selected.
+  Checking the related tests and docs now before making changes.
+
+  Searched for 1 pattern, read 2 files, ran 2 shell commands (ctrl+o to expand)
+
+● I'll add the drive helper in test_cd.py, the imports in test_project.py, and
+  the CD paragraph in README.md before writing tests, along with the independent
+  device, route, and front-end edits in this same batch.
+
+  Read 3 files (ctrl+o to expand)
+
+● Update(emulator/devices/cd.py)
+  ⎿  Added 50 lines, removed 17 lines
+      296          with self._lock:
+      297              return self._status_locked()
+      298  
+      299 -    def list_discs(self):                                     
+      300 -        """What /cd/list will show: the files in `dirs`, non-r
+          -ecursively.                                                   
+      299 +    def _inside_dirs(self, path: Path) -> bool:               
+      300 +        return any(path.is_relative_to(d.resolve()) for d in s
+          +elf.dirs)                                                     
+      301  
+      302 -        Non-recursive keeps it predictable -- the way to expos
+          -e more is to                                                  
+      303 -        add a directory, not to discover that the emulator cra
+          -wled your                                                     
+      304 -        home folder. Sizes are included because the default di
+          -rs include                                                    
+      305 -        build/, which holds a 128 MB ram.bin you want to recog
+          -nise before                                                   
+      306 -        you click it.                                         
+      302 +    def list_discs(self, folder=None):                        
+      303 +        """What /cd/list will show: one folder, one level, fol
+          +ders first.                                                   
+      304 +                                                              
+      305 +        With no folder it is the top: what is directly in `dir
+          +s`, merged.                                                   
+      306 +        With one, it is what is in that folder, led by ".." to
+          + go back up.                                                  
+      307 +        A folder's "path" is what to ask for next, and ".." ou
+          +t of one of                                                   
+      308 +        `dirs` has path None, meaning the top again.          
+      309 +                                                              
+      310 +        One level per request keeps it predictable -- the emul
+          +ator never                                                    
+      311 +        crawls anything, and a folder has to be inside `dirs` 
+          +to be                                                         
+      312 +        opened, so browsing reaches no further than the top ca
+          +n already                                                     
+      313 +        see. Sizes are included because the default dirs inclu
+          +de build/,                                                    
+      314 +        which holds a 128 MB ram.bin you want to recognise bef
+          +ore you                                                       
+      315 +        click it.                                             
+      316          """
+      317          found = []
+      309 -        seen = set()                                          
+      310 -        for directory in self.dirs:                           
+      318 +        if folder is None:                                    
+      319 +            where = self.dirs                                 
+      320 +        else:                                                 
+      321 +            here = Path(folder).expanduser()                  
+      322 +            if not here.is_absolute():                        
+      323 +                here = REPO_ROOT / here                       
+      324 +            here = here.resolve()                             
+      325 +            if not self._inside_dirs(here):                   
+      326 +                raise PermissionError(                        
+      327 +                    f"{here} is not inside cd_dirs; add it to 
+          +cd_dirs in "                                                  
+      328 +                    f"config.json to browse it")              
+      329 +            if not here.is_dir():                             
+      330 +                raise NotADirectoryError(f"{here}: not a folde
+          +r")                                                           
+      331 +            top = any(here == d.resolve() for d in self.dirs) 
+      332 +            found.append({"name": "..", "path": None if top el
+          +se str(here.parent),                                          
+      333 +                          "size": 0, "folder": True})         
+      334 +            where = [here]                                    
+      335 +                                                              
+      336 +        folders, files, seen = [], [], set()                  
+      337 +        for directory in where:                               
+      338              try:
+      339                  entries = sorted(directory.iterdir())
+      340              except OSError:
+     ...
+      343                  if entry.name.startswith("."):
+      344                      continue
+      345                  try:
+      319 -                    if not entry.is_file():                   
+      320 -                        continue                              
+      346                      resolved = entry.resolve()
+      322 -                    size = entry.stat().st_size               
+      347 +                    if resolved in seen:                      
+      348 +                        continue                              
+      349 +                    if entry.is_dir():                        
+      350 +                        # A link out of dirs would only be ref
+          +used when opened.                                             
+      351 +                        if not self._inside_dirs(resolved):   
+      352 +                            continue                          
+      353 +                        folders.append({"name": entry.name, "p
+          +ath": str(resolved),                                          
+      354 +                                        "size": 0, "folder": T
+          +rue})                                                         
+      355 +                    elif entry.is_file():                     
+      356 +                        files.append({"name": entry.name, "pat
+          +h": str(resolved),                                            
+      357 +                                      "size": entry.stat().st_
+          +size, "folder": False})                                       
+      358 +                    else:                                     
+      359 +                        continue                              
+      360                  except OSError:
+      361                      continue
+      325 -                if resolved in seen:                          
+      326 -                    continue                                  
+      362                  seen.add(resolved)
+      328 -                found.append({"name": entry.name, "path": str(
+          -resolved),                                                    
+      329 -                              "size": size})                  
+      330 -        return found                                          
+      363 +        return found + folders + files                        
+      364  
+      365      # --- the HTTP surface -----------------------------------
+           ----------------
+      366  
+
+● Update(emulator/devices/cd.py)
+  ⎿  Added 7 lines, removed 2 lines
+      418                  return self.status()
+      419  
+      420              @app.get("/cd/list")
+      421 -            async def cd_list():                              
+      422 -                return self.list_discs()                      
+      421 +            async def cd_list(folder: Optional[str] = None):  
+      422 +                try:                                          
+      423 +                    return self.list_discs(folder)            
+      424 +                except PermissionError as e:                  
+      425 +                    raise HTTPException(status_code=403, detai
+          +l=str(e))                                                     
+      426 +                except OSError as e:                          
+      427 +                    raise HTTPException(status_code=404, detai
+          +l=str(e))                                                     
+      428  
+      429              @app.post("/cd/insert")
+      430              async def cd_insert(body: Insert):
+
+● Update(display/display.py)
+  ⎿  Added 5 lines, removed 3 lines
+      522          except Exception as e:
+      523              self._set_status(f"CD: {e}", frames=180)
+      524  
+      525 -    def _load_from_server(self):                              
+      525 +    def _load_from_server(self, folder=None):                 
+      526 +        """The picker at the top of cd_dirs, or in one folder 
+          +inside them."""                                               
+      527          try:
+      527 -            discs = self._cd_call("GET", "/cd/list")          
+      528 +            params = {} if folder is None else {"folder": fold
+          +er}                                                           
+      529 +            discs = self._cd_call("GET", "/cd/list", params=pa
+          +rams)                                                         
+      530          except Exception as e:
+      531              self._set_status(f"CD: {e}", frames=180)
+      532              return
+      533          if not discs:
+      534              self._set_status("CD: nothing in cd_dirs -- drop a
+            file in cds/", frames=180)
+      535              return
+      534 -        self._open_picker(discs)                              
+      536 +        self._open_picker(discs, folder)                      
+      537  
+      538      def _load_from_pc(self):
+      539          """A real folder browser, via tkinter.
+
+● Update(display/display.py)
+  ⎿  Added 8 lines, removed 5 lines
+      578  
+      579      # --- the "Load from server" picker ----------------------
+           --------------------
+      580  
+      581 -    def _open_picker(self, discs):                            
+      581 +    def _open_picker(self, discs, folder=None):               
+      582          # Anything held down in the guest is released first. T
+           he picker
+      583          # swallows every key while it is open, so a key presse
+           d before it
+      584          # opened would never see its release and would stay st
+           uck down in
+     ...
+      586          for code in list(self._key_sent.values()):
+      587              self._send_key(code, False)
+      588          self._key_sent.clear()
+      589 -        self._picker = {"items": discs, "index": 0, "top": 0, 
+          -"rows": 1, "rects": [],                                       
+      590 -                        "panel": None}                        
+      589 +        self._picker = {"items": discs, "folder": folder, "ind
+          +ex": 0, "top": 0,                                             
+      590 +                        "rows": 1, "rects": [], "panel": None}
+      591  
+      592      def _close_picker(self):
+      593          self._picker = None
+     ...
+      595      def _picker_choose(self, index):
+      596          items = self._picker["items"]
+      597          if 0 <= index < len(items):
+      598 -            path = items[index]["path"]                       
+      598 +            item = items[index]                               
+      599              self._close_picker()
+      600 -            self._insert_path(path)                           
+      600 +            if item.get("folder"):                            
+      601 +                self._load_from_server(item["path"])   # ".." 
+          +to the top is None                                            
+      602 +            else:                                             
+      603 +                self._insert_path(item["path"])               
+      604  
+      605      def _picker_event(self, event):
+      606          """Handle an event while the picker is open. True if i
+           t was consumed.
+
+● Update(display/display.py)
+  ⎿  Added 2 lines, removed 1 line
+      660          pygame.draw.rect(self.screen, PICKER_BG, panel)
+      661          pygame.draw.rect(self.screen, PICKER_BORDER, panel, 1)
+      662  
+      663 -        title = self.font.render("Load from server   arrows / 
+          -click, Enter, Esc",                                           
+      663 +        where = "" if p["folder"] is None else f": {Path(p['fo
+          +lder']).name}/"                                               
+      664 +        title = self.font.render(f"Load from server{where}   a
+          +rrows / click, Enter, Esc",                                   
+      665                                   True, DIM_TEXT_COLOR)
+      666          self.screen.blit(title, (panel.x + 10, panel.y + 8))
+      667  
+
+● Update(display/display.py)
+  ⎿  Added 6 lines, removed 3 lines
+      687                  pygame.draw.rect(self.screen, PICKER_SELECTED,
+            rect, border_radius=3)
+      688              elif rect.collidepoint(mouse_pos):
+      689                  pygame.draw.rect(self.screen, BUTTON_COLOR, re
+           ct, border_radius=3)
+      690 -            name = self.font.render(item["name"], True, BUTTON
+          -_TEXT_COLOR)                                                  
+      691 -            size = self.font.render(_fmt_size(item["size"]), T
+          -rue, DIM_TEXT_COLOR)                                          
+      690 +            folder = item.get("folder")                       
+      691 +            label = item["name"] + ("/" if folder and item["na
+          +me"] != ".." else "")                                         
+      692 +            name = self.font.render(label, True, BUTTON_TEXT_C
+          +OLOR)                                                         
+      693              self.screen.blit(name, (rect.x + 8, rect.y + 3))
+      693 -            self.screen.blit(size, (rect.right - size.get_widt
+          -h() - 8, rect.y + 3))                                         
+      694 +            if not folder:                                    
+      695 +                size = self.font.render(_fmt_size(item["size"]
+          +), True, DIM_TEXT_COLOR)                                      
+      696 +                self.screen.blit(size, (rect.right - size.get_
+          +width() - 8, rect.y + 3))                                     
+      697  
+      698          if len(p["items"]) > rows:
+      699              more = self.font.render(f"{p['index'] + 1} / {len(
+           p['items'])}", True,
+
+● Update(display/index.html)
+  ⎿  Added 17 lines, removed 5 lines
+      125          return;
+      126        }
+      127  
+      128 -      cdServerBtn.addEventListener('click', async () => {     
+      128 +      // One folder at a time: a folder's row opens it in the 
+          +same list, and                                                
+      129 +      // ".." goes back up. A null folder is the top, every cd
+          +_dirs merged.                                                 
+      130 +      async function cdBrowse(folder){                        
+      131          try {
+      130 -          const discs = await cdCall('/cd/list');             
+      132 +          const discs = await cdCall('/cd/list' +             
+      133 +            (folder ? '?folder=' + encodeURIComponent(folder) 
+          +: ''));                                                       
+      134            cdList.innerHTML = '';
+      135            if (!discs.length){
+      136              cdList.hidden = true;
+     ...
+      143            cdList.appendChild(first);
+      144            for (const d of discs){
+      145              const o = document.createElement('option');
+      143 -            o.value = d.path;                                 
+      144 -            o.textContent = d.name + '  (' + fmtSize(d.size) +
+          - ')';                                                         
+      146 +            o.value = d.path || '';                           
+      147 +            if (d.folder){                                    
+      148 +              o.dataset.folder = '1';                         
+      149 +              o.textContent = d.name === '..' ? '..' : d.name 
+          ++ '/';                                                        
+      150 +            } else {                                          
+      151 +              o.textContent = d.name + '  (' + fmtSize(d.size)
+          + + ')';                                                       
+      152 +            }                                                 
+      153              cdList.appendChild(o);
+      154            }
+      155            cdList.hidden = false;
+      156            cdList.focus();
+      157          } catch (e) { cdSay(e.message, true); }
+      150 -      });                                                     
+      158 +      }                                                       
+      159  
+      160 +      cdServerBtn.addEventListener('click', () => cdBrowse(nul
+          +l));                                                          
+      161 +                                                              
+      162        cdList.addEventListener('change', async () => {
+      163 +        const chosen = cdList.selectedOptions[0];             
+      164 +        if (chosen && chosen.dataset.folder) return cdBrowse(c
+          +hosen.value || null);                                         
+      165          if (!cdList.value) return;
+      166          try {
+      167            cdShow(await cdCall('/cd/insert', {
+
+● I still need to verify the Path/Optional imports, add device and pygame
+  listing tests, fix test_project's CLI test to avoid writing into the real
+  build/, update the docs, and remove the leftover build/testos/ directory I
+  already inspected—none of these depend on each other.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Update(tests/test_cd.py)
+  ⎿  Added 64 lines, removed 3 lines
+      444  
+      445  # --- the listing --------------------------------------------
+           --------------------------
+      446  
+      447 -def test_the_listing_shows_files_with_their_sizes_and_skips_th
+          -e_rest():                                                     
+      447 +def test_the_listing_shows_folders_then_files_with_their_sizes
+          +_and_skips_the_rest():                                        
+      448      with drive() as d:
+      449          d.disc("b.bin", b"x" * 10)
+      450          d.disc("a.img", b"y" * 20)
+      451          d.disc(".hidden", b"z")
+      452          (d.dir / "subdir").mkdir()
+      453 +        (d.dir / ".git").mkdir()                              
+      454  
+      455          listed = d.cd.list_discs()
+      455 -        assert [e["name"] for e in listed] == ["a.img", "b.bin
+          -"], listed                                                    
+      456 -        assert [e["size"] for e in listed] == [20, 10]        
+      456 +        assert [e["name"] for e in listed] == ["subdir", "a.im
+          +g", "b.bin"], listed                                          
+      457 +        assert [e["folder"] for e in listed] == [True, False, 
+          +False]                                                        
+      458 +        assert [e["size"] for e in listed[1:]] == [20, 10]    
+      459          assert all(Path(e["path"]).is_absolute() for e in list
+           ed)
+      460  
+      461  
+      462 +def test_a_folder_lists_one_level_led_by_the_way_back_up():   
+      463 +    """A folder in build/ -- a project's build/<name>/ among t
+          +hem -- opens                                                  
+      464 +    in the picker instead of being invisible."""              
+      465 +    with drive() as d:                                        
+      466 +        project = d.dir / "pigeonos"                          
+      467 +        (project / "bin").mkdir(parents=True)                 
+      468 +        (project / "bin" / "deep.bin").write_bytes(b"d")      
+      469 +        (project / "boot.bin").write_bytes(b"bb")             
+      470 +                                                              
+      471 +        top = d.cd.list_discs()                               
+      472 +        assert [(e["name"], e["folder"]) for e in top] == [("p
+          +igeonos", True)], top                                         
+      473 +                                                              
+      474 +        inside = d.cd.list_discs(top[0]["path"])              
+      475 +        assert [e["name"] for e in inside] == ["..", "bin", "b
+          +oot.bin"], inside                                             
+      476 +        assert inside[0]["path"] is None, "'..' out of a cd_di
+          +rs folder is not the top"                                     
+      477 +        assert inside[2]["size"] == 2 and not inside[2]["folde
+          +r"]                                                           
+      478 +                                                              
+      479 +        deeper = d.cd.list_discs(inside[1]["path"])           
+      480 +        assert [e["name"] for e in deeper] == ["..", "deep.bin
+          +"], deeper                                                    
+      481 +        assert deeper[0]["path"] == str(project.resolve())    
+      482 +        assert d.cd.list_discs(d.dir)[0]["path"] is None      
+      483 +                                                              
+      484 +        d.cd.insert(deeper[1]["path"])                        
+      485 +        assert d.cd.status()["name"] == "deep.bin"            
+      486 +                                                              
+      487 +                                                              
+      488 +def test_browsing_reaches_no_further_than_cd_dirs():          
+      489 +    """cd_root is None here, so insert would open anything -- 
+          +which is                                                      
+      490 +    exactly why the listing has to hold its own line."""      
+      491 +    with tempfile.TemporaryDirectory() as tmp:                
+      492 +        root = Path(tmp).resolve()                            
+      493 +        shown, hidden = root / "shown", root / "hidden"       
+      494 +        shown.mkdir()                                         
+      495 +        hidden.mkdir()                                        
+      496 +        (hidden / "secret.bin").write_bytes(b"s")             
+      497 +        (shown / "disc.bin").write_bytes(b"x")                
+      498 +        (shown / "out").symlink_to(hidden)                    
+      499 +        cd = CD(root=None, dirs=[shown])                      
+      500 +        try:                                                  
+      501 +            assert [e["name"] for e in cd.list_discs()] == ["d
+          +isc.bin"], \                                                  
+      502 +                "a link out of cd_dirs was listed"            
+      503 +            for outside in (root, hidden, shown / "out", shown
+          + / "..", "/"):                                                
+      504 +                try:                                          
+      505 +                    cd.list_discs(outside)                    
+      506 +                except PermissionError:                       
+      507 +                    pass                                      
+      508 +                else:                                         
+      509 +                    raise AssertionError(f"{outside} was brows
+          +ed")                                                          
+      510 +            for not_a_folder in (shown / "disc.bin", shown / "
+          +nope"):                                                       
+      511 +                try:                                          
+      512 +                    cd.list_discs(not_a_folder)               
+      513 +                except NotADirectoryError:                    
+      514 +                    pass                                      
+      515 +                else:                                         
+      516 +                    raise AssertionError(f"{not_a_folder} was 
+          +browsed as a folder")                                         
+      517 +        finally:                                              
+      518 +            cd.close()                                        
+      519 +                                                              
+      520 +                                                              
+      521  def test_a_missing_listing_directory_is_not_an_error():
+      522      """A fresh clone has no cds/, and that must not break the 
+           picker."""
+      523      cd = CD(root=None, dirs=[Path("/nonexistent-cd-dir")])
+
+● Update(tests/test_cd.py)
+  ⎿  Added 30 lines
+      907      assert c._picker is None and c.inserted == ["/x/d1.bin"], 
+           "Esc inserted something"
+      908  
+      909  
+      910 +def test_a_folder_row_opens_the_folder_in_the_picker():       
+      911 +    module = _client_module()                                 
+      912 +    if module is None:                                        
+      913 +        return                                                
+      914 +    import pygame                                             
+      915 +    c = _bare_client(module)                                  
+      916 +    top = [{"name": "os", "path": "/x/os", "size": 0, "folder"
+          +: True}] + DISCS                                              
+      917 +    inside = [{"name": "..", "path": None, "size": 0, "folder"
+          +: True},                                                      
+      918 +              {"name": "os.img", "path": "/x/os/os.img", "size
+          +": 9, "folder": False}]                                       
+      919 +    asked = []                                                
+      920 +                                                              
+      921 +    def cd_call(method, path, **kwargs):                      
+      922 +        asked.append((method, path, kwargs.get("params")))    
+      923 +        return inside if kwargs.get("params") else top        
+      924 +                                                              
+      925 +    c._cd_call = cd_call                                      
+      926 +    c._open_picker(top)                                       
+      927 +    c._picker_event(_key(pygame, pygame.K_RETURN))            
+      928 +    assert asked == [("GET", "/cd/list", {"folder": "/x/os"})]
+          +, asked                                                       
+      929 +    assert c._picker["items"] == inside and c._picker["folder"
+          +] == "/x/os"                                                  
+      930 +    assert c.inserted == [], "opening a folder inserted someth
+          +ing"                                                          
+      931 +                                                              
+      932 +    c._picker_event(_key(pygame, pygame.K_RETURN))            
+          +# ".."                                                        
+      933 +    assert asked[-1] == ("GET", "/cd/list", {}) and c._picker[
+          +"folder"] is None, asked                                      
+      934 +                                                              
+      935 +    c._picker_event(_key(pygame, pygame.K_DOWN))              
+      936 +    c._picker_event(_key(pygame, pygame.K_RETURN))            
+      937 +    assert c._picker is None and c.inserted == ["/x/d0.bin"], 
+          +c.inserted                                                    
+      938 +                                                              
+      939 +                                                              
+      940  def test_a_click_picks_a_row_and_a_click_outside_picks_nothing
+           ():
+      941      module = _client_module()
+      942      if module is None:
+
+● Update(tests/test_project.py)
+  ⎿  Added 1 line
+      17  import sys
+      18  import tempfile
+      19  from pathlib import Path
+      20 +from unittest import mock                                      
+      21  
+      22  REPO_ROOT = Path(__file__).resolve().parents[1]
+      23  sys.path.insert(0, str(REPO_ROOT))
+
+● Update(tests/test_project.py)
+  ⎿  Added 6 lines, removed 1 line
+      279          t = Path(t)
+      280          path, disc = project_dir(t / "src"), t / "disc.img"
+      281          out = io.StringIO()
+      282 -        with contextlib.redirect_stdout(out):                 
+      282 +        # Its programs are built under the config's build_dir,
+          + which is the                                                 
+      283 +        # real build/ -- where they would sit in the disc pick
+          +er for good.                                                  
+      284 +        config = mock.Mock(build_dir=t / "build")             
+      285 +        with contextlib.redirect_stdout(out), \               
+      286 +                mock.patch("emulator.config.load_config", retu
+          +rn_value=config):                                             
+      287              assert cc.main(["--project", str(path), "-o", str(
+           disc)]) == 0
+      288          assert disc.is_file() and "boots /install.bin" in out.
+           getvalue(), out.getvalue()
+      289 +        assert (t / "build" / "testos").is_dir(), "built somew
+          +here other than build_dir"                                    
+      290  
+      291          bad = write(t / "src", "bad.txt", "[project]\nname = X
+           \n")
+      292          err = io.StringIO()
+
+● Update(docs/cd-drive.md)  ⎿  Added 1 line, removed 1 line
+      313  
+      314  ```
+      315  GET  /cd/status                  -> {present, generation, name
+           , size, path, root}
+      316 -GET  /cd/list                    -> [{name, path, size}, ...] 
+      316 +GET  /cd/list[?folder=PATH]      -> [{name, path, size, folder
+          +}, ...] | 403 outside cd_dirs                                 
+      317  POST /cd/insert   {path: "..."}  -> 200 status | 403 outside r
+           oot | 404 missing
+      318  POST /cd/upload   (multipart)    -> saves under cd_upload_dir,
+            then inserts
+      319  POST /cd/eject                   -> 200 status
+
+● Update(docs/cd-drive.md)
+  ⎿  Added 13 lines, removed 6 lines
+      328  `Machine.start_servers`. Add `cd_url` the same way, so `config
+           .json` stays the
+      329  single source of truth for ports and `index.html` keeps hardco
+           ding nothing.
+      330  
+      331 -**`/cd/list`** walks each directory in `cd_dirs`, **non-recurs
+          -ively**, listing                                              
+      332 -regular non-hidden files with their sizes, sorted by name. Non
+          --recursive keeps                                              
+      333 -it predictable: the way to expose more is to add a directory t
+          -o `cd_dirs`, not                                              
+      334 -to discover that the emulator crawled your home folder. Sizes 
+          -are shown                                                     
+      335 -because the default `cd_dirs` includes `build/`, which holds a
+          - 128 MB                                                       
+      336 -`ram.bin` — you want to see that before you click it.         
+      331 +**`/cd/list`** lists **one folder, one level**: the non-hidden
+          + folders, then                                                
+      332 +the regular files with their sizes, each sorted by name. With 
+          +no `folder` it                                                
+      333 +is the top — what is directly in every `cd_dirs` directory, me
+          +rged. With one,                                               
+      334 +it is that folder, led by `..` to go back up; a folder's `path
+          +` is what to ask                                              
+      335 +for next, and `..` out of a `cd_dirs` directory has path `null
+          +`, the top. So a                                              
+      336 +project's `build/<name>/` can be opened, where a flat listing 
+          +hid it.                                                       
+      337  
+      338 +A folder is only opened if it is **inside `cd_dirs`** (403 oth
+          +erwise), and a                                                
+      339 +link out of them is not listed. Browsing therefore reaches no 
+          +further than the                                              
+      340 +top can already see, and the emulator never crawls anything — 
+          +the way to                                                    
+      341 +expose more is still to add a directory to `cd_dirs`. Sizes ar
+          +e shown because                                               
+      342 +the default `cd_dirs` includes `build/`, which holds a 128 MB 
+          +`ram.bin` — you                                               
+      343 +want to see that before you click it.                         
+      344 +                                                              
+      345  **What `insert` will open.** Any path under `cd_root`, which *
+           *defaults to the
+      346  repo root**. So the whole project — `build/`, `disks/`, `cds/`
+           , `user/` — is
+      347  reachable and nothing else is. Set `cd_root` to `null` to allo
+           w the entire
+
+● Update(docs/cd-drive.md)
+  ⎿  Added 4 lines, removed 3 lines
+      372  ```
+      373  
+      374  - **Load from server** draws an **overlay list inside the pyga
+           me window** —
+      375 -  the filenames from `/cd/list`, arrow keys and click to choos
+          -e, Esc to                                                     
+      376 -  cancel. Drawn rather than delegated so this path depends on 
+          -nothing but                                                   
+      377 -  pygame.                                                     
+      375 +  the folders and filenames from `/cd/list`, arrow keys and cl
+          +ick to choose,                                                
+      376 +  Esc to cancel. Choosing a folder (shown with a trailing `/`)
+          + lists it in the                                              
+      377 +  same overlay, and `..` goes back up. Drawn rather than deleg
+          +ated so this                                                  
+      378 +  path depends on nothing but pygame.                         
+      379  - **Load from PC** opens a real folder browser with `tkinter.f
+           iledialog`,
+      380    rooted at `cd_root`, and POSTs the chosen path to `/cd/inser
+           t`.
+      381  - **Eject** POSTs `/cd/eject`, and is greyed out when the driv
+           e is empty.
+
+● Update(docs/cd-drive.md)
+  ⎿  Added 3 lines, removed 2 lines
+      413  ```
+      414  
+      415  - **Load from server** fetches `/cd/list` and reveals a `<sele
+           ct>`; picking
+      416 -  a row inserts it and hides the list again. An empty listing 
+          -says so                                                       
+      417 -  rather than showing an empty box.                           
+      416 +  a file inserts it and hides the list again, picking a folder
+          + or `..`                                                      
+      417 +  refills the list with that folder. An empty listing says so 
+          +rather than                                                   
+      418 +  showing an empty box.                                       
+      419  - **Load from PC** is a hidden `<input type="file">`. A browse
+           r cannot hand
+      420    over a path: `input.files[0]` is bytes with a name and nothi
+           ng else. So this
+      421    button **uploads**, and the server writes the bytes down bef
+           ore inserting
+
+● Update(README.md)
+  ⎿  Added 3 lines, removed 1 line
+       96  sound card it doesn't need.
+       97  
+       98  Both front-ends have a **CD drive** row: *Load from server* pi
+           cks a file from
+       99 -the emulator's `cds/` and `build/` folders, *Load from PC* rea
+          -ches any file —                                               
+       99 +the emulator's `cds/` and `build/` folders, or from a folder i
+          +nside them (a                                                 
+      100 +disc built with `cc.py --project` is `build/<name>.img`, next 
+          +to its                                                        
+      101 +`build/<name>/` of parts), *Load from PC* reaches any file —  
+      102  the browser uploads it, the pygame client opens a native file 
+           dialog — and
+      103  *Eject* empties the drive ([docs/cd-drive.md](docs/cd-drive.md
+           )). The pygame
+      104  dialog needs tkinter, which is a system package rather than a 
+           pip one
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● Found a UX bug: navigating up from build/pigeonos/ should return to the merged
+  top list you came from, not just build/. Fixing the device behavior and
+  updating the docs accordingly.
+
+● Update(emulator/devices/cd.py)
+  ⎿  Added 3 lines, removed 2 lines
+      304  
+      305          With no folder it is the top: what is directly in `dir
+           s`, merged.
+      306          With one, it is what is in that folder, led by ".." to
+            go back up.
+      307 -        A folder's "path" is what to ask for next, and ".." ou
+          -t of one of                                                   
+      308 -        `dirs` has path None, meaning the top again.          
+      307 +        A folder's "path" is what to ask for next, and ".." ba
+          +ck to the                                                     
+      308 +        top -- where a top-level folder was opened from, rathe
+          +r than its                                                    
+      309 +        one directory on its own -- has path None.            
+      310  
+      311          One level per request keeps it predictable -- the emul
+           ator never
+      312          crawls anything, and a folder has to be inside `dirs` 
+           to be
+
+● Update(emulator/devices/cd.py)
+  ⎿  Added 2 lines, removed 1 line
+      329                      f"config.json to browse it")
+      330              if not here.is_dir():
+      331                  raise NotADirectoryError(f"{here}: not a folde
+           r")
+      332 -            top = any(here == d.resolve() for d in self.dirs) 
+      332 +            tops = [d.resolve() for d in self.dirs]           
+      333 +            top = here in tops or here.parent in tops         
+      334              found.append({"name": "..", "path": None if top el
+           se str(here.parent),
+      335                            "size": 0, "folder": True})
+      336              where = [here]
+
+● Update(docs/cd-drive.md)
+  ⎿  Added 3 lines, removed 2 lines
+      332  the regular files with their sizes, each sorted by name. With 
+           no `folder` it
+      333  is the top — what is directly in every `cd_dirs` directory, me
+           rged. With one,
+      334  it is that folder, led by `..` to go back up; a folder's `path
+           ` is what to ask
+      335 -for next, and `..` out of a `cd_dirs` directory has path `null
+          -`, the top. So a                                              
+      336 -project's `build/<name>/` can be opened, where a flat listing 
+          -hid it.                                                       
+      335 +for next, and `..` back to the top — where a top-level folder 
+          +was opened from,                                              
+      336 +not its one directory on its own — has path `null`. So a proje
+          +ct's                                                          
+      337 +`build/<name>/` can be opened, where a flat listing hid it.   
+      338  
+      339  A folder is only opened if it is **inside `cd_dirs`** (403 oth
+           erwise), and a
+      340  link out of them is not listed. Browsing therefore reaches no 
+           further than the
+
+● The fix and doc edits are done. Now I'll kick off four checks in parallel:
+  rerunning test_cd.py, repeating the live HTTP check, starting the full test
+  suite in the background, and mutation-testing to confirm the new tests catch a
+  broken confinement check, an out-of-bounds link, and a folder-inserting
+  picker.
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● All four broken variants fail the intended test as expected, with the extra
+  bios.bin is missing errors just from build/ not being copied over. While the
+  full suite finishes, I'll review the commit diff and clean up the mutation
+  copies.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● I'm waiting for the full test suite, which is still running in the background.
+  Everything else is done: the targeted tests pass (test_cd.py 73/73,
+  test_input.py 35/35, test_project.py 29/29) and the live HTTP check works.
+  I'll commit once the suite result comes in.
+
+✻ Worked for 10m 18s · done Sunday 10:23 PM
+
+※ recap: The disc picker can now open folders in build/ (the disc itself is build/pigeonos.img), and the targeted tests pass. Next, once the full test suite finishes in the background, I'll commit it to cd-installer-sdk.
+
+● Background command "Run the full test suite" completed (exit code -1)
+
+  Listed 1 directory, ran 1 shell command (ctrl+o to expand)
+
+● You can now open folders in the "Load from server" picker, in both the pygame
+  window and the browser. Before, it listed only the files directly in cds/ and
+  build/ and skipped every folder, so there was nothing to select.
+
+  How it works now:
+  - Folders show with a trailing /; picking one lists what's inside, and .. goes
+    back up.
+  - Picking a file inserts it as before.
+  - The picker won't open folders outside cds/ and build/, and it doesn't list
+    links that point outside them.
+
+  The disc itself is the file build/pigeonos.img, not the folder.
+  build/pigeonos/ next to it only holds the compiled parts:
+  boot.bin.graph.c.bin, install.bin.installer.c.bin and bin/. None of those is a
+  disc.
+
+  Also fixed: one of my cc.py --project tests was writing a build/testos/ folder
+  into your real build/, where it showed up in the picker. The test now builds
+  in a temporary folder, and I deleted the leftover.
+
+  Checks: the full suite passed (962 tests, 3 of them new for folder browsing).
+  I also ran the real HTTP server:
+  - the top list showed pigeonos/ and pigeonos.img;
+  - opening the folder listed its contents;
+  - asking for /etc was refused;
+  - inserting pigeonos.img worked.
+
+  Committed as d9c87c9 on cd-installer-sdk. This session still can't push, so
+  use ! git push.
+
+  Restart the emulator and the pygame client, or reload the browser page, for
+  the change to take effect.
+
+✻ Worked for 24s · done Sunday 10:31 PM
+
+※ recap: You're building a CD installer for the emulator, and the disc picker can now open folders in build/, so the disc build/pigeonos.img is reachable. All tests pass and it's committed; next, run `! git push` and restart the emulator to try it. (disable recaps in /config)
+
+❯ okay so are we done with the cd drive? and also what is next needed to be     
+  done? just answer me here, do not write code now                              
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Yes, the CD installer work is done. All six phases in docs/os_cd.md are built
+  and tested, plus today's picker fix. The full suite passes: 962 tests.
+
+  Left over:
+  - Not pushed: cd-installer-sdk has 3 commits the remote doesn't have: 188374a,
+    9f42142 and d9c87c9. Push with ! git push, then merge.
+  - Compiler bug, still unfixed: the pigeon-cc preprocessor replaces macros
+    inside string literals. It already broke the installer once, and I only
+    renamed the macros to get around it.
+  - The installer always erases the hard disk. It formats and copies everything;
+    it can't update an existing install in place. That's fine for installation
+    media, but it isn't the "copy or replace" you first described.
+  - The hard disk boots one program, not an OS. system = ../graph.c stands in
+    until there's a kernel.
+
+  What's next is the kernel from docs/kernel.md. Booting from disk, one of its
+  planned steps, is now done. That leaves:
+  1. Relocatable programs: the kernel stays at 0x20000 and each program is
+     loaded wherever there's room.
+  2. CPU changes: first reading and setting the stack pointer, and faults; then
+     interrupts (EI, DI, IRET, SETIV), a timer interrupt and a break (Ctrl-C).
+  3. The kernel itself: system calls, running /bin/<name>.bin, exit, and
+     handling faults and break.
+  4. The console and the shell, with the shell as a separate program, as you
+     decided.
+  5. Optional: multitasking.
+
+  When it exists, the kernel becomes system = in pigeon_compiler_init.txt and
+  the apps go in /bin on the disc. That connects the installer work to the OS.
+
+  Before starting, three questions in kernel.md §18 need your answers. My
+  suggestions are in brackets:
+  - Q3: do programs use the kernel through system calls, or bundle their own
+    libraries? [system calls]
+  - Q4: where do programs go in memory? [relocation]
+  - Q5: how much CPU work? [faults and interrupts now, multitasking later,
+    checking for interrupts before every instruction]
+
+  You can answer inline in the doc or leave them to me.
+
+  My suggested order: push and merge this branch, fix the preprocessor bug (it's
+  small), settle §18, then start the kernel with relocatable programs.
+
+✻ Cooked for 42s · done Sunday 11:23 PM
+
+※ recap: The CD installer is finished and tested, including the disc picker that can now open folders; the kernel is next. Your next step is to push and merge `cd-installer-sdk`, then answer the three questions in `kernel.md` §18. (disable recaps in /config)
+
+❯ fix the preprocessor bug first                                                
+
+  Read 1 file, listed 2 directories (ctrl+o to expand)
+
+● Found the bug: _expand_once and _substitute in compiler/preprocess.py match
+  names anywhere on the line, including inside string and character literals.
+  Now I'll check how cc.py invokes the preprocessor, review existing tests, and
+  find where the workaround and bug are referenced.
+
+  Searched for 1 pattern, ran 2 shell commands (ctrl+o to expand)
+
+● I'll read tests/test_directives.py for the preprocessor tests, and separately
+  save the current preprocessor output for all .c files in user/, lib/, and
+  firmware/ so I can diff it after the fix to confirm only literals changed.
+  Ran 2 shell commands (ctrl+o to expand)
+
+● I'll still need to locate the macro tests, but the fix—preserving string and
+  character literals during line expansion and macro parameter substitution—can
+  go in this batch regardless. I'm also updating the note in os_cd.md.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Update(compiler/preprocess.py)
+  ⎿  Added 5 lines
+      14  macro body, so every use of FP pasted a comment in with it. Har
+          mless in an
+      15  expression; fatal when the expansion landed inside another comm
+          ent, since
+      16  that produced a nested `/*` the lexer cannot parse.
+      17 +                                                               
+      18 +Names inside string and character literals are text, and are ne
+         +ver                                                            
+      19 +replaced -- again as a real C preprocessor does. Replacing them
+         + meant that                                                    
+      20 +once `#define INSTALLER "/install.bin"` existed, the string "IN
+         +STALLER"                                                       
+      21 +became `""/install.bin""`, which does not compile.             
+      22  """
+      23  import re
+      24  from pathlib import Path
+
+● Update(compiler/preprocess.py)
+  ⎿  Added 4 lines
+      37  PRAGMA_RE = re.compile(r'^\s*#\s*pragma\s+(.*)$')
+      38  ANY_DIRECTIVE_RE = re.compile(r'^\s*#')
+      39  IDENTIFIER_RE = re.compile(r'\b[A-Za-z_]\w*\b')
+      40 +# A string or character literal, escapes included, or else an i
+         +dentifier.                                                     
+      41 +# Only the identifiers are ever replaced. An unterminated liter
+         +al runs to                                                     
+      42 +# the end of the line, where the lexer reports it.             
+      43 +WORD_RE = re.compile(r'"(?:\\.|[^"\\])*"?|\'(?:\\.|[^\'\\])*\'?
+         +|\b[A-Za-z_]\w*\b')                                            
+      44  
+      45  MAX_INCLUDE_DEPTH = 32
+      46  
+
+● Update(compiler/preprocess.py)
+  ⎿  Added 6 lines, removed 1 line
+      251      def _expand_once(self, line: str) -> str:
+      252          out, i = [], 0
+      253          while i < len(line):
+      254 -            match = IDENTIFIER_RE.match(line, i)              
+      254 +            match = WORD_RE.match(line, i)                    
+      255              if not match:
+      256                  out.append(line[i])
+      257                  i += 1
+      258                  continue
+      259  
+      260              name = match.group(0)
+      261 +            if name[0] in "\"'":                     # a liter
+          +al: copied as it is                                           
+      262 +                out.append(name)                              
+      263 +                i = match.end()                               
+      264 +                continue                                      
+      265 +                                                              
+      266              definition = self.macros.get(name)
+      267              if definition is None:
+      268                  out.append(name)
+
+● Update(compiler/preprocess.py)
+  ⎿  Added 3 lines, removed 2 lines
+      341  
+      342      The parentheses matter: `#define SQ(x) ((x)*(x))` is writt
+           en that way
+      343      by hand for a reason, and adding them here makes `M(a+b)` 
+           behave even
+      344 -    when the macro author forgot.                             
+      344 +    when the macro author forgot. A parameter's name inside a 
+          +literal in                                                    
+      345 +    the body is text, and stays.                              
+      346      """
+      347      if len(args) != len(params):
+      348          return body
+      349      mapping = {p: f"({a})" for p, a in zip(params, args)}
+      349 -    return IDENTIFIER_RE.sub(lambda m: mapping.get(m.group(0),
+          - m.group(0)), body)                                           
+      350 +    return WORD_RE.sub(lambda m: mapping.get(m.group(0), m.gro
+          +up(0)), body)                                                 
+      351  
+      352  
+      353  def preprocess(source: str, filename: str, include_paths=None,
+            defines=None):
+
+● Update(docs/os_cd.md)
+  ⎿  Added 2 lines, removed 2 lines
+      638     - **Found on the way: pigeon-cc's preprocessor expands macr
+           os inside
+      639       string literals.** With `#define INSTALLER "/install.bin"
+           `, the string
+      640       `"INSTALLER"` became `""/install.bin""`, and the installe
+           r didn't
+      641 -     compile. The installer's macros were renamed around it; t
+          -he                                                            
+      642 -     preprocessor is unchanged.                               
+      641 +     compile. The installer's macros were renamed around it. *
+          +(Since fixed:                                                 
+      642 +     the preprocessor leaves string and character literals alo
+          +ne.)*                                                         
+      643     - **Eight deliberate breakages each failed the tests:**
+      644       - in the installer: not copying `/boot.bin` first, never 
+           writing
+      645         block 0, taking the boot sector from the hard disk inst
+           ead of the
+
+● I'll add preprocessor tests to test_compiler.py since none exist yet—first
+  reading the file, then diffing the new preprocessor output for all 14 C files
+  against the saved copy and running the existing compiler tests.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● The preprocessed output stayed identical across all 14 C files, and all 100
+  existing compiler tests still pass. I'll now add the new tests and remove the
+  now-unneeded saved snapshots.
+
+● Update(tests/test_compiler.py)
+  ⎿  Added 1 line
+      19  from assembler.assembler import Assembler                      
+          # noqa: E402
+      20  from compiler.cc import compile_to_asm, origin_of              
+          # noqa: E402
+      21  from compiler.lexer import CompileError                        
+          # noqa: E402
+      22 +from compiler.preprocess import Preprocessor                   
+         +# noqa: E402                                                   
+      23  from emulator.cpu import CPU                                   
+          # noqa: E402
+      24  from emulator.memory_map import (BIOS2_LOAD_ADDR,              
+          # noqa: E402
+      25                                   PROGRAM_LOAD_ADDR, RAM_SIZE, S
+          TACK_TOP)
+
+● Update(tests/test_compiler.py)
+  ⎿  Added 35 lines
+      275              ord('A') * 100 + ord('B'))
+      276  
+      277  
+      278 +# --- the preprocessor ---------------------------------------
+          +----------------                                              
+      279 +                                                              
+      280 +def expand(source: str) -> str:                               
+      281 +    """Preprocessed text, without the blank lines directives l
+          +eave behind."""                                               
+      282 +    text, _ = Preprocessor().process(source, "t.c")           
+      283 +    return "\n".join(line for line in text.splitlines() if lin
+          +e.strip())                                                    
+      284 +                                                              
+      285 +                                                              
+      286 +@cases(                                                       
+      287 +    ("a string", '#define NAME "/x"\nchar *s = "NAME"; char *t
+          + = NAME;',                                                    
+      288 +     'char *s = "NAME"; char *t = "/x";'),                    
+      289 +    ("a character", "#define A 5\nint c = 'A' + A;", "int c = 
+          +'A' + 5;"),                                                   
+      290 +    ("an escaped quote", '#define N 1\nchar *s = "say \\"N\\" 
+          +N"; int n = N;',                                              
+      291 +     'char *s = "say \\"N\\" N"; int n = 1;'),                
+      292 +    ("an escaped character", "#define N 1\nint q = '\\''; int 
+          +n = N;",                                                      
+      293 +     "int q = '\\''; int n = 1;"),                            
+      294 +    ("a string a macro expands to", '#define A "B"\n#define B 
+          +1\nchar *s = A;',                                             
+      295 +     'char *s = "B";'),                                       
+      296 +    ("a parameter's name in the body", '#define SHOW(x) puts("
+          +x"), x\nSHOW(y);',                                            
+      297 +     'puts("x"), (y);'),                                      
+      298 +    ("an argument", '#define ID(x) x\n#define N 1\nchar *s = I
+          +D("N");',                                                     
+      299 +     'char *s = ("N");'),                                     
+      300 +)                                                             
+      301 +def test_names_inside_literals_are_not_replaced(source, expect
+          +ed):                                                          
+      302 +    assert expand(source) == expected, expand(source)         
+      303 +                                                              
+      304 +                                                              
+      305 +def test_a_string_can_hold_a_macro_name():                    
+      306 +    """What broke user/os/installer.c: "INSTALLER" became ""/i
+          +nstall.bin""."""                                              
+      307 +    returns('#define GREETING "hi"\n'                         
+      308 +            'int main(void){ char *s = "GREETING"; char *t = G
+          +REETING;'                                                     
+      309 +            ' return s[1]*256 + t[1]; }',                     
+      310 +            ord('R') * 256 + ord('i'))                        
+      311 +                                                              
+      312 +                                                              
+      313  def test_volatile_mmio():
+      314      """The pattern the input library depends on: a device regi
+           ster at a
+      315      fixed address, written and read through a volatile pointer
+           ."""
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● Pytest failed during test collection, likely because one of my case names is
+  being rejected by the cases helper in tests/_runner.py. I'll pull the full
+  error output along with that helper file in one batch to diagnose it.
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+● Background command "Run the full test suite" completed (exit code 0)
+
+● Update(tests/test_compiler.py)
+  ⎿  Added 2 lines, removed 2 lines
+      298      ("an argument", '#define ID(x) x\n#define N 1\nchar *s = I
+           D("N");',
+      299       'char *s = ("N");'),
+      300  )
+      301 -def test_names_inside_literals_are_not_replaced(source, expect
+          -ed):                                                          
+      302 -    assert expand(source) == expected, expand(source)         
+      301 +def test_names_inside_literals_are_not_replaced(what, source, 
+          +expected):                                                    
+      302 +    assert expand(source) == expected, f"{what}: {expand(sourc
+          +e)}"                                                          
+      303  
+      304  
+      305  def test_a_string_can_hold_a_macro_name():
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● The redundant branch didn't affect test results since WORD_RE already provides
+  the real protection, so I'm removing that branch and retargeting the mutation
+  there instead—first stopping the current suite run since it's testing the old
+  file version.
+
+● Update(compiler/preprocess.py)
+  ⎿  Added 2 lines, removed 5 lines
+      251      def _expand_once(self, line: str) -> str:
+      252          out, i = [], 0
+      253          while i < len(line):
+      254 +            # A literal is matched whole, and no macro is name
+          +d like one,                                                   
+      255 +            # so it is copied as it is.                       
+      256              match = WORD_RE.match(line, i)
+      257              if not match:
+      258                  out.append(line[i])
+     ...
+      260                  continue
+      261  
+      262              name = match.group(0)
+      261 -            if name[0] in "\"'":                     # a liter
+          -al: copied as it is                                           
+      262 -                out.append(name)                              
+      263 -                i = match.end()                               
+      264 -                continue                                      
+      265 -                                                              
+      263              definition = self.macros.get(name)
+      264              if definition is None:
+      265                  out.append(name)
+
+● Stop Task
+  ⎿  python3 -m pytest tests/ -q -p no:cacheprovider 2>&1 | tail -5 ·
+     stopped
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Both fix mutations are now covered by tests (6/8 and 1/8 failures
+  respectively). Next I'll rerun the full test suite, redo the 14-file output
+  comparison against the committed preprocessor since I simplified the code
+  afterward, and review the diff.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● The fix is done and verified; I'll commit once the full test suite finishes in
+  the background.
+
+  The bug: the preprocessor looked for macro names everywhere on a line,
+  including inside strings. With #define NAME "/x", the string "NAME" became
+  ""/x"", which doesn't compile. Macro parameters had the same problem in
+  function-like macros such as #define SHOW(x) puts("x").
+
+  The fix is in compiler/preprocess.py: each string or character literal is now
+  skipped as a whole, escaped quotes included. Only names outside literals are
+  replaced.
+
+  Checks so far:
+  - New tests, in tests/test_compiler.py: 7 cases check the preprocessed text,
+    covering strings, characters, escaped quotes, a macro that expands to a
+    string, and a parameter's name inside a string. One more compiles and runs a
+    program on the emulator where "GREETING" stays text while GREETING still
+    expands.
+  - The compiler tests pass: 108/108.
+  - The tests catch both halves of the fix: undoing the literal skipping made 6
+    of the 8 new tests fail, and undoing it for parameters failed the parameter
+    case.
+  - No existing C code changes: all 14 C files in user/, lib/ and firmware/ give
+    exactly the same preprocessed output as before.
+  - Docs: the note in docs/os_cd.md now says the bug is fixed.
+
+  I left the installer's macro names (INSTALLER_PATH, SYSTEM_PATH) as they are,
+  because they match the constant names in compiler/project.py.
+
+✻ Brewed for 5m 4s · done Sunday 11:41 PM
+
+※ recap: The preprocessor fix is done: macro names inside strings are now left alone, and the new tests plus the compiler tests pass. The full test suite is running in the background, and I'll commit once it passes. (disable recaps in /config)
+
+❯ okay now commit, i will push and merge.                                       
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● I committed the preprocessor fix as 516af68 on cd-installer-sdk. The branch
+  now has 4 commits to push: 188374a, 9f42142, d9c87c9 and 516af68.
+
+  The full test suite on this commit hasn't finished yet. The compiler tests and
+  the checks on all 14 C files already pass. Pushing is fine now, but please
+  wait to merge until I post the suite result, which will come automatically
+  when it finishes.
+
+✻ Cooked for 22s · done Sunday 11:45 PM
+
+❯ there are still some leftover dotfiles                                        
+
+● Before deleting anything I'm checking what these files actually are: type,
+  size, dates, and whether git ever tracked them.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The 11 empty dotfiles were all created at the same timestamp, suggesting the
+  sandbox created them as placeholders rather than the project itself. Next I'll
+  check the contents of .claude/, whether the test suite has finished, and
+  what's in .git/info/exclude before drawing conclusions.
+
+  Searched for 1 pattern, read 1 file, listed 1 directory (ctrl+o to expand)
+
+● I found that the "extra" files are just empty placeholders created by the
+  sandbox at 23:41:13, plus two legitimate items in .claude/
+  (settings.local.json and .cc-writes/) that I'll keep. I'll add the
+  placeholders to .git/info/exclude now so git ignores them, then delete them
+  once the test suite finishes.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● git status is clean now. The placeholders are hidden from git and can't be
+  committed by accident, and the rule is local, so nothing in the project
+  changed.
+
+  The actual deletion has to wait for the full test suite, which is still
+  running in the background. Once it finishes I'll delete:
+
+  - the 11 empty files in the repo root
+  - the 10 empty placeholders inside .claude/
+
+  I'll keep .claude/settings.local.json and .claude/.cc-writes/. The sandbox
+  protects those paths, so the delete has to run outside it, and you'll get a
+  permission prompt.
+
+  The sandbox will probably recreate the files the next time Claude Code runs a
+  command here. They'll still be empty and git won't show them, so you can
+  delete them again whenever you like. I'll also report the suite result, which
+  you need before merging.
+
+✻ Sautéed for 1m 26s · done Sunday 11:48 PM
+
+● Background command "Run the full test suite" completed (exit code 0)
+
+● The suite has finished. In one batch I'm reading its result and trying the
+  delete inside the sandbox first. It removes only files that are still empty,
+  and leaves settings.local.json and .cc-writes/ alone.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● All 970 tests pass, and the sandboxed delete safely skipped the protected
+  files. Now I'll run the same guarded delete outside the sandbox (requiring
+  your permission), which will report each file's type/size before removing and
+  list what remains—this will be my final command to avoid recreating
+  placeholders.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I didn't delete anything, because nothing was there to delete. Outside the
+  sandbox, all 22 dotfiles you saw were already gone.
+
+  What they were: empty placeholders that the command sandbox puts on disk only
+  while one of my commands is running. The full test suite started at 23:41,
+  which matches their creation time, and ran for about 7 minutes in the
+  background. That's when you saw them. When it finished, they went away on
+  their own. Inside the sandbox those paths don't look like plain empty files,
+  which is why my first delete attempt skipped them all. Earlier I said the next
+  command would recreate them and they'd stay; that was wrong, they last only
+  while a command runs. You can change the sandbox settings with /sandbox.
+
+  What's in the repo root now:
+  - .claude/, with your real settings.local.json and the .cc-writes/ folder
+  - .git, .gitignore, .pypy, .pytest_cache and .venv
+
+  git status is clean.
+
+  What I kept: the lines in .git/info/exclude. If the placeholders show up
+  during a long run again, git won't show them and can't commit them. The file
+  is local and never committed; delete those lines to undo it.
+
+  Tests: the full suite passes on 516af68, 970 tests including the 8 new ones.
+  Pushing and merging all 4 commits is safe.
+
+✻ Baked for 1m 5s · done Sunday 11:49 PM
+
+❯ okay now, jsut to verify, can we start building the kernel? just a yes or no' 
+
+● Yes. Three questions in kernel.md §18 (Q3–Q5) are still open, so answer them
+  or leave them to me before I start.
+
+✻ Baked for 5s · done Sunday 11:52 PM
+
+※ recap: We're building a PigeonOS installer and next the kernel; the disc picker and preprocessor fixes are committed, and all 970 tests pass. Next, answer the three open questions in kernel.md §18, or leave them to me, and kernel work starts.
+
+❯ i dont care, figure out the questions but dont start yet. also do a bit of    
+  quick explanation of data flow, lets say i have ls.bin and i type ls into the 
+  shell, what will execute what? will ls run in parallel with the shell or      
+  what will happen. please explain how will the architecture look like, and     
+  also what handles that the output from ls goes to the shell... and also i     
+  dont want too much detail, just quick explanations. please put it into a .md  
+  file.                                                                         
+
+● I'll read the kernel design first: the sections on memory, starting programs,
+  system calls, the console and the shell, plus the open questions in the two
+  companion docs. Then I'll decide Q3–Q5 inline and write the data-flow
+  explanation.
+
+  Read 3 files, ran 1 shell command (ctrl+o to expand)
+
+● Before writing up my answer, I'll run three quick checks: verify whether the
+  boot sector copy target overlaps the system-call table at 0x15818, see what
+  libraries already exist in lib/pigeon, and update my memory note on planning
+  questions.
+
+  Ran 1 shell command, recalled 1 memory (ctrl+o to expand)
+
+● Confirmed the address clash: the syscall table at 0x15818 conflicts with
+  bios2's boot sector copy and the boot channel at 0x15A18, so I'll relocate it
+  to 0x15A1C. Now batching independent edits: writing the overview doc,
+  recording decisions inline in the three kernel docs, and updating my memory
+  note.
+
+● Write(docs/kernel_overview.md)
+  ⎿  Wrote 143 lines to docs/kernel_overview.md
+       1 # How the OS fits together
+       2 
+       3 > **Status: the short version, nothing built.** The detail is in
+       5 > [kernel_changes.md](kernel_changes.md), and every question in 
+         them is now
+       6 > decided (§6). Booting from disk is already built ([os_cd.md](o
+         s_cd.md)).
+       8 ---
+       9 
+      10 ## 1. The pieces
+     … +194 lines (ctrl+o to expand)
+
+● Update(docs/kernel.md)
+  ⎿  Added 4 lines, removed 3 lines
+       7  > §2 were checked in the code on 2026-09-13. Anything reasoned 
+          but not run is
+       8  > marked *unverified*. Details live in [kernel_exec.md](kernel_
+          exec.md)
+       9  > (running a program, relocation) and [kernel_changes.md](kerne
+          l_changes.md)
+      10 -> (printing from programs). Three questions are still open, in 
+      11 -> [§18](#18-open-questions), for you to answer inline. Booting 
+         -from disk is                                                   
+      12 -> now designed in [os_cd.md](os_cd.md).                        
+      10 +> (printing from programs). Every question is now decided, in  
+      11 +> [§18](#18-open-questions). Booting from disk is built, as    
+      12 +> [os_cd.md](os_cd.md) describes. For a short picture of how th
+         +e pieces fit,                                                  
+      13 +> start with [kernel_overview.md](kernel_overview.md).         
+      14  
+      15  | Area | Today | Proposed | Run in the prototype |
+      16  |---|---|---|---|
+
+● Update(docs/kernel.md)
+  ⎿  Added 2 lines, removed 1 line
+      285  
+      286  ```
+      287  0x00000000  BIOS, IO window, framebuffer
+      288 -0x00015818  boot sector; system-call table                    
+      288 +0x00015818  boot sector copy, boot channel      left by bios2 
+          +(os_cd.md §5.3)                                               
+      289 +0x00015A1C  system-call table                   just past the 
+          +boot channel                                                  
+      290  0x00020000  kernel image                        fixed; vector 
+           table and interrupt frame stack are kernel globals
+      291  0x00120000  kernel frame stack and heap         the heap must 
+           stop below 0x01000000
+      292  0x01000000  shell │ image │ frame stack │ heap →
+
+● Update(docs/kernel.md)
+  ⎿  Added 4 lines, removed 2 lines
+      376  
+      377  **Files:** new `lib/pigeon/sys.h` and `sys.c`; the kernel
+      378  
+      379 -- **A system call is a call through a table** at a fixed addre
+          -ss, `0x15818`,                                                
+      380 -  that the kernel fills in at boot. Programs call through a `t
+          -ypedef`'d                                                     
+      379 +- **A system call is a call through a table** at a fixed addre
+          +ss, `0x15A1C`,                                                
+      380 +  that the kernel fills in at boot. The prototype used `0x1581
+          +8`, where bios2                                               
+      381 +  now leaves the boot sector copy and the boot channel, so the
+          + table moved                                                  
+      382 +  past them. Programs call through a `typedef`'d              
+      383    function pointer:
+      384    `((puts_fn)(*(unsigned *)SYSTAB))(s)`. This ran in P4–P6.
+      385  - **Each entry is a small wrapper:** `DI`, call the C function
+           , `EI`, `RET`.
+
+● Update(docs/kernel.md)
+  ⎿  Added 5 lines, removed 4 lines
+      403  
+      404  **Files:** new, built at `0x20000`
+      405  
+      406 -**At boot:** mount the disk, fill in the system-call and vecto
+          -r tables, set up                                              
+      407 -the console, and start `/bin/sh.bin`. Whether the kernel start
+          -s the shell again                                             
+      408 -when it exits, or stops, is still open (kernel_exec.md Q2). Th
+          -e prototype's                                                 
+      409 -kernel stops.                                                 
+      406 +**At boot:** mount the disk it was booted from, whose channel 
+          +bios2 left at                                                 
+      407 +`BOOT_CHANNEL`; fill in the system-call and vector tables; set
+          + up the console;                                              
+      408 +and start `/bin/sh.bin`. When the shell exits, the kernel star
+          +ts it again. If                                               
+      409 +it can't be started at all, the kernel prints why and halts (k
+          +ernel_exec.md                                                 
+      410 +Q2). The prototype's kernel stopped.                          
+      411  
+      412  **Running a program** (P4, P5):
+      413  
+
+● Update(docs/kernel.md)  ⎿  Added 4 lines, removed 3 lines
+      663     `SETIV`, the timer interrupt and break.
+      664  3. **The kernel:** system calls, `exec` from `/bin`, `exit`, f
+           aults and break.
+      665     Built at `0x20000`, so the old BIOS path can start it befor
+           e boot exists.
+      666 -4. **The console and the shell.**                             
+      667 -5. **The sector-booting BIOS, stage 1, and `pfs.py install-boo
+          -t`**, including                                               
+      668 -   `pfs.py` keeping the superblock's unused bytes.            
+      666 +4. **Variadic functions for `printf`, then the console and the
+          + shell.**                                                     
+      667 +5. ~~**The sector-booting BIOS, stage 1, and `pfs.py install-b
+          +oot`**~~                                                      
+      668 +   **Done** as bios2, `firmware/boot.asm`, `pfs.py boot` and `
+          +cc.py --project`                                              
+      669 +   ([os_cd.md](os_cd.md)). The kernel is installed as the proj
+          +ect's `system`.                                               
+      670  6. **The launcher, `config.json`, and the docs.**
+      671  7. **Optional: multitasking** (§14).
+      672  
+
+● Update(docs/kernel.md)
+  ⎿  Added 2 lines, removed 3 lines
+      674  
+      675  ## 18. Open questions
+      676  
+      677 -Answers inline, please — then I'll fold them into the sections
+          - above and turn                                               
+      678 -this into a decision log. Smaller shell questions are still op
+          -en in                                                         
+      679 -kernel_exec.md §10 and kernel_changes.md §4.                  
+      677 +All decided. The smaller shell questions are decided in kernel
+          +_exec.md §10 and                                              
+      678 +kernel_changes.md §4, and [kernel_overview.md](kernel_overview
+          +.md) sums them up.                                            
+      679  
+      680  1. ~~**The boot record.**~~ **Decided 2026-09-13 (left to me):
+           ** option A. The
+      681     record goes in bytes 52–63 of block 0 and the boot sector i
+           n bytes
+
+● Update(docs/kernel.md)
+  ⎿  Added 7 lines, removed 6 lines
+      684  2. ~~**The shell.**~~ **Decided 2026-09-13 (you):** the shell 
+           is a separate
+      685     program that the kernel starts, not part of the kernel.
+      686  
+      687 -3. **How programs use the kernel.** The filesystem and console
+          - through                                                      
+      688 -   system calls, with only libraries that keep no state — `str
+          -ing.c`,                                                       
+      689 -   `math.c` — bundled into programs? Or programs bundle everyt
+          -hing, and the                                                 
+      690 -   kernel unmounts before each program and mounts again after?
+          - P5 ran the                                                   
+      691 -   first, and the console has to go through the kernel either 
+          -way. I'd choose                                               
+      692 -   system calls.                                              
+      687 +3. ~~**How programs use the kernel.**~~ **Decided 2026-09-14 (
+          +left to me):**                                                
+      688 +   system calls. The filesystem and the console go through the
+          + kernel, so there                                             
+      689 +   is one `fs.c`, one current directory and one cursor; P5 ran
+          + this. Programs                                               
+      690 +   bundle only what keeps no shared state: `string.c`, `math.c
+          +`, and `mem.c`                                                
+      691 +   for their own heap. While one program runs at a time, `disp
+          +lay.c` and                                                    
+      692 +   `input.c` stay bundled too, for games and editors. With mul
+          +titasking (§14)                                               
+      693 +   they move behind system calls.                             
+      694  
+      695  4. **Where programs go.** Relocation (§8), or one of the other
+            options in
+      696     kernel_exec.md §4? P4 and P5 ran relocation end to end. I'd
+            choose
+
+● Update(docs/kernel.md)
+  ⎿  Added 2 lines, removed 3 lines
+      692     `input.c` stay bundled too, for games and editors. With mul
+           titasking (§14)
+      693     they move behind system calls.
+      694  
+      695 -4. **Where programs go.** Relocation (§8), or one of the other
+          - options in                                                   
+      696 -   kernel_exec.md §4? P4 and P5 ran relocation end to end. I'd
+          - choose                                                       
+      697 -   relocation.                                                
+      695 +4. ~~**Where programs go.**~~ **Decided 2026-09-14 (left to me
+          +):** relocation                                               
+      696 +   (§8). P4 and P5 ran it end to end, and it needs no compile-
+          +time layouts.                                                 
+      697  
+      698  5. **How far with the CPU, and how precisely.**
+      699     - **a.** `GETSP`, `SETSP` and faults: `exit()`, and crashes
+            that return to
+
+● Update(docs/kernel.md)
+  ⎿  Added 7 lines, removed 6 lines
+      695  4. ~~**Where programs go.**~~ **Decided 2026-09-14 (left to me
+           ):** relocation
+      696     (§8). P4 and P5 ran it end to end, and it needs no compile-
+           time layouts.
+      697  
+      698 -5. **How far with the CPU, and how precisely.**               
+      698 +5. ~~**How far with the CPU, and how precisely.**~~ **Decided 
+          +2026-09-14 (left                                              
+      699 +   to me):** a and b now, c later.                            
+      700     - **a.** `GETSP`, `SETSP` and faults: `exit()`, and crashes
+            that return to
+      701       the shell.
+      702     - **b.** Plus `EI`, `DI`, `IRET`, `SETIV`, the timer interr
+           upt and break.
+      702 -   - **c.** Plus multitasking in the kernel.                  
+      703 +   - **c.** Multitasking waits: it also needs an allocator, pe
+          +r-program heap                                                
+      704 +     limits and an IO rule (§14).                             
+      705  
+      704 -   I'd do a and b now, and c later: it also needs an allocator
+          -, per-program                                                 
+      705 -   heap limits and an IO rule (§14). And should interrupts be 
+          -checked before                                                
+      706 -   every instruction — 4.1% slower on CPython, no cost on PyPy
+          -, and `run` and                                               
+      707 -   `step` agree trivially — or every 10,000? I'd check every i
+          -nstruction. well i want multitasking for sure, since          
+      706 +   Interrupts are checked before every instruction, in `CPU.ru
+          +n`,                                                           
+      707 +   `Machine.step` and `Machine.run` alike. That costs 4.1% on 
+          +CPython and                                                   
+      708 +   nothing on PyPy, and `run` and `step` then agree without an
+          +y extra work. well i want multitasking for sure, since        
+
+● Update(docs/kernel_exec.md)
+  ⎿  Added 2 lines, removed 2 lines
+       4  > type `ls` at the shell. The kernel boots, starts the shell as
+           its first
+       5  > program, and the shell asks the kernel to run others. §5 was 
+          compiled and
+       6  > run on 2026-09-13; anything else reasoned but not run is mark
+          ed
+       7 -> *unverified*. Three questions are open, in [§10](#10-question
+         -s), for you to                                                 
+       8 -> answer inline; a fourth moved to kernel.md.                  
+       7 +> *unverified*. Its questions are decided, in [§10](#10-questio
+         +ns). The short                                                 
+       8 +> version is [kernel_overview.md](kernel_overview.md).         
+       9  >
+      10  > This answers kernel.md Q2 — the shell is a program, not part 
+          of the kernel —
+      11  > and changes kernel.md §8: relocation is now needed, and it tu
+          rned out cheap.
+
+● Update(docs/kernel_exec.md)
+  ⎿  Added 4 lines, removed 3 lines
+      65     }
+      66     ```
+      67  
+      68 -   The loop restarts the shell if it exits, which is only one a
+         -nswer to Q2.                                                   
+      69 -   The other is to print a message and stop, which is what the 
+         -prototype's                                                    
+      70 -   kernel does (kernel.md §16, P4).                            
+      68 +   The loop restarts the shell when it exits (Q2, decided). If 
+         +`exec` can't                                                   
+      69 +   start it at all — no `/bin/sh.bin`, or a bad header — the ke
+         +rnel prints why                                                
+      70 +   and halts instead of looping. The prototype's kernel stopped
+         + (kernel.md §16,                                               
+      71 +   P4).                                                        
+      72  
+      73  ---
+      74  
+
+● Update(docs/kernel_exec.md)
+  ⎿  Added 1 line, removed 1 line
+      315  
+      316  ## 10. Questions
+      317  
+      318 -Answers inline, please — then I'll fold them into kernel.md.  
+      318 +Decided 2026-09-14, left to me.                               
+      319  
+      320  1. **Where programs go.** Moved to kernel.md §18, Q4. The prot
+           otype there
+      321     ran relocation end to end.
+
+● Update(docs/kernel_exec.md)
+  ⎿  Added 11 lines, removed 9 lines
+      320  1. **Where programs go.** Moved to kernel.md §18, Q4. The prot
+           otype there
+      321     ran relocation end to end.
+      322  
+      323 -2. **When the shell exits.** Should the kernel start it again,
+          - as Unix                                                      
+      324 -   restarts a login prompt, or stop the machine with a message
+          -? I'd restart                                                 
+      325 -   it.                                                        
+      323 +2. ~~**When the shell exits.**~~ **Decided:** the kernel start
+          +s it again, as                                                
+      324 +   Unix restarts a login prompt. If it can't be started at all
+          +, the kernel                                                  
+      325 +   prints why and halts rather than looping.                  
+      326  
+      327 -3. **Who edits the typed line.** The kernel's console, so ever
+          -y program that                                                
+      328 -   reads a line gets echo and backspace for free, as with a Un
+          -ix terminal? Or                                               
+      329 -   the shell, so the console only prints? I'd put it in the co
+          -nsole.                                                        
+      327 +3. ~~**Who edits the typed line.**~~ **Decided:** the kernel's
+          + console.                                                     
+      328 +   `read(0, …)` returns a finished line with the echo and back
+          +space already                                                 
+      329 +   done, so every program that reads a line gets them for free
+          +.                                                             
+      330  
+      331 -4. **Finding programs.** Only `/bin`, or `/bin` then the curre
+          -nt directory?                                                 
+      332 -   Must you type the `.bin`? I'd search `/bin` then the curren
+          -t directory,                                                  
+      333 -   and not require the `.bin`.                                
+      331 +4. ~~**Finding programs.**~~ **Decided:** a name with no `/` i
+          +s looked up as                                                
+      332 +   `/bin/<name>.bin`, then as `<name>.bin` in the current dire
+          +ctory. A name                                                 
+      333 +   with a `/` is used as a path. You never type the `.bin`: it
+          +'s added when                                                 
+      334 +   missing. The shell does the lookup, and the kernel's `exec`
+          + takes a path,                                                
+      335 +   as in P5.                                                  
+
+● Update(docs/kernel_changes.md)
+  ⎿  Added 4 lines, removed 4 lines
+       1  # Kernel changes: apps that print to the shell
+       2  
+       3 -> **Status: questions, nothing built.** This checks [kernel.md]
+         -(kernel.md)                                                    
+       3 +> **Status: decided, nothing built.** This checks [kernel.md](k
+         +ernel.md)                                                      
+       4  > against one requirement: a command-line app — `ls`, `ld`, any
+          thing that
+       5  > prints — starts from the shell, prints into the shell's conso
+          le, and returns
+       6  > to it. Every fact in §2 was checked on 2026-09-13; the compil
+          er facts were
+       7 -> compiled and run. Anything reasoned but not run is marked *un
+         -verified*. Five                                                
+       8 -> questions are open, in [§4](#4-questions), for you to answer 
+         -inline; two                                                    
+       9 -> more moved to kernel.md.                                     
+       7 +> compiled and run. Anything reasoned but not run is marked *un
+         +verified*. Its                                                 
+       8 +> questions are decided, in [§4](#4-questions); two moved to ke
+         +rnel.md. The                                                   
+       9 +> short version is [kernel_overview.md](kernel_overview.md).   
+      10  
+      11  ## 1. The answer
+      12  
+
+● Update(docs/kernel_changes.md)
+  ⎿  Added 8 lines, removed 12 lines
+      150  
+      151  ## 4. Questions
+      152  
+      153 -Answers inline, please — then I'll fold them into kernel.md.  
+      153 +Decided 2026-09-14, left to me.                               
+      154  
+      155 -1. **`ld` or `ls`?** If you mean `ld`, a linker that runs on t
+          -he machine:                                                   
+      156 -   there is no object-file format and no linker, even on the h
+          -ost. `cc.py`                                                  
+      157 -   compiles every unit together (`lib/README.md`). A linker on
+          - the machine                                                  
+      158 -   would need a relocatable object format first, which kernel.
+          -md §8 sets aside                                              
+      159 -   as unneeded. Is that in scope, or did you mean `ls` and com
+          -mand-line tools                                               
+      160 -   in general?                                                
+      155 +1. ~~**`ld` or `ls`?**~~ **Decided:** `ls`, and command-line t
+          +ools in general.                                              
+      156 +   A linker on the machine is out of scope: it would need an o
+          +bject-file                                                    
+      157 +   format that nothing else needs.                            
+      158  
+      162 -2. **`printf`.** A, fixed print calls; B, a formatter that tak
+          -es an argument                                                
+      163 -   array; or C, variadic functions with a cap (§3.1)? I'd choo
+          -se **C**: it's                                                
+      164 -   the only one that gives you a real `printf`, and it keeps f
+          -rame sizes                                                    
+      165 -   constant, so it fits both the ABI and the system-call table
+          -. A is the                                                    
+      166 -   fallback if the compiler shouldn't change now.             
+      159 +2. ~~**`printf`.**~~ **Decided:** C, variadic functions with a
+          + cap of 8 extra                                               
+      160 +   word-sized arguments (§3.1). It's the only real `printf`, a
+          +nd frame sizes                                                
+      161 +   stay constant, so the ABI and the system-call table keep wo
+          +rking. It is                                                  
+      162 +   built before the shell.                                    
+      163  
+      164  3. **What goes through the kernel.** Moved to kernel.md §18, Q
+           3.
+      165  
+
+● Update(docs/kernel_changes.md)
+  ⎿  Added 13 lines, removed 12 lines
+      163  
+      164  3. **What goes through the kernel.** Moved to kernel.md §18, Q
+           3.
+      165  
+      166 -4. **Arguments.** Should startup code write `argc` and `argv` 
+          -into `main`'s                                                 
+      167 -   frame, or should apps fetch them with a system call? Should
+          - quotes group                                                 
+      168 -   words? Should the strings stay in kernel memory, or be copi
+          -ed to the app?                                                
+      169 -   I'd put `argc` and `argv` in `main`'s frame, split at space
+          -s with double                                                 
+      170 -   quotes grouping, and keep the strings in kernel memory.    
+      166 +4. ~~**Arguments.**~~ **Decided:** startup code writes `argc` 
+          +and `argv` into                                               
+      167 +   `main`'s frame. The shell splits at spaces, with double quo
+          +tes grouping                                                  
+      168 +   words, up to 16 words on a 255-character line. The strings 
+          +aren't copied:                                                
+      169 +   they stay in the caller's memory, which can't move or be fr
+          +eed while its                                                 
+      170 +   child runs.                                                
+      171  
+      172 -5. **The screen after an app.** Should the kernel redraw the c
+          -onsole's grid, or                                             
+      173 -   clear the screen and print a fresh prompt? And should outpu
+          -t pause with                                                  
+      174 -   `-- more --` when it fills the 12 rows?                    
+      172 +5. ~~**The screen after an app.**~~ **Decided:** the kernel re
+          +draws the                                                     
+      173 +   console's grid, which it keeps as text, so the shell's line
+          +s come back even                                              
+      174 +   after a game drew over them. No `-- more --` for now: outpu
+          +t that fills the                                              
+      175 +   12 rows scrolls.                                           
+      176  
+      176 -6. **Redirection.** Should `ls > list.txt` work? If every prin
+          -t goes through                                                
+      177 -   one kernel function, the kernel can send the text to a file
+          - instead of the                                               
+      178 -   screen. Pipes, with only one program running at a time, wou
+          -ld need                                                       
+      179 -   temporary files, as DOS used. In scope now, later, or never
+          -?                                                             
+      177 +6. ~~**Redirection.**~~ **Decided:** later, not in the first v
+          +ersion. Every                                                 
+      178 +   print already goes through the kernel's `write(1, …)`, so `
+          +ls > list.txt`                                                
+      179 +   can be added in the kernel without changing any program. Pi
+          +pes wait for                                                  
+      180 +   multitasking, or never come.                               
+      181  
+      182  7. **`exit()`.** Moved to kernel.md §18, Q5. The prototype the
+           re ran
+      183     `exit()` from 50 calls deep.
+
+  Wrote 1 memory (ctrl+o to expand)
+
+● Running a final combined check across the kernel docs for leftover "open
+  question" wording, any lingering references to the 0x15818 table, the memory
+  picture layout in the new doc, and the overall git diff.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I still need to fix the outdated 0x15818 references in kernel_exec.md and
+  kernel.md §2, plus realign the ls row in my updated picture—these are three
+  independent, safe fixes (the 0x15818 mention in kernel_changes.md is fine
+  as-is since it describes an old test).
+
+● Update(docs/kernel_exec.md)
+  ⎿  Added 1 line, removed 1 line
+      194  
+      195  ```
+      196  0x00000000  BIOS, IO window, framebuffer
+      197 -0x00015818  boot sector, system-call table                    
+      197 +0x00015818  boot sector copy and boot channel; system-call tab
+          +le at 0x15A1C                                                 
+      198  0x00020000  kernel image                      fixed address, b
+           uilt as today
+      199  0x00120000  kernel frame stack and heap       heap stops at 0x
+           01000000
+      200  0x01000000  shell │ image │ frame stack │ heap →
+
+● Update(docs/kernel.md)
+  ⎿  Added 1 line, removed 1 line
+      84  | `0x00000000`–`0x000003FF` | 1 KB | BIOS |
+      85  | `0x00000400`–`0x00001417` | 4 KB + 24 B | IO header and data 
+          window |
+      86  | `0x00001418`–`0x00015817` | 81 KB | framebuffer, 192×108 |
+      87 -| `0x00015818`–`0x0001FFFF` | ~42 KB | **unused** — no constant
+         - in `memory_map.py` claims it |                                
+      87 +| `0x00015818`–`0x0001FFFF` | ~42 KB | since os_cd.md: the boot
+         + sector copy and boot channel bios2 leaves (`BOOT_LOAD_ADDR`, `
+         +BOOT_CHANNEL`); the rest unused |                              
+      88  | `0x00020000`–`0x0011FFFF` | 1 MB | program code and data (`PR
+          OGRAM_LOAD_ADDR`) |
+      89  | `0x00120000`–`0x0015FFFF` | 256 KB | frame stack (`HEAP_START
+          `) |
+      90  | `0x00160000` → `0x07F00000` | ~126 MB | heap |
+
+● Update(docs/kernel_overview.md)
+  ⎿  Added 3 lines, removed 2 lines
+      22  0x00000000  BIOS, IO, screen
+      23  0x00015A1C  system-call table
+      24  0x00020000  kernel, with its stack and heap below 0x01000000
+      25 -0x01000000  shell │ code │ stack │ heap │                      
+      26 -                                        ls │ code │ stack │ hea
+         -p │    placed on top of the shell                              
+      25 +0x01000000  shell: code, stack, heap                           
+      26 +            ls: code, stack, heap            right above the sh
+         +ell's heap                                                     
+      27 +            a program ls starts, if any      right above ls    
+      28  0x07FFFFFC  hardware stack, shared, grows down
+      29  ```
+      30  
+
+● I wrote the overview to docs/kernel_overview.md, decided all the open
+  questions, and wrote no code. Nothing is committed yet.
+
+  What you asked:
+  - Does ls run in parallel with the shell? No. The shell calls
+    exec("/bin/ls.bin") and waits inside that call, like DOS. The kernel loads
+    ls into memory just above the shell and calls it like a function. When ls
+    returns, exec returns and the shell prints the next prompt.
+  - What executes what: the shell reads a line and asks the kernel to run ls. ls
+    asks the kernel for directory entries, formats its lines, and calls write.
+    Every one of those requests goes through a table of kernel addresses.
+  - What gets the output "into the shell": the kernel's console. It owns the
+    cursor and the 32×12 text grid, and both the shell and ls just call write on
+    it, one after the other. The shell never receives ls's output. Its prompt
+    simply lands below ls's lines.
+
+  Decisions: I recorded each one inline where the question was asked, in
+  kernel.md, kernel_exec.md and kernel_changes.md. §6 of the overview has the
+  full table. The main ones:
+  - Programs use system calls for the disk and the console, and are relocated
+    into memory above whoever started them.
+  - CPU work now: reading and setting the stack pointer, faults, interrupts, the
+    timer and Ctrl-C. Multitasking comes later.
+  - The shell restarts when it exits, and the kernel's console handles line
+    editing.
+  - printf comes from adding variadic functions to the compiler, capped at 8
+    extra arguments.
+  - ls > file redirection comes later.
+
+  One design fix: the kernel docs put the system-call table at 0x15818, but
+  bios2 now leaves the boot sector copy and boot channel there. I moved the
+  table to 0x15A1C and updated the docs to match.
+
+  The overview ends with the build order. Relocatable programs come first.
+
+✻ Churned for 5m 51s · done 12:05 AM
+
+❯ so what exactly is the shell doing? is it just a text input/graphics?         
+
+● Neither. The shell draws nothing and doesn't read keys itself; the kernel's
+  console does both. The shell only decides what the line you typed means and
+  asks the kernel to run it. On a Unix machine the terminal is what shows text
+  and takes keys, and the shell is the program that interprets the commands.
+
+  Who does what:
+
+  ┌─────────────┬───────────────────────────────────────────────────────────┐
+  │    Part     │                            Job                            │
+  ├─────────────┼───────────────────────────────────────────────────────────┤
+  │ Keyboard    │ Queues the keys you press                                 │
+  │ device      │                                                           │
+  ├─────────────┼───────────────────────────────────────────────────────────┤
+  │ Kernel's    │ Turns keys into a line (echo, backspace, Enter) and draws │
+  │ console     │  all text on the screen, with the cursor and scrolling    │
+  ├─────────────┼───────────────────────────────────────────────────────────┤
+  │ Shell       │ Reads a line, works out what it means, runs it, and       │
+  │             │ repeats                                                   │
+  ├─────────────┼───────────────────────────────────────────────────────────┤
+  │ Kernel's    │ Loads and runs the program the shell names                │
+  │ exec        │                                                           │
+  └─────────────┴───────────────────────────────────────────────────────────┘
+
+  The shell's whole job is one loop:
+
+  for (;;) {
+      write(1, "> ", 2);                  // prompt: the console draws it
+      read(0, line, 255);                 // the console handles typing; the 
+  shell gets "ls /docs"
+      argc = split(line, argv);           // {"ls", "/docs"}, double quotes 
+  group words
+      if (argc == 0) continue;
+      if (builtin(argc, argv)) continue;  // cd, exit, help: handled here, 
+  nothing started
+      path = find(argv[0]);               // /bin/ls.bin, then ls.bin in the 
+  current directory
+      if (!path) { print "ls: not found"; continue; }
+      status = exec(path, argc, argv);    // ls runs; the shell waits here
+      if (status != 0) print the error    // e.g. "exited with 1" or "crashed"
+  }
+
+  What it does itself:
+  - Splits the line into words.
+  - Runs its built-in commands. cd has to be one, because the current directory
+    has to change in the kernel, not in a program that then exits.
+  - Finds the program file from the name you typed.
+  - Reports problems, such as "not found", a non-zero exit, or a crash.
+  - Later, redirection: it would spot > file and tell the kernel where the
+    output goes.
+
+  What it doesn't do: draw text, handle keys, load programs, or touch the disk
+  directly. Those all belong to the kernel.
+
+  So it's a small program, probably a couple of hundred lines of C, and you
+  could swap in a different shell without changing the kernel.
+
+✻ Crunched for 22s · done 12:07 AM
+
+❯ also in the documentation for the shell, i want to be able to defien how the  
+  shell itself looks, lets say "|-PGS CWD\n|-> " for the input header. this     
+  should really just imitate the kali linux terminal look. also this should be  
+  stored as a shell_header.conf file on the virtual hdd. is this possible with  
+  the current design?                                                           
+
+● Mostly yes. Before answering precisely I'm checking four things:
+
+  - which characters the font can draw, since Kali's ┌── and └─$ aren't ASCII
+  - whether text drawing takes a color, since Kali's prompt is colored
+  - how a file like this gets onto the disc through the project file
+  - whether pfs.py can replace it on the hard disk from the host
+  Searched for 2 patterns (ctrl+o to expand)
+
+● The font only supports printable ASCII, so box-drawing characters like ┌── are
+  out, but all text calls do support color. I'll now verify pfs.py put's exact
+  arguments before writing the doc's example command.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Update(docs/kernel_overview.md)
+  ⎿  Added 1 line, removed 1 line
+      15  | **Kernel** | `/boot.bin`. Owns the disk (`fs.c`), the console
+          , and running programs (`exec`). | `0x20000`, never moves |
+      16  | **System-call table** | Addresses of kernel functions, filled
+           in at boot. The only way into the kernel. | `0x15A1C` |
+      17  | **`sys.c`** | A small library in every program: one stub per 
+          system call, calling through the table. | Inside each program |
+      18 -| **Shell** | `/bin/sh.bin`, an ordinary program. Reads a line,
+         - finds the program, asks the kernel to run it. | `0x01000000` |
+      18 +| **Shell** | `/bin/sh.bin`, an ordinary program. Reads a line,
+         + finds the program, asks the kernel to run it ([shell.md](shell
+         +.md)). | `0x01000000` |                                        
+      19  | **Commands** | `/bin/ls.bin`, `cat.bin`, … ordinary programs.
+           | Just above whoever started them |
+      20  
+      21  ```
+
+● Update(docs/kernel_exec.md)
+  ⎿  Added 2 lines, removed 1 line
+      291  | `getkey` | a raw key without waiting, for games and editors 
+           |
+      292  
+      293  **The shell** (`sh.c`, a program): prompt, split, the commands
+            it handles
+      294 -itself, lookup in `/bin`, and `exec`.                         
+      294 +itself, lookup in `/bin`, and `exec`. Its prompt comes from   
+      295 +`/etc/shell_header.conf` ([shell.md](shell.md)).              
+      296  
+      297  **First programs**: `ls`, `cat`, `echo` — small enough to test
+            the whole
+      298  chain.
+
+● I'll create docs/shell.md, noting that put requires the target folder to exist
+  beforehand, and update the overview's decision table with the prompt
+  decision.
+
+● Write(docs/shell.md)
+  ⎿  Wrote 130 lines to docs/shell.md
+      1 # The shell
+      2 
+      3 > **Status: design, nothing built.** The shell is `/bin/sh.bin`, 
+        an ordinary
+      4 > program that the kernel starts at boot ([kernel_overview.md](ke
+      5 > Decided 2026-09-14.
+      6 
+      7 ---
+      8 
+      9 ## 1. What it does
+     … +158 lines (ctrl+o to expand)
+
+● Update(docs/kernel_overview.md)
+  ⎿  Added 1 line
+      127  | Arguments | `main(argc, argv)`; split at spaces, double quot
+           es group; 16 words, 255 characters | kernel_changes.md Q4 |
+      128  | The screen after a program | The kernel redraws the text; no
+            `-- more --` yet | kernel_changes.md Q5 |
+      129  | `ls > file` | Later | kernel_changes.md Q6 |
+      130 +| How the prompt looks | Read from `/etc/shell_header.conf`, w
+          +ith ``` ``CWD`` ``` and color names; box characters need five 
+          +more glyphs | [shell.md](shell.md) §2 |                       
+      131  | System-call table address | `0x15A1C`, past the boot sector 
+           copy and boot channel bios2 leaves at `0x15818` | kernel.md §1
+           0 |
+      132  
+      133  ---
+
+● Yes, this works with the current design. I wrote it up in a new docs/shell.md
+  and linked it from the overview and kernel_exec.md. Nothing is committed and
+  no code is written.
+
+  Why it fits: the shell reads /etc/shell_header.conf when it starts, using the
+  file and current-directory system calls already planned, and prints the prompt
+  like any other text. The kernel's structure doesn't change. Your example:
+
+  |-PGS ``CWD``\n|->
+
+  shows as:
+
+  |-PGS /docs
+  |->
+
+  Rules I set for the file:
+  - \n is a new line, and  CWD  is the current directory. I also added  STATUS 
+    (the last program's exit code) and color names such as  BLUE  and  RESET .
+  - Trailing spaces are kept, so |->  keeps its space.
+  - A line break at the end of the file is ignored, and quotes around the whole
+    text are removed.
+  - If the file is missing, the shell falls back to your example as its default
+    prompt.
+  - Typing exit restarts the shell, which re-reads the file after you edit it.
+
+  Two small additions for a real Kali look, both in the kernel's console:
+  - Colors: easy, because text drawing already takes a color. The console would
+    understand the same color codes real terminals use, so any program can print
+    in color.
+  - Box characters (┌ └ ─ │ ├): today's font has only printable ASCII, so these
+    need five new glyphs. Until then, |- is the ASCII stand-in. Kali's ㉿ won't
+    fit in a 5×7 character, so use @.
+
+  Getting the file onto the hard disk:
+  - With the installer: add /etc/shell_header.conf = shell_header.conf under
+    [files] in the project file. It's copied as it is and the installer puts it
+    on the hard disk.
+  - Straight into a disk image: use pfs.py mkdir -p and pfs.py put from the
+    host.
+  - On the machine itself: not possible until there's a text editor.
+
+✻ Churned for 2m 49s · done 12:15 AM
+
+❯ commit this                                                                   
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I committed the docs as a59b4ac on cd-installer-sdk. It adds the two new
+  files, docs/kernel_overview.md and docs/shell.md, plus the decisions recorded
+  in kernel.md, kernel_exec.md and kernel_changes.md. The working tree is clean.
+
+  This session still can't push, so run ! git push yourself.
+
+✻ Churned for 13s · done 12:16 AM
+
+❯ okay before doing anything. i want to know that how can the kernel and shell  
+  run at the same time if we dont support multitasking? please explain hjust    
+  here in the chat.                                                             
+
+● They don't run at the same time. Only one of them is ever executing; they take
+  turns through ordinary function calls. "Running" here means "somewhere on the
+  call stack", not "executing right now".
+
+  The kernel isn't a process that keeps running. It's code sitting in memory
+  that runs only when something calls it:
+
+  1. At boot the kernel runs, sets things up, and then calls the shell's entry
+     point, like calling a function. The kernel is now paused inside that call.
+  2. The shell runs. When it needs something, such as a typed line, it calls a
+     kernel function through the system-call table. The shell pauses and the
+     kernel code runs.
+  3. The kernel function finishes and returns, and the shell continues.
+
+  At any moment the CPU executes exactly one instruction. The stack just
+  remembers who called whom:
+
+  kernel_main          paused, waiting for the shell to return
+   └ shell main        paused, waiting for read() to return
+      └ kernel read()  ← the CPU is HERE: waiting for Enter
+
+  After Enter, read returns and the CPU is in the shell again. When the shell
+  runs ls, ls goes on top of that stack in the same way.
+
+  It works like a library. When your C program calls strlen, the program and
+  strlen aren't running in parallel: the program pauses and strlen runs. The
+  kernel is the same idea, except its functions own the disk, the screen and the
+  keyboard, and it happened to be the first code to run.
+
+  What multitasking would add is two programs that are both in the middle of
+  their work without one having called the other. For example, the shell keeps a
+  clock ticking while ls runs. That needs a timer interrupt to forcibly pause
+  one program and switch to the other, which is the optional later step.
+
+  Interrupts in the first version don't change this. Once the CPU changes are
+  in, the timer or Ctrl-C can briefly jump into the kernel and back, but that's
+  still one thing at a time: a very short interruption, not parallel running.
+
+✻ Brewed for 17s · done 12:18 AM

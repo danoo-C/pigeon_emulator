@@ -17,7 +17,7 @@ cd prototypes/kernel
 |---|---|---|
 | `smoke.py` | — | The harness itself: the new opcodes, and a relocated program called like a function |
 | `p0_relocation.py` | kernel_exec.md §5 | Assembling twice finds every address in `user/`'s programs; a patched program runs, with its frame stack and heap after its image |
-| `p1_tests.py` | P1 | The repository's tests with the new instructions loaded. Needs pytest, so use python3; about six minutes |
+| `p1_tests.py` | P1 | The repository's tests with the new instructions loaded. Needs pytest, so use python3; about seven and a half minutes |
 | `p2_interrupts.py` | P2 | Compiled C interrupted after every instruction, with two negative controls |
 | `p3_io_header.py` | P3 | A handler doing IO while the program does IO, unprotected and two ways protected |
 | `p4_kernel.py` | P4 | Kernel, shell, exec, `exit`, faults, break, programs running programs |

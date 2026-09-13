@@ -1,7 +1,7 @@
 """P1 (docs/kernel.md §16): the repository's own tests, with the six
 prototype instructions and their syntax rows loaded.
 
-Needs pytest, so run it with python3, not PyPy. About six minutes."""
+Needs pytest, so run it with python3, not PyPy. About seven and a half minutes."""
 import os
 import sys
 

@@ -3,20 +3,23 @@
 > **Status: proposal, nothing built.** What happens, step by step, when you
 > type `ls` at the shell. The kernel boots, starts the shell as its first
 > program, and the shell asks the kernel to run others. §5 was compiled and
-> run on 2026-09-13; anything else reasoned but not run is marked
-> *unverified*. Three questions are open, in [§10](#10-questions), for you to
-> answer inline; a fourth moved to kernel.md.
+> run on 2026-09-13, and again on 2026-09-14; anything else reasoned but not
+> run is marked *unverified*. Its questions are decided, in
+> [§10](#10-questions). The short version is
+> [kernel_overview.md](kernel_overview.md).
 >
 > This answers kernel.md Q2 — the shell is a program, not part of the kernel —
 > and changes kernel.md §8: relocation is now needed, and it turned out cheap.
-> kernel_changes.md's questions still stand.
+> kernel_changes.md's questions are decided too.
 
 ---
 
 ## 1. The one idea: everything is a function call
 
-The CPU has no interrupts, so nothing can switch between programs behind their
-backs. That makes the whole system simpler than it sounds:
+Nothing switches between programs behind their backs. The CPU has no
+interrupts today, and in the first version the ones kernel.md §13 adds only
+end a program or tick the timer. That makes the whole system simpler than it
+sounds:
 
 - **The kernel runs a program** by calling a function that happens to live in
   a file it just loaded.
@@ -51,10 +54,11 @@ up and returns to the shell, which prints the next prompt.
 
 ## 2. From power-on to the prompt
 
-1. **BIOS** loads the boot sector (kernel.md §4).
-2. **Boot sector** loads the kernel (kernel.md §7).
-3. **The kernel** mounts the disk, fills in the system-call table, sets up the
-   console, and prints a banner.
+1. **The BIOS** loads bios2, which copies the disk's boot sector into memory
+   ([os_cd.md](os_cd.md), built).
+2. **The boot sector** loads `/boot.bin`, the kernel, into `0x20000`.
+3. **The kernel** mounts the disk it booted from (kernel.md Q8), fills in the
+   system-call table, sets up the console, and prints a banner.
 4. **The kernel starts the shell**, as Unix starts `init` and DOS starts
    `COMMAND.COM`:
 
@@ -65,9 +69,10 @@ up and returns to the shell, which prints the next prompt.
    }
    ```
 
-   The loop restarts the shell if it exits, which is only one answer to Q2.
-   The other is to print a message and stop, which is what the prototype's
-   kernel does (kernel.md §16, P4).
+   The loop restarts the shell when it exits (Q2, decided). If `exec` can't
+   start it at all — no `/bin/sh.bin`, or a bad header — the kernel prints why
+   and halts instead of looping. The prototype's kernel stopped (kernel.md §16,
+   P4).
 
 ---
 
@@ -133,9 +138,9 @@ Every program today is built to run at `0x20000`. If the shell is at
 `make`-style program that runs other programs, and no script runner. C gets
 to the same place as D with more moving parts.
 
-kernel.md §8 set relocation aside as "much more work, and nothing here needs
-it". The shell as a program needs it now, and §5 shows it doesn't need an
-assembler change.
+An earlier kernel.md §8 set relocation aside as "much more work, and nothing
+here needs it". The shell as a program needs it, and §5 shows it doesn't need
+an assembler change. kernel.md §8 now proposes it.
 
 ---
 
@@ -148,12 +153,12 @@ that differ is the list the kernel patches.
 
 **Checked on every C program in `user/`**
 (`prototypes/kernel/p0_relocation.py`), built with its libraries at
-`0x20000` and at `0x01021238`:
+`0x20000` and at `0x01021238`, as run again on 2026-09-14:
 
 | Program | Size | Words to patch | In an instruction's address field | Other bytes that differ |
 |---|---|---|---|---|
-| `files` | 174,024 | 1,934 | 1,915 | 0 |
-| `disc` | 172,264 | 1,780 | 1,780 | 0 |
+| `files` | 174,088 | 1,937 | 1,918 | 0 |
+| `disc` | 172,392 | 1,786 | 1,786 | 0 |
 | `graph` | 114,580 | 1,461 | 1,452 | 0 |
 | `cube` | 40,048 | 392 | 392 | 0 |
 | `demo` | 32,044 | 344 | 343 | 0 |
@@ -193,9 +198,9 @@ A proposal, not measured against anything:
 
 ```
 0x00000000  BIOS, IO window, framebuffer
-0x00015818  boot sector, system-call table
+0x00015818  boot sector copy and boot channel; system-call table at 0x15A1C
 0x00020000  kernel image                      fixed address, built as today
-0x00120000  kernel frame stack and heap       heap stops at 0x01000000
+0x00120000  kernel frame stack and heap       heap stops at 0x00FFFFE0
 0x01000000  shell │ image │ frame stack │ heap →
             ls    │ image │ frame stack │ heap →      just above the shell's heap
             ...
@@ -213,10 +218,11 @@ memory never fragments and the kernel needs no allocator for programs.
 emits that word next to the end of every image, and the header records where
 it is (§7).
 
-**Only the kernel keeps a fixed address.** Its heap needs a limit below
-`0x01000000`, where today `mem.c` returns a typed `0x07F00000` —
-kernel.md §8 already lists that change. Programs need no layout constants at
-all, which replaces kernel.md §8's separate kernel and app layouts.
+**Only the kernel keeps a fixed address.** Its heap stops at `0x00FFFFE0`,
+32 bytes below the shell. Today `mem.c` returns a typed `0x07F00000` for every
+program; instead, each program's limit becomes a word that `exec` writes
+(kernel.md Q7). Programs need no layout constants at all, which replaces the
+separate kernel and app layouts an earlier kernel.md §8 proposed.
 
 ---
 
@@ -227,17 +233,21 @@ the patch list at the end:
 
 | Field | What |
 |---|---|
-| magic | tells a program from any other file |
+| magic | tells a program from any other file; `PGX1` in the prototype |
 | version | the format version |
 | image size | bytes of code and data |
 | entry | offset of `__start` in the image |
 | patch count | number of 4-byte offsets after the image |
 | frame stack size | so the kernel can check the program fits |
-| heap-top offset | where `__heap_ptr` is in the image |
+| heap-top offset | where `__heap_ptr` is in the image; `__heap_limit` is the next word (kernel.md Q7) |
+| link address | the address it was built for, so the kernel knows how far each address moves |
+
+Eight words, so the header is 32 bytes, as the prototype built it.
 
 **Built by** a small step after the compiler: assemble twice, compare, and
-write the header, the image and the offsets. The BIOS path keeps running raw
-`.bin` files as it does today.
+write the header, the image and the offsets. `cc.py --relocatable` runs it for
+one source, and `cc.py --project` for every `.c` in `[files]` (kernel.md Q6).
+The BIOS path keeps running raw `.bin` files as it does today.
 
 **Put on the disk** with `pfs.py put`, which already exists — for example
 `/bin/ls.bin`.
@@ -290,7 +300,8 @@ in kernel_changes.md §2.
 | `getkey` | a raw key without waiting, for games and editors |
 
 **The shell** (`sh.c`, a program): prompt, split, the commands it handles
-itself, lookup in `/bin`, and `exec`.
+itself, lookup in `/bin`, and `exec`. Its prompt comes from
+`/etc/shell_header.conf` ([shell.md](shell.md)).
 
 **First programs**: `ls`, `cat`, `echo` — small enough to test the whole
 chain.
@@ -303,7 +314,7 @@ kernel.md §13 proposes CPU changes for the first three, and its prototype ran
 them. Protection is still out of reach.
 
 - **`exit()` from deep inside a program.** Only returning from `main` gets
-  back to the kernel (kernel.md Q4).
+  back to the kernel (kernel.md Q5).
 - **Ctrl-C.** Nothing can take control from a program that is busy. Even when
   it makes a system call, the kernel can't unwind it back to the shell.
 - **Crashes.** A bad opcode or a divide by zero ends the emulator, not just
@@ -314,19 +325,21 @@ them. Protection is still out of reach.
 
 ## 10. Questions
 
-Answers inline, please — then I'll fold them into kernel.md.
+Decided 2026-09-14, left to me.
 
 1. **Where programs go.** Moved to kernel.md §18, Q4. The prototype there
    ran relocation end to end.
 
-2. **When the shell exits.** Should the kernel start it again, as Unix
-   restarts a login prompt, or stop the machine with a message? I'd restart
-   it.
+2. ~~**When the shell exits.**~~ **Decided:** the kernel starts it again, as
+   Unix restarts a login prompt. If it can't be started at all, the kernel
+   prints why and halts rather than looping.
 
-3. **Who edits the typed line.** The kernel's console, so every program that
-   reads a line gets echo and backspace for free, as with a Unix terminal? Or
-   the shell, so the console only prints? I'd put it in the console.
+3. ~~**Who edits the typed line.**~~ **Decided:** the kernel's console.
+   `read(0, …)` returns a finished line with the echo and backspace already
+   done, so every program that reads a line gets them for free.
 
-4. **Finding programs.** Only `/bin`, or `/bin` then the current directory?
-   Must you type the `.bin`? I'd search `/bin` then the current directory,
-   and not require the `.bin`.
+4. ~~**Finding programs.**~~ **Decided:** a name with no `/` is looked up as
+   `/bin/<name>.bin`, then as `<name>.bin` in the current directory. A name
+   with a `/` is used as a path. You never type the `.bin`: it's added when
+   missing. The shell does the lookup, and the kernel's `exec` takes a path,
+   as in P5.

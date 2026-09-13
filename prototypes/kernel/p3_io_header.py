@@ -97,7 +97,7 @@ irq_entry:
 image, sym = build_fixed(C, ASM)
 names = {0: "unprotected", 1: "DI/EI around program IO", 2: "handler saves IO header"}
 for mode in (0, 1, 2):
-    for k in (1, 3, 7):
+    for k in (1, 3, 7, 31, 101, 1009):
         ram = RAM(RAM_SIZE)
         ram.load_bytes(image, PROGRAM_LOAD_ADDR)
         ram.write_word(sym["__g_mode"], mode)

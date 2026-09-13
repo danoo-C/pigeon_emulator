@@ -1,12 +1,12 @@
 # Kernel changes: apps that print to the shell
 
-> **Status: questions, nothing built.** This checks [kernel.md](kernel.md)
+> **Status: decided, nothing built.** This checks [kernel.md](kernel.md)
 > against one requirement: a command-line app — `ls`, `ld`, anything that
 > prints — starts from the shell, prints into the shell's console, and returns
 > to it. Every fact in §2 was checked on 2026-09-13; the compiler facts were
-> compiled and run. Anything reasoned but not run is marked *unverified*. Five
-> questions are open, in [§4](#4-questions), for you to answer inline; two
-> more moved to kernel.md.
+> compiled and run. Anything reasoned but not run is marked *unverified*. Its
+> questions are decided, in [§4](#4-questions); two moved to kernel.md. The
+> short version is [kernel_overview.md](kernel_overview.md).
 
 ## 1. The answer
 
@@ -14,17 +14,19 @@
 calling the kernel through a table of function addresses compiles and runs,
 and `main(int argc, char **argv)` compiles. The gaps are things kernel.md
 doesn't decide, and one it doesn't mention: **there can be no `printf` today,
-because the compiler rejects variadic functions.**
+because the compiler rejects variadic functions.** Each gap is decided since,
+in §4 and kernel.md §18; the table's middle column says where kernel.md
+covers it now.
 
 | Need | kernel.md | Today |
 |---|---|---|
 | An app calls the kernel's print | §10, system-call table | **Works** — compiled and ran |
-| `printf` | not mentioned | **Blocked** — `...` is a compile error |
-| Output lands in the shell's console | §12, console in the kernel | Only if apps reach the console through the kernel; kernel.md Q3 allows otherwise |
-| `ls` with no argument, relative paths | not mentioned | The current directory is kept separately in each program's copy of `fs.c` |
-| Arguments | §9, "not yet" | `argc`/`argv` compile; how the shell passes them is undecided |
-| The shell's screen after the app | §11 resets the display address | The console's text isn't mentioned |
-| Stopping on an error | §9 and Q4 | No `exit()` from inside a nested function |
+| `printf` | §12: needs variadic functions first | **Blocked** — `...` is a compile error |
+| Output lands in the shell's console | §12, console in the kernel | Only if apps reach the console through the kernel, which kernel.md Q3 now decides |
+| `ls` with no argument, relative paths | §10: the filesystem goes through the kernel | The current directory is kept separately in each program's copy of `fs.c` |
+| Arguments | §9: `entry(argc, argv)` | `argc`/`argv` compile; §4 Q4 decides how the shell passes them |
+| The shell's screen after the app | §11 resets the display address | The console's text: §4 Q5 |
+| Stopping on an error | §9 and Q5 | No `exit()` from inside a nested function |
 
 ---
 
@@ -37,7 +39,7 @@ assemble, run on the CPU, and check that the hardware stack ends balanced.
 |---|---|
 | `int printf(char *fmt, ...)` | **Compile error:** "variadic functions are not supported: the frame layout has no way to walk an unknown argument count" (`compiler/parser.py:288`) |
 | `int main(int argc, char **argv)` | Compiles and runs |
-| Store a function's address at `0x15818` as `unsigned`, cast it back to `int (*)(char *)`, call it with a string literal | Returns 5 for `"hello"` |
+| Store a function's address at `0x15818` (where the table was then; it is `0x15A1C` now, kernel.md §10) as `unsigned`, cast it back to `int (*)(char *)`, call it with a string literal | Returns 5 for `"hello"` |
 | The same through a `typedef`'d function-pointer type | Works |
 | A formatter that takes its arguments as an `int` array | Works |
 
@@ -116,8 +118,9 @@ no directory at all. Either:
 - the filesystem is a system call, and apps use the kernel's `fs.c` and its
   current directory, or
 - the kernel passes the current directory to each app, which mounts the disk
-  and calls `fs_chdir` itself. That comes on top of the unmount and remount
-  kernel.md §10 already needs.
+  and calls `fs_chdir` itself.
+
+kernel.md Q3 chose the first.
 
 ### 3.4 Arguments
 
@@ -142,45 +145,43 @@ no paging.
 ### 3.6 Stopping on an error
 
 Command-line tools often stop deep inside the code — `exit(1)` on the first
-bad input. Without instructions that set the stack pointer (kernel.md §14),
+bad input. Without instructions that set the stack pointer (kernel.md §13),
 an error has to be returned through every caller up to `main`. That is
-kernel.md's Q4, and it matters more for a tool like `ld` than for a game.
+kernel.md's Q5, which adds them, and it matters more for a tool like `ld`
+than for a game.
 
 ---
 
 ## 4. Questions
 
-Answers inline, please — then I'll fold them into kernel.md.
+Decided 2026-09-14, left to me.
 
-1. **`ld` or `ls`?** If you mean `ld`, a linker that runs on the machine:
-   there is no object-file format and no linker, even on the host. `cc.py`
-   compiles every unit together (`lib/README.md`). A linker on the machine
-   would need a relocatable object format first, which kernel.md §8 sets aside
-   as unneeded. Is that in scope, or did you mean `ls` and command-line tools
-   in general?
+1. ~~**`ld` or `ls`?**~~ **Decided:** `ls`, and command-line tools in general.
+   A linker on the machine is out of scope: it would need an object-file
+   format that nothing else needs.
 
-2. **`printf`.** A, fixed print calls; B, a formatter that takes an argument
-   array; or C, variadic functions with a cap (§3.1)? I'd choose **C**: it's
-   the only one that gives you a real `printf`, and it keeps frame sizes
-   constant, so it fits both the ABI and the system-call table. A is the
-   fallback if the compiler shouldn't change now.
+2. ~~**`printf`.**~~ **Decided:** C, variadic functions with a cap of 8 extra
+   word-sized arguments (§3.1). It's the only real `printf`, and frame sizes
+   stay constant, so the ABI and the system-call table keep working. It is
+   built before the shell.
 
 3. **What goes through the kernel.** Moved to kernel.md §18, Q3.
 
-4. **Arguments.** Should startup code write `argc` and `argv` into `main`'s
-   frame, or should apps fetch them with a system call? Should quotes group
-   words? Should the strings stay in kernel memory, or be copied to the app?
-   I'd put `argc` and `argv` in `main`'s frame, split at spaces with double
-   quotes grouping, and keep the strings in kernel memory.
+4. ~~**Arguments.**~~ **Decided:** startup code writes `argc` and `argv` into
+   `main`'s frame. The shell splits at spaces, with double quotes grouping
+   words, up to 16 words on a 255-character line. The strings aren't copied:
+   they stay in the caller's memory, which can't move or be freed while its
+   child runs.
 
-5. **The screen after an app.** Should the kernel redraw the console's grid, or
-   clear the screen and print a fresh prompt? And should output pause with
-   `-- more --` when it fills the 12 rows?
+5. ~~**The screen after an app.**~~ **Decided:** the kernel redraws the
+   console's grid, which it keeps as text, so the shell's lines come back even
+   after a game drew over them. No `-- more --` for now: output that fills the
+   12 rows scrolls.
 
-6. **Redirection.** Should `ls > list.txt` work? If every print goes through
-   one kernel function, the kernel can send the text to a file instead of the
-   screen. Pipes, with only one program running at a time, would need
-   temporary files, as DOS used. In scope now, later, or never?
+6. ~~**Redirection.**~~ **Decided:** later, not in the first version. Every
+   print already goes through the kernel's `write(1, …)`, so `ls > list.txt`
+   can be added in the kernel without changing any program. Pipes wait for
+   multitasking, or never come.
 
 7. **`exit()`.** Moved to kernel.md §18, Q5. The prototype there ran
    `exit()` from 50 calls deep.
