@@ -665,6 +665,7 @@ python3 tools/pfs.py mkdir [-p] /path ...
 python3 tools/pfs.py rm    [-r] /path ...
 python3 tools/pfs.py mv    /from /to
 python3 tools/pfs.py fsck  [--repair]
+python3 tools/pfs.py boot  [--sector FILE] /path
 ```
 
 `put`, `get` and `mv` behave like `cp` and `mv`: if the destination is an
@@ -706,6 +707,17 @@ two implementations have to agree on that.
   region, and rewrites the hints. It only reports anything where a fix would
   have to guess which data to throw away: cross-links, broken chains,
   chains shorter than their size, and bad names.
+- **`boot`** makes the disk boot a file through bios2 ([os_cd.md](os_cd.md)
+  §6). It writes a boot record into block 0's unused bytes 52–63 (the
+  signature, the file's first block and its size) and a boot sector into
+  bytes 128–511. The sector is `firmware/boot.asm`, assembled, unless
+  `--sector` names another. It refuses a directory, an empty file, a file
+  over 1 MB, and a file whose blocks aren't contiguous, since the boot sector
+  can't follow the FAT.
+  - Superblock updates keep those bytes, from `pfs.py` and from the guest
+    alike; a format erases them.
+  - The record names blocks, not the file: after rewriting or removing the
+    file, run `boot` again.
 
 ---
 

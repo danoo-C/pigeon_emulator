@@ -5,6 +5,7 @@
     python3 tools/pfs.py put notes.txt /docs/notes.txt
     python3 tools/pfs.py ls -l /docs
     python3 tools/pfs.py fsck --repair
+    python3 tools/pfs.py boot /boot.bin              # docs/os_cd.md, section 6
 
 The format is specified in docs/filesystem.md, section 3, and this module
 is its reference implementation: the guest library (lib/pigeon/fs.c) is
@@ -30,6 +31,11 @@ from typing import Callable, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
+
+from emulator.memory_map import (                                  # noqa: E402
+    BOOT_CODE, BOOT_RECORD, BOOT_SIGNATURE, PROGRAM_MAX_SIZE)
+
+BOOT_SOURCE = REPO_ROOT / "firmware" / "boot.asm"
 
 # --- the format (docs/filesystem.md, section 3) ------------------------------
 
@@ -355,12 +361,58 @@ class PgfsImage:
         self._dirty_fat.clear()
 
     def _write_super(self):
-        raw = bytearray(BLOCK)
+        """Update block 0 in place, as the guest's fs.c does. Only the
+        fields and the root's entry are rewritten: bytes 52-63 and 128-511
+        keep what they hold, which on a bootable disk is its boot record
+        and boot sector (make_bootable). This used to rebuild the block
+        from zeros, and every write erased them."""
+        raw = bytearray(self._read_block(0))
         _SUPER.pack_into(raw, 0, MAGIC, VERSION, BLOCK, self.total, FAT_START,
                          self.fat_blocks, self.data_start, self.free_hint,
                          self.next_free, self._label)
         raw[ROOT_OFFSET:ROOT_OFFSET + ENTRY] = _pack_entry(self.root)
         self._write_block(0, bytes(raw))
+
+    # --- booting (docs/os_cd.md, section 6) ---------------------------------
+
+    def make_bootable(self, path: str, sector: bytes):
+        """Make the disk boot `path`: point the boot record in block 0 at
+        the file, and put `sector` -- firmware/boot.asm, assembled -- after
+        it. bios2 boots a disk whose block 0 carries BOOT_SIGNATURE.
+
+        The boot sector loads the file with no FAT to follow, so the file
+        must be one contiguous run of blocks, and its size something the
+        boot sector will load. Both are checked here rather than found out
+        at boot. The first file written to a fresh image is contiguous.
+
+        The record names blocks, not the file. Rewriting or removing the
+        file afterwards leaves it pointing at whatever is there now, so run
+        this again after changing it.
+        """
+        e = self.stat(path)
+        if e.is_dir:
+            raise PgfsError("EISDIR", f"{path}: is a directory")
+        if not 0 < e.size <= PROGRAM_MAX_SIZE:
+            raise PgfsError("EINVAL", f"{path}: {e.size} bytes; a boot sector loads "
+                                      f"1 to {PROGRAM_MAX_SIZE}")
+        blocks = self._chain(e.first)
+        if blocks != list(range(e.first, e.first + len(blocks))):
+            raise PgfsError("EINVAL", f"{path}: its blocks are not contiguous, and a boot "
+                                      f"sector cannot follow the FAT; write it to a "
+                                      f"fresh image first")
+        room = BLOCK - BOOT_CODE
+        if len(sector) > room:
+            raise PgfsError("EINVAL", f"the boot sector is {len(sector)} bytes; block 0 "
+                                      f"has room for {room}")
+        raw = bytearray(self._read_block(0))
+        struct.pack_into("<3I", raw, BOOT_RECORD, BOOT_SIGNATURE, e.first, e.size)
+        raw[BOOT_CODE:] = sector + bytes(room - len(sector))
+        self._write_block(0, bytes(raw))
+
+    def boot_record(self) -> Optional[Tuple[int, int]]:
+        """(first block, size in bytes) when block 0 carries a boot record."""
+        signature, first, size = struct.unpack_from("<3I", self._read_block(0), BOOT_RECORD)
+        return (first, size) if signature == BOOT_SIGNATURE else None
 
     def free_count(self) -> int:
         """Free blocks, counted -- not the superblock's hint."""
@@ -827,6 +879,12 @@ def parse_size(text: str) -> int:
 
 # --- the command line --------------------------------------------------------
 
+def boot_sector() -> bytes:
+    """firmware/boot.asm, assembled: what `pfs boot` puts in block 0."""
+    from assembler.assembler import Assembler
+    return Assembler(str(BOOT_SOURCE)).assemble()
+
+
 def _default_image() -> Path:
     from emulator.config import ConfigError, load_config
     try:
@@ -876,6 +934,9 @@ def cmd_info(img, args) -> int:
     print(f"FAT         {i['fat_blocks']} blocks; data from block {i['data_start']}")
     if i["free_hint"] != i["free_blocks"]:
         print(f"note        the free_blocks hint says {i['free_hint']}; run `pfs fsck`")
+    record = img.boot_record()
+    if record is not None:
+        print(f"boot        {_human(record[1])} from block {record[0]}")
     return 0
 
 
@@ -990,6 +1051,14 @@ def cmd_mv(img, args) -> int:
     return 0
 
 
+def cmd_boot(img, args) -> int:
+    sector = Path(args.sector).read_bytes() if args.sector else boot_sector()
+    img.make_bootable(args.path, sector)
+    first, size = img.boot_record()
+    print(f"{img.path}: boots {args.path} ({_human(size)} from block {first})")
+    return 0
+
+
 def cmd_fsck(img, args) -> int:
     report = img.fsck(repair=args.repair)
     for problem in report.problems:
@@ -1072,6 +1141,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repair", action="store_true",
                    help="fix leaks, overlong chains, interrupted renames and hints")
     p.set_defaults(handler=cmd_fsck)
+
+    p = sub.add_parser("boot", parents=[common],
+                       help="make the disk boot a file, through bios2 (docs/os_cd.md)")
+    p.add_argument("--sector", metavar="FILE",
+                   help="an assembled boot sector (default: firmware/boot.asm, assembled)")
+    p.add_argument("path", help="the file to boot: contiguous, 1 byte to 1 MB")
+    p.set_defaults(handler=cmd_boot)
     return parser
 
 

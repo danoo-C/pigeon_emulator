@@ -1,8 +1,9 @@
 # Installation media: a two-stage BIOS, the boot sector and `cc.py --project`
 
-> **Status: phases 1 and 2 are built** (§9): stage 1 of the BIOS, the
-> firmware device, and a bios2 with no screen yet. Everything after them is
-> still a sketch. Power-on runs through four stages:
+> **Status: phases 1 to 4 are built** (§9): stage 1 of the BIOS, the
+> firmware device, bios2 with its screen and menu, and the boot sector.
+> Phase 5, `cc.py --project`, is still a sketch. Power-on runs through four
+> stages:
 >
 > 1. **The BIOS**, 1 KB at address 0, loads **bios2** from a firmware
 >    device on IO channel 7, and jumps to it.
@@ -13,10 +14,9 @@
 > 4. **The installer.** `cc.py --project` writes the disc. What the installer
 >    does comes later (§8).
 >
-> Stage 1 is built and tested. The boot sector was only drafted and
-> assembled, and bios2's size comes from a compiled probe; neither was run.
-> Their sizes are in the table below, and facts in §2 were checked in the
-> code on 2026-09-13. Anything reasoned but not run is marked *unverified*.
+> The first three stages are built and tested; their sizes are in the table
+> below. Facts in §2 were checked in the code on 2026-09-13. Anything
+> reasoned but not run is marked *unverified*.
 > You left the open questions to me, and the decisions are in
 > [§10](#10-decisions).
 >
@@ -25,9 +25,9 @@
 | Piece | Where it runs | What it does | Size |
 |---|---|---|---|
 | **BIOS** (`firmware/bios.asm`) | `0x0` | Loads bios2 from channel 7 by DMA and jumps. Without bios2, runs today's channel-1 loader | 944 of 1,024 bytes, built |
-| **bios2** (`firmware/bios2.c`) | `0x07000000` | Screen, countdown, menu; boots channel 1, or a boot sector from the hard disk or the CD | Phase 2, no screen: 2,024 bytes. The probe with a screen: 28,496 |
+| **bios2** (`firmware/bios2.c`) | `0x07000000` | Screen, countdown, menu; boots channel 1, or a boot sector from the hard disk or the CD | 46,068 bytes, built, with the display, input, mem and string libraries |
 | **Firmware device** | channel 7 | A read-only HDD holding `build/bios2.bin` | — |
-| **Boot sector** (`firmware/boot.asm`) | `0x15898` | Loads the file its boot record names into `0x20000`, and jumps | 320 of 384 bytes, drafted |
+| **Boot sector** (`firmware/boot.asm`) | `0x15898` | Loads the file its boot record names into `0x20000`, and jumps; returns to bios2 if it can't | 376 of 384 bytes, built |
 | **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | — |
 | **Installer** | `0x20000` | Later: writes the hard disk's boot sector, and mirrors the disc onto it | — |
 
@@ -98,9 +98,10 @@ installer, at 0x20000
 **Disks**
 - **The superblock's bytes 52–63 and 128–511 are unused**, and nothing can
   jump to the start of block 0 (kernel.md §2).
-- **Anything that rewrites the superblock erases those bytes:** `fs_format`
-  (`lib/pigeon/fs.c:581`), and `pfs.py`'s `_write_super()`
-  (`tools/pfs.py:357`).
+- **A format erases those bytes:** `fs_format` (`lib/pigeon/fs.c:581`) and
+  `pfs.py mkfs` both write block 0 afresh. Before phase 4, `pfs.py`'s
+  `_write_super()` also rebuilt block 0 from zeros on every write; it now
+  updates the block in place, as the guest's `fs.c` does.
 
 **Tests**
 - **15 `Machine(bios_path=…)` calls in `tests/`** boot channel-1 programs
@@ -259,21 +260,33 @@ Block 0 of a bootable disk:
 | Bytes | What | Written by |
 |---|---|---|
 | 0–51 | the superblock | `pfs.py` |
-| 52–55 | boot signature `0x54424750`, "PGBT" in byte order | `cc.py --project` |
-| 56–59 | the first block of the file to boot | `cc.py --project` |
-| 60–63 | its size in bytes | `cc.py --project` |
+| 52–55 | boot signature `0x54424750`, "PGBT" in byte order | `PgfsImage.make_bootable` |
+| 56–59 | the first block of the file to boot | `PgfsImage.make_bootable` |
+| 60–63 | its size in bytes | `PgfsImage.make_bootable` |
 | 64–127 | the root directory's entry | `pfs.py` |
-| 128–511 | the boot sector: 384 bytes, 48 instructions | `cc.py --project` |
+| 128–511 | the boot sector: 384 bytes, 48 instructions | `PgfsImage.make_bootable` |
 
-- **The draft is 320 bytes, 40 instructions**, assembled and not run. It
-  reads the channel from `0x15A18`, and the first block and size from
-  `0x15818 + 56` and `+ 60`. It then reads 4 KB windows into `0x20000`
-  onward and jumps there. A read that returns 0 bytes stops with `HALT`.
+- **As built: 376 bytes, 47 instructions.**
+  - It reads the channel from `BOOT_CHANNEL`, and the first block and size
+    from its own copy of the record.
+  - It reads 4 KB windows starting at that block, copies only what is left
+    of the file from each, and jumps to `0x20000`.
+- **It returns to bios2 when it can't load the file,** which bios2 shows as
+  "boot failed": a size of 0 or over `PROGRAM_MAX_SIZE`, or the disk ending
+  before the file does. So it saves `F` first, which is bios2's frame
+  pointer; the loop uses `F` for the channel. Fitting that return in took
+  trimming the draft by three instructions: one unsigned comparison checks
+  for both 0 and too big, and the copy loop ends on an address instead of a
+  count.
 - **One code path for the hard disk and the CD:** the IO window only, because
   the CD has no DMA.
 - **The disk format doesn't change.** `fs.c` and `pfs.py` never read those
-  bytes, but both erase them when they rewrite block 0. So they are written
-  last.
+  bytes, and both now update block 0 in place, keeping them. A format erases
+  them.
+- **`PgfsImage.make_bootable(path, sector)`**, and `pfs.py boot PATH` on top
+  of it, writes the record and the sector. It refuses a directory, an empty
+  file, one over `PROGRAM_MAX_SIZE`, a sector over 384 bytes, and a file
+  whose blocks aren't contiguous.
 
 ---
 
@@ -305,11 +318,10 @@ writes `build/pigeonos.img`:
    and every `.c` and `.asm` in `[files]`.
 3. **Assemble the boot sector**, and refuse it if it's over 384 bytes.
 4. **Make the image** with `PgfsImage.mkfs`, big enough, with the label.
-5. **Write `/install.bin` first**, then the files. Check that `/install.bin`
-   is contiguous, which the first file on a fresh image should be. Refuse the
-   image if it isn't.
-6. **Close the image, then write the boot record and the boot sector** into
-   block 0.
+5. **Write `/install.bin` first**, then the files.
+6. **Make the image boot `/install.bin`** with `PgfsImage.make_bootable`,
+   which refuses a file that isn't contiguous. The first file on a fresh
+   image is.
 7. **Run `fsck`**, and print each file with its size.
 
 **The launcher gets `--cd PATH`, and a `"cd"` key in `config.json`** that
@@ -329,8 +341,8 @@ What this step has to leave room for:
 - **The hard disk's record points at the system file**, which has to stay
   contiguous. Anything that rewrites that file has to rewrite the record too
   (kernel.md §5).
-- **`pfs.py`'s `_write_super()` must keep bytes 52–63 and 128–511** before
-  it is used on an installed hard disk.
+- **`pfs.py` keeps bytes 52–63 and 128–511** when it updates the superblock,
+  so it is safe on an installed hard disk. Done in phase 4.
 
 ---
 
@@ -471,10 +483,49 @@ What this step has to leave room for:
    - **The full suite: 902 of 903 tests passed.** The one failure was the
      countdown-screen test before the fix above, in a run started earlier.
      Since the fix, all 45 cases in its file pass, and nothing else changed.
-4. **The boot sector, `firmware/boot.asm`.** A test builds an image with
-   `pfs.py`, writes block 0 by hand, and boots a program through bios2 from
-   channel 2 and from channel 6. Include a program bigger than 4 KB and one
-   that is an exact multiple of 4 KB.
+4. **The boot sector, `firmware/boot.asm`.** ***Done.***
+   - **376 bytes, 47 instructions** (§6):
+     - it loads the file named by the boot record, through the IO window, to
+       `0x20000`, and jumps there;
+     - when it can't, it returns to bios2, which draws its screen again and
+       says "boot failed".
+   - **`tools/pfs.py`:**
+     - `PgfsImage.make_bootable(path, sector)` writes the record and the
+       sector, after checking the file can boot;
+     - `boot_record()` reads the record back, and `boot_sector()` assembles
+       `firmware/boot.asm`;
+     - `pfs.py boot PATH` is the command, and `pfs.py info` shows the record;
+     - `_write_super()` updates block 0 in place instead of rebuilding it
+       from zeros.
+   - **By hand, end to end:**
+     - `pfs.py mkfs`, `put build/screen.bin /boot.bin` and `boot /boot.bin`
+       on a temporary image ("272 B from block 66"), and `fsck` clean;
+     - then `start_emulator.py --disk` with that image and no program: the
+       BIOS, bios2's countdown, the boot sector, and `screen` at `HALT`, in
+       2.8 s.
+   - **Tests:**
+     - **`tests/test_boot.py`, 21 cases:**
+       - full boots from the hard disk and the CD: 816 bytes, just over one
+         window, an exact multiple of the window, 100 KB, and exactly
+         `PROGRAM_MAX_SIZE`, with nothing written past the end;
+       - a file further into the disk;
+       - three bad records coming back to the menu with the frame redrawn;
+       - `make_bootable` refusing a directory, a missing file, an empty file,
+         a fragmented file, a file over 1 MB, and an oversized sector;
+       - the boot bytes surviving later writes from `pfs.py` and from the
+         guest's `fs.c`;
+       - the command line.
+     - **`test_pfs.py` (92) and `test_fs.py` (66) still pass,** among them
+       the tests comparing the guest's images with `pfs.py`'s byte for byte.
+   - **Nine deliberate breakages each failed the tests:**
+     - in the boot sector: its size check, copying only what's left, its
+       end-of-disk check, reading the channel instead of assuming 2, and
+       restoring `F`;
+     - bios2 not redrawing after a failed boot;
+     - `pfs.py` rebuilding block 0 from zeros;
+     - `make_bootable` without its contiguity check, or without its size
+       check.
+   - **The full suite passes: 924 tests**, the 903 from phase 3 and 21 new.
 5. **The project file, `cc.py --project`, and `--cd`.** The disc boots its
    installer on a `Machine`.
 

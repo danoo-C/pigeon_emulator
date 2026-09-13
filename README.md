@@ -196,6 +196,7 @@ emulator/             the machine (importable, no side effects on import)
 assembler/            assembler.py + README.md
 firmware/bios.asm     boot ROM source: loads bios2 from channel 7, else a program in 4 KB chunks
 firmware/bios2.c      second-stage BIOS, built for 0x07000000: boot screen, countdown, menu
+firmware/boot.asm     boot sector: the code in block 0 of a bootable disk
 user/                 example programs (.asm and .c alike)
 lib/pigeon/           the C libraries: mem, string, fs, cd, display, input, math
 compiler/             pigeon-cc: C -> assembly
@@ -220,7 +221,9 @@ disks/                the channel-2 disk image (gitignored, survives a clean)
    hard disk, the CD — and counts down 2 s to the first that can boot. Enter
    boots at once; Esc opens a menu. A program is loaded with one more
    `READ_DMA` and called at `0x20000`. A disk or disc whose block 0 carries a
-   boot sector has that block copied to `0x15818`, and its code called.
+   boot sector has that block copied to `0x15818`, and its code called. The
+   boot sector, `firmware/boot.asm`, loads the file its boot record names to
+   `0x20000` and jumps there; `pfs.py boot` writes the record and the sector.
 
 Without a second stage — a `Machine` built without one, as most tests build
 them — the BIOS boots channel 1 itself:
@@ -358,7 +361,8 @@ python3 tests/test_config.py      # config.json + program discovery
 python3 tests/test_input.py       # HID: both buffers, keycode translation
 python3 tests/test_directives.py  # data directives + the anti-drift guard
 python3 tests/test_loader.py      # programs larger than one DMA window
-python3 tests/test_bios2.py       # BIOS stage 1 and the channel-7 firmware device
+python3 tests/test_bios2.py       # the two-stage BIOS: stage 1, channel 7, bios2's screen
+python3 tests/test_boot.py        # the boot sector, and pfs.py boot
 python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
 python3 tests/test_fs.py          # PigeonFS on the guest, checked against pfs.py
 python3 -m pytest tests/          # all 149, if you have pytest
@@ -367,6 +371,7 @@ python3 tools/bench.py            # interpreter throughput
 python3 tools/disasm.py build/bios.bin
 python3 tools/disasm.py build/check.bin --org 0x20000 --check
 python3 tools/pfs.py tree         # what is on the channel-2 disk (docs/filesystem.md)
+python3 tools/pfs.py boot /boot.bin   # make that disk boot a program, through bios2
 ```
 
 The suite runs without pytest — `tests/_runner.py` provides a minimal runner,

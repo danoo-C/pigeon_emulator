@@ -308,6 +308,9 @@ void boot(int index) {
             return;
         }
         hand_over(PROGRAM_LOAD_ADDR);
+        /* A program ends in HALT; one that returns instead lands here. */
+        draw_frame();
+        say(d->name, ": ended");
         return;
     }
     /* Read it again: the disc may have changed since the screen was drawn. */
@@ -318,6 +321,10 @@ void boot(int index) {
     for (k = 0u; k < BOOT_BLOCK / 4u; k++) ((unsigned *)BOOT_LOAD_ADDR)[k] = IO_DATAW[k];
     *(unsigned *)BOOT_CHANNEL = d->channel;
     hand_over(BOOT_ENTRY);
+    /* A boot sector returns when it cannot load its file (firmware/boot.asm).
+     * The screen was cleared for it, so the frame is drawn again. */
+    draw_frame();
+    say(d->name, ": boot failed");
 }
 
 /* --- the menu --------------------------------------------------------------- */
