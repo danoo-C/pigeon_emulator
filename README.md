@@ -162,6 +162,7 @@ unrecognised key is a warning, not an error.
 |---|---|
 | `user/demo.c` | ⭐ **start here** — a menu, a textbox and a canvas, in C |
 | `user/files.c` | a file browser for the channel-2 disk: walk directories, read text files, write notes. Formats and seeds a blank disk on first run, then never formats again |
+| `user/disc.c` | what is in the CD drive: a filesystem disc's tree, or a raw disc as hex or text. Copies the disc onto the channel-2 disk and ejects it; notices a disc going in or out on its own |
 | `user/cube.c` | a draggable 3D wireframe cube, built on `<pigeon/math.h>` |
 | `user/screen.asm` | ✅ runs to `HALT`, fills the screen with a bitwise pattern |
 | `user/sincos.asm` | animated plot; loops forever by design |

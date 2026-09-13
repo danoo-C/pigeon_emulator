@@ -1,10 +1,10 @@
 # A CD drive: removable discs the host picks
 
-> **Status: phases 0 to 5 are done** — the device
+> **Status: every phase is done** — the device
 > (`emulator/devices/cd.py`, `tests/test_cd.py`), read-only volumes in
 > `fs.c` (`FS_EROFS`), the HTTP surface with its config, both front ends,
-> and the guest library `<pigeon/cd.h>`. What is left is the demo,
-> `user/disc.c`. **Every decision is
+> the guest library `<pigeon/cd.h>` with a program-side eject (§3.5), and
+> the demo, `user/disc.c`. **Every decision is
 > settled**; the log is in [§15](#15-decision-log).
 >
 > Phase 0 **measured the two claims §3 and §5 rest on**, and both held: a
@@ -21,7 +21,7 @@
 | Write access | **None.** There is no write path in the device, and `fs.c` learns to say `FS_EROFS` instead of pretending a write worked |
 | Picking a file | **Three buttons in both front ends**: *Load from server*, *Load from PC*, *Eject* |
 | Reachable paths | Anything under the **repo root**, by default |
-| Demo | `user/disc.c`: check the drive, list the tree if it is a filesystem, hex-dump it if it is not, copy it either way |
+| Demo | `user/disc.c`: check the drive, list the tree if it is a filesystem, hex-dump or show text if it is not, copy it either way, eject it |
 
 ---
 
@@ -592,6 +592,34 @@ as ASCII is 29 of the 32 columns. The one nuance worth keeping: if a raw disc
 *does* pass `looks_like_text()`, show it as text, because then it probably is
 a text file that simply has no filesystem around it.
 
+
+### 10.1 As built
+
+What changed between the sketch above and the program:
+
+- **`e` ejects**, with `cd_eject()`. The sketch showed that key before a
+  program could eject at all; §3.5 made it possible.
+- **Two keys were added.** `r` (or Enter) checks the drive on demand, which
+  is what "a button that checks the CD" asked for, and `t` switches a raw
+  disc between hex and text. Neither is needed to see a new disc — the
+  program watches the generation counter and redraws on its own.
+- **The hex row uses all 32 columns, not 29**: `000000  00 11 22 33 44 55
+  abcdef`. The first version put a second space before the ASCII column,
+  which pushed its sixth character into the slot where the row's
+  terminator lives, so it was drawn off the right edge. Nothing on screen
+  looked wrong; a test now checks the sixth character is there.
+- **A filesystem disc copies to `2:/<its label>`**, as a whole tree at every
+  depth, though the listing stops at two levels. A label that is not a legal
+  name falls back to `2:/disc`.
+- **The tree is unsorted** — `readdir`'s order, which is creation order.
+  `user/files.c` sorts; this is the demo that stays simple.
+- **A blank hard disk is formatted on first run**, with no force flag — the
+  rule `user/files.c` follows — so copying works on a fresh checkout.
+- **A disc change replaces the status message.** "formatted the blank 2:
+  disk" would otherwise hide "the disc changed" until a key was pressed.
+  The exceptions are an error from reading the new disc, which is newer
+  still, and `e`'s own "ejected".
+
 ---
 
 ## 11. Changes outside `cd.py`
@@ -611,6 +639,7 @@ a text file that simply has no filesystem around it.
 | `lib/pigeon/cd.h`, `lib/pigeon/cd.c` | new |
 | `tests/test_cdlib.py` | new: the library, compiled and run on the emulator |
 | `user/disc.c` | new |
+| `tests/test_disc.py` | new: the demo on the emulator, read back from the screen |
 | `tests/test_cd.py` | new |
 | `tests/test_fs.py` | a read-only section |
 | `README.md`, `lib/README.md`, `docs/filesystem.md` | the device, the library, the IO bus table, the layout, `cds/`, `FS_EROFS` |
@@ -725,7 +754,14 @@ Each one runs and is testable before the next.
    not see the rule. The test now watches what reaches those devices, and
    asserts it is nothing. A program calling every function in the library
    compiles to 109,468 bytes, nearly all of it `fs.c`.
-6. **`user/disc.c`** and the docs.
+6. **`user/disc.c`** and the docs. ***Done*** — 168,984 bytes, and 13
+   tests in `tests/test_disc.py` that read the screen back as text with
+   `tests/test_files.py`'s reader. The one that matters most presses no key:
+   a disc put in from the host has to show up on its own, because that is
+   how the display's buttons reach the program. Eight deliberate breakages
+   of `disc.c` each fail them, including a volume left mounted across a
+   swap, which shows the old disc's tree on the new disc. §10.1 has what
+   changed from the sketch.
 
 ---
 
