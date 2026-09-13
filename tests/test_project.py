@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import cases, run_module                                 # noqa: E402
 from compiler import cc                                               # noqa: E402
+from compiler.program_file import Header                              # noqa: E402
 from compiler.project import (                                        # noqa: E402
     INSTALLER_PATH, METADATA_PATH, SYSTEM_PATH, ProjectError, build_disc, read_project)
 from emulator.cli import disc_drive                                   # noqa: E402
@@ -79,11 +80,12 @@ def quiet(_line):
     pass
 
 
-def built(folder, source):
+def built(folder, source, relocatable=False):
     """What the launcher builds from `source`: the bytes the disc must hold."""
     source = Path(source)
-    binary = Path(folder) / "reference" / f"{source.name}.bin"
-    return Program(name=source.stem, source=source, binary=binary).ensure_built(quiet=True).read_bytes()
+    binary = Path(folder) / "reference" / f"{source.name}{'.reloc' if relocatable else ''}.bin"
+    return Program(name=source.stem, source=source, binary=binary,
+                   relocatable=relocatable).ensure_built(quiet=True).read_bytes()
 
 
 # --- reading a project -------------------------------------------------------------
@@ -256,6 +258,30 @@ def test_a_system_goes_on_the_disc_as_boot_bin(label, line, error):
             assert img.read_file(SYSTEM_PATH) == built(t, source / "tiny.c"), label
 
 
+def test_a_c_program_in_files_is_a_program_file_and_the_rest_are_images():
+    """docs/kernel.md Q6. A .c in [files] is built for the kernel to load
+    anywhere. The installer and the system are loaded at PROGRAM_LOAD_ADDR
+    by a boot sector, and an .asm has no startup code that returns to a
+    kernel, so those stay images."""
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        source = t / "src"
+        write(source, "hello.c", "int main(int argc, char **argv) { return argc; }\n")
+        write(source, "tiny.c", "int main(void) { return 5; }\n")
+        text = GOOD.replace("installer = installer.c", "installer = installer.c\nsystem = tiny.c") \
+                   .replace("[files]\n", "[files]\n/bin/hello.bin  = hello.c\n")
+        disc = build_disc(read_project(project_dir(source, text)), t / "disc.img", t / "build", quiet)
+        with PgfsImage(disc) as img:
+            hello = img.read_file("/bin/hello.bin")
+            assert hello == built(t, source / "hello.c", relocatable=True)
+            assert Header.read(hello).patch_count > 0
+            assert img.read_file(INSTALLER_PATH) == built(t, source / "installer.c")
+            assert img.read_file(SYSTEM_PATH) == built(t, source / "tiny.c")
+            assert img.read_file("/bin/tool.bin") == built(t, source / "tool.asm")
+            for path in (INSTALLER_PATH, SYSTEM_PATH, "/bin/tool.bin"):
+                assert img.read_file(path)[:4] != b"PGEX", f"{path} is a program file"
+
+
 def test_the_example_project_builds_and_its_installer_asks_first():
     """user/os/pigeon_compiler_init.txt, as shipped. Its installer shows
     what it will do and waits; tests/test_install.py goes on and installs."""
@@ -265,6 +291,8 @@ def test_the_example_project_builds_and_its_installer_asks_first():
         with PgfsImage(disc) as img:
             assert img.label == "PIGEONOS" and img.fsck().clean
             assert img.read_file(SYSTEM_PATH) == built(t, REPO_ROOT / "user" / "graph.c")
+            for path in ("/bin/files.bin", "/bin/cube.bin"):
+                assert img.read_file(path)[:4] == b"PGEX", f"{path} is not a program file"
         with power_on(t, disc=disc, keys=[ENTER]) as p:
             assert p.run_until(lambda rows: rows[11] == "ENTER install   ESC cancel",
                                steps=20_000_000), p.rows()

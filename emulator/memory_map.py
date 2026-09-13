@@ -110,6 +110,16 @@ BOOT_CHANNEL   = BOOT_LOAD_ADDR + BOOT_BLOCK
 if BOOT_CHANNEL + 4 > PROGRAM_LOAD_ADDR:
     raise RuntimeError("A boot sector's copy overlaps the program load address")
 
+# --- Program files (docs/kernel.md §8) ---
+# A C program the kernel can load at any address, as compiler/program_file.py
+# writes it: a header of PROGRAM_FILE_HEADER bytes -- eight words, the magic
+# first -- then the image, then the offset of every word in it that holds an
+# address. The magic's first byte, read as an opcode, is 80: a program file
+# jumped to by mistake stops at once.
+PROGRAM_FILE_MAGIC   = 0x58454750         # "PGEX" in byte order
+PROGRAM_FILE_VERSION = 1
+PROGRAM_FILE_HEADER  = 32
+
 # --- Heap: dynamic allocations, grows UP from just above the program ---
 HEAP_START = PROGRAM_LOAD_ADDR + PROGRAM_MAX_SIZE
 

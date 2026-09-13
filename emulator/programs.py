@@ -36,6 +36,9 @@ class Program:
     # Where a C source is built to run, as cc.py --org takes it. None is
     # PROGRAM_LOAD_ADDR; bios2 is built for "BIOS2_LOAD_ADDR".
     origin: Optional[str] = None
+    # A program file the kernel can load anywhere (docs/kernel.md §8), not
+    # an image for one address. cc.py --project builds [files] this way.
+    relocatable: bool = False
 
     @property
     def language(self) -> str:
@@ -93,8 +96,19 @@ class Program:
             asm_path = self.binary.with_suffix(".asm")
             asm_path.parent.mkdir(parents=True, exist_ok=True)
             origin = origin_of(self.origin) if self.origin else DEFAULT_ORIGIN
-            asm_path.write_text(compile_units(units, origin=origin))
-            assemble_file(asm_path, self.binary, quiet=quiet)
+            asm_path.write_text(compile_units(units, origin=origin,
+                                              relocatable=self.relocatable))
+            if self.relocatable:
+                from compiler.program_file import build
+                self.binary.write_bytes(build(asm_path))
+                if not quiet:
+                    print(f"Built {asm_path} -> {self.binary} "
+                          f"({self.binary.stat().st_size} bytes, a program file)")
+            else:
+                assemble_file(asm_path, self.binary, quiet=quiet)
+        elif self.relocatable:
+            raise ValueError(f"{self.name}: only C can be built relocatable; assembly has "
+                             f"no startup code that returns to the kernel")
         else:
             assemble_file(self.source, self.binary, quiet=quiet)
         return self.binary

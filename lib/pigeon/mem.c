@@ -7,10 +7,11 @@
 
 typedef unsigned int size_t;
 
-/* The linker script is the assembler: __heap_ptr and __free_list are
- * emitted by the compiler, and __heap_base sits past the end of the
- * frame stack. */
+/* The linker script is the assembler: __heap_ptr, __heap_limit and
+ * __free_list are emitted by the compiler, and __heap_base sits past the
+ * end of the frame stack. */
 extern unsigned __heap_ptr;
+extern unsigned __heap_limit;
 extern unsigned __free_list;
 extern unsigned __heap_base;
 
@@ -91,8 +92,11 @@ int memcmp(void *a, void *b, size_t n) {
  */
 
 static unsigned heap_limit(void) {
-    /* Leave a megabyte of headroom below the hardware stack, which grows
-     * down from the top of RAM. */
+    /* The kernel writes each program's limit into __heap_limit, and its
+     * own (docs/kernel.md Q7). Left at 0, the heap may grow to a megabyte
+     * below the top of RAM, the headroom for the hardware stack, which
+     * grows down from there. */
+    if (__heap_limit != 0u) return __heap_limit;
     return 0x08000000u - 0x00100000u;
 }
 

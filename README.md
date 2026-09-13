@@ -383,6 +383,7 @@ python3 tests/test_loader.py      # programs larger than one DMA window
 python3 tests/test_bios2.py       # the two-stage BIOS: stage 1, channel 7, bios2's screen
 python3 tests/test_boot.py        # the boot sector, and pfs.py boot
 python3 tests/test_project.py     # cc.py --project, and the launcher's --cd
+python3 tests/test_relocatable.py # program files the kernel loads anywhere: cc.py --relocatable
 python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
 python3 tests/test_fs.py          # PigeonFS on the guest, checked against pfs.py
 python3 -m pytest tests/          # all 149, if you have pytest

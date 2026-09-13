@@ -29,8 +29,8 @@
 | **bios2** (`firmware/bios2.c`) | `0x07000000` | Screen, countdown, menu; boots channel 1, or a boot sector from the hard disk or the CD | 46,068 bytes, built, with the display, input, mem and string libraries |
 | **Firmware device** | channel 7 | A read-only HDD holding `build/bios2.bin` | — |
 | **Boot sector** (`firmware/boot.asm`) | `0x15898` | Loads the file its boot record names into `0x20000`, and jumps; returns to bios2 if it can't | 376 of 384 bytes, built |
-| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | built; the example disc is 473.0 KiB |
-| **Installer** (`user/os/installer.c`) | `0x20000` | Formats the hard disk, copies the disc onto it, makes it boot `/boot.bin`, and restarts | 139,120 bytes, built |
+| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | built; the example disc is 482.0 KiB |
+| **Installer** (`user/os/installer.c`) | `0x20000` | Formats the hard disk, copies the disc onto it, makes it boot `/boot.bin`, and restarts | 139,164 bytes, built |
 
 ---
 
@@ -307,7 +307,7 @@ system     = ../graph.c         # optional: what the installed hard disk boots
 bootsector = boot.asm           # optional: firmware/boot.asm when left out
 
 [files]                         # what the installer puts on the hard disk
-/bin/files.bin   = ../files.c   # a .c or .asm is built; anything else is copied
+/bin/files.bin   = ../files.c   # a .c is built as a program file, an .asm as an image; anything else is copied
 /bin/cube.bin    = ../cube.c
 /docs/readme.txt = readme.txt
 ```
@@ -318,7 +318,9 @@ writes `build/pigeonos.img`:
 1. **Check the project file.** Every mistake is reported with its line, all
    of them at once, before anything is built.
 2. **Build the installer** for `0x20000`, as the launcher builds a program,
-   and every `.c` and `.asm` in `[files]`. Builds go to `build/<name>/` and
+   and every `.c` and `.asm` in `[files]`. Since the kernel's phase 1, a `.c`
+   in `[files]` is built as a program file the kernel loads anywhere
+   ([kernel.md](kernel.md) Q6). Builds go to `build/<name>/` and
    happen again only when a source or a library it includes changed. Each
    build is named after its source as well as its path on the disc, so
    pointing a path at another source always builds it afresh.
@@ -337,17 +339,17 @@ writes `build/pigeonos.img`:
    output first, so a failed build leaves no half-written disc. The same
    project builds the same disc, byte for byte.
 
-As run on the example:
+As run on the example, since the kernel's phase 1 made `/bin` program files:
 
 ```
 PigeonOS 0.1, from user/os/pigeon_compiler_init.txt
-  /install.bin               139,120 B   user/os/installer.c
+  /install.bin               139,164 B   user/os/installer.c
   /pigeon.txt                     60 B
-  /boot.bin                  114,580 B   user/os/../graph.c
-  /bin/files.bin             174,088 B   user/os/../files.c
-  /bin/cube.bin               40,048 B   user/os/../cube.c
+  /boot.bin                  114,624 B   user/os/../graph.c
+  /bin/files.bin             182,004 B   user/os/../files.c
+  /bin/cube.bin               41,784 B   user/os/../cube.c
   /docs/readme.txt               254 B   user/os/readme.txt
-build/pigeonos.img: 473.0 KiB, label PIGEONOS, boots /install.bin
+build/pigeonos.img: 482.0 KiB, label PIGEONOS, boots /install.bin
 ```
 
 **The launcher's `--cd PATH`, or `"cd"` in `config.json`**, puts a disc in

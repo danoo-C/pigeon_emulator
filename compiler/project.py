@@ -21,6 +21,12 @@ the hard disk:
     /bin/files.bin   = ../files.c   # a .c or .asm is built; anything else is copied
     /docs/readme.txt = readme.txt
 
+A .c in [files] is built as a program file, which the kernel loads at any
+address (docs/kernel.md Q6). The installer and the system are loaded at
+PROGRAM_LOAD_ADDR by a boot sector, so they are built for it, and so is an
+.asm anywhere: hand-written assembly has no startup code to return to a
+kernel.
+
 A '#' starts a comment at the start of a line or after a space. Paths on
 the right are relative to the project file. Every mistake in the file is
 reported, each with its line, before anything is built.
@@ -241,19 +247,23 @@ def build_disc(project: Project, output, build_dir,
     Programs are built into build_dir/<slug>/ the way the launcher builds
     them, and only when a source or a library it includes has changed.
     Each build's name carries its source's name as well as its path on the
-    disc, so pointing a path at another source can never reuse the old
-    build. The image is written beside `output` and moved into place once
-    it is whole, so a failed build never leaves half a disc behind."""
+    disc, and whether it is a program file, so pointing a path at another
+    source can never reuse the old build, and neither can a build of the
+    other kind. The image is written beside `output` and moved into place
+    once it is whole, so a failed build never leaves half a disc behind."""
     from emulator.programs import Program
 
     output, work = Path(output), Path(build_dir) / project.slug
 
-    def contents_of(host: Path, disc_path: str) -> bytes:
+    def contents_of(host: Path, disc_path: str, in_files: bool = False) -> bytes:
         if host.suffix.lower() not in BUILT:
             return host.read_bytes()
+        relocatable = in_files and host.suffix.lower() == ".c"
         where = Path(disc_path.lstrip("/"))
-        binary = work / where.parent / f"{where.name}.{host.name}.bin"
-        Program(name=host.stem, source=host, binary=binary).ensure_built(quiet=True)
+        kind = ".reloc" if relocatable else ""
+        binary = work / where.parent / f"{where.name}.{host.name}{kind}.bin"
+        Program(name=host.stem, source=host, binary=binary,
+                relocatable=relocatable).ensure_built(quiet=True)
         return binary.read_bytes()
 
     contents = [(INSTALLER_PATH, contents_of(project.installer, INSTALLER_PATH),
@@ -266,7 +276,7 @@ def build_disc(project: Project, output, build_dir,
                                                   f"{len(system):,} bytes; a boot sector "
                                                   f"loads at most {PROGRAM_MAX_SIZE:,}")])
         contents.append((SYSTEM_PATH, system, project.system))
-    contents += [(disc_path, contents_of(host, disc_path), host)
+    contents += [(disc_path, contents_of(host, disc_path, in_files=True), host)
                  for disc_path, host in project.files]
     sector = _boot_sector(project)
     size = _image_size([(disc_path, len(data)) for disc_path, data, _ in contents])

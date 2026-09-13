@@ -1,7 +1,7 @@
 # A kernel and a shell
 
-> **Status: proposal, nothing in the repository changed — but most of it has
-> been run.** A prototype added the proposed CPU instructions to the emulator
+> **Status: phase 1 of §17, relocatable programs, is built. The rest is a
+> proposal, but most of it has been run.** A prototype added the proposed CPU instructions to the emulator
 > at runtime, and ran C kernels and programs compiled by `pigeon-cc` through
 > them (§16). The console (§12) was not prototyped; boot (§4–7) is built
 > instead ([os_cd.md](os_cd.md)). Facts in §2 were checked in the code again
@@ -17,7 +17,7 @@
 | Area | Today | Proposed | Run in the prototype |
 |---|---|---|---|
 | Boot | Built: the BIOS loads bios2 from channel 7; bios2 boots a program on channel 1, or a disk's boot sector, which loads `/boot.bin` ([os_cd.md](os_cd.md)) | The kernel is that `/boot.bin` | No; built and tested instead |
-| Programs in memory | Every C program is built for `0x20000` | The kernel stays there; each program is relocated to wherever there's room | Yes |
+| Programs in memory | A C program is built for `0x20000`, or since phase 1 as a program file that loads anywhere | The kernel stays at `0x20000`; each program is relocated to wherever there's room | Yes; relocation is built |
 | Starting a program | — | The kernel loads `/bin/<name>.bin`, patches it and calls it | Yes, from a PigeonFS disk |
 | Ending one | `HALT` stops the machine | Return from `main`, or `exit()` from anywhere | Yes |
 | Services | Each program bundles its libraries | A system-call table the kernel fills in | Yes |
@@ -94,18 +94,21 @@ Checked in the code, not assumed:
 
 **The compiler and assembler** (`compiler/`, `assembler/assembler.py`)
 - Every C program is emitted with `.ORG PROGRAM_LOAD_ADDR`, or the address
-  `cc.py --org` names (`codegen.py:83`).
+  `cc.py --org` names (`codegen.py:88`). Since phase 1, `cc.py --relocatable`
+  emits one for `LINK_ADDR` instead, and builds it twice (§8).
 - The startup code `__start` sets the frame pointer `F` to `__frame_base`,
   sets up the heap, calls `main` with no arguments, then **`HALT`s**
-  (`codegen.py:94–100`).
-- `__frame_base = HEAP_START`, the frame stack is 262,144 bytes, and
-  `__heap_base` follows it (`codegen.py:167–169`). `__heap_ptr` is a word the
-  compiler emits in every program (`codegen.py:157`), which `mem.c` reaches
-  as `extern unsigned __heap_ptr;`.
-- `cc.py` takes the sources, `-o`, `-S`, `-I`, `--org ADDR` and
-  `--project FILE`.
-- `mem.c`'s heap limit is a typed literal, `0x08000000 - 0x00100000`
-  (`mem.c:96`).
+  (`codegen.py:102–108`). A relocatable program's returns instead
+  (`codegen.py:121`, §9).
+- `__frame_base = HEAP_START`, or `__image_end` in a relocatable program; the
+  frame stack is 262,144 bytes, and `__heap_base` follows it
+  (`codegen.py:210–214`). `__heap_ptr` is a word the compiler emits in every
+  program, and since phase 1 `__heap_limit` is the next one
+  (`codegen.py:192–197`). `mem.c` reaches both as `extern unsigned`.
+- `cc.py` takes the sources, `-o`, `-S`, `-I`, `--org ADDR`,
+  `--project FILE` and, since phase 1, `--relocatable`.
+- `mem.c`'s heap limit is `__heap_limit`, or when that is 0 a typed
+  `0x08000000 - 0x00100000` (`mem.c:94–100`).
 - Function pointers compile to `CALL E` and have tests.
 - **Variadic functions are rejected** (`parser.py:288`), so there is no
   `printf` (kernel_changes.md §3.1).
@@ -115,8 +118,9 @@ Checked in the code, not assumed:
 - **Every instruction needs a row in the assembler's `SYNTAX` table**, checked
   at import (`assembler.py:240`). The disassembler reads the instruction table
   itself.
-- **`NAME = expression` is worked out before labels have addresses**, so it
-  can't use a label. Code placed after data must start at a multiple of 8.
+- **`NAME = expression` was worked out before labels had addresses**, so it
+  couldn't use a label. Since phase 1 such a definition is settled after
+  layout. Code placed after data must start at a multiple of 8.
 
 **The BIOS** (`firmware/bios.asm`, `emulator/bios.py`)
 - It must fit in 1 KB, which is 128 instructions; `bios.py` refuses anything
@@ -299,15 +303,16 @@ simpler and more general**, and it has been run
   holds an address; every other byte is identical. The list of differing words
   is what the loader patches. Across every C program in `user/`, every
   differing word differed by exactly the distance between the two addresses,
-  and no other byte differed at all. The largest program has 1,937 words to
+  and no other byte differed at all. The largest program has 1,940 words to
   patch, 99% of them in an instruction's address field.
-- **The frame stack and heap move to just after the image.** Startup code
-  uses `__image_end` and `__image_end + frame size`, written into the
-  instructions, because `NAME = expression` can't use a label (§2).
+- **The frame stack and heap move to just after the image.** The compiler
+  emits `__frame_base = __image_end`, which the assembler settles once labels
+  have addresses. The prototype wrote `__image_end + frame size` into the
+  instructions instead, from before the assembler could.
 - **A program file** is a 32-byte header — magic, version, image size,
   entry, patch count, frame-stack size, where `__heap_ptr` is, and the address
-  it was built for — then the image, then the offsets. The prototype's magic
-  is `PGX1`.
+  it was built for — then the image, then the offsets. The magic is `PGEX`,
+  `PROGRAM_FILE_MAGIC` in the memory map; the prototype's was `PGX1`.
 - **What is built this way** (Q6): every `.c` in a project's `[files]`, and
   `cc.py --relocatable`. The installer and the `system` stay built for
   `0x20000`, where the boot sector puts them.
@@ -461,8 +466,8 @@ Q2). The prototype's kernel stopped.
 display back at the screen, stop timers it started, empty the input queues,
 and close files it left open.
 
-**Size.** P5's kernel, with `fs.c`, was 123,256 bytes when run again on
-2026-09-14.
+**Size.** P5's kernel, with `fs.c`, was 123,300 bytes when run again after
+phase 1, on 2026-09-14.
 
 ---
 
@@ -681,7 +686,7 @@ below.
 | **P1** | The repository's tests, with the six instructions and syntax rows loaded | 970 passed on 2026-09-14; 844 when first run |
 | **P2** | A compiled workload — a sort, a sieve, recursion, function pointers; 119,032 instructions — interrupted after every instruction, and every 2, 3, 7 and 101 | The same result every time; 119,006 interrupts at every instruction; stack and `F` restored. **Controls:** `IRET` not restoring the flags never halted, or gave a wrong result at every 7th; a handler using the interrupted `F` never halted |
 | **P3** | A program asking the timer for its status 2,000 times, while a handler does IO | Unprotected: 2,000 wrong when interrupted every 1, 3 or 7 instructions; 923 at 31; 394 at 101; 33 at 1,009. `DI`/`EI` around the program's IO: 0. The handler saving the header: 0 |
-| **P4** | A kernel with the system-call and vector tables and relocation. It runs a shell as a relocated program, which runs: `hello` with arguments and `malloc`; `exit(42)` from 50 calls deep; a divide by zero 20 calls deep; a jump into data; a loop stopped by break; and a program that runs two more | All 17 lines of console output exactly right — with no timer, and with a timer every 997, 13 and 1 instructions (61,827 interrupts). Three levels deep; the parent's heap intact; memory reused; stack and `F` restored at the end |
+| **P4** | A kernel with the system-call and vector tables and relocation. It runs a shell as a relocated program, which runs: `hello` with arguments and `malloc`; `exit(42)` from 50 calls deep; a divide by zero 20 calls deep; a jump into data; a loop stopped by break; and a program that runs two more | All 17 lines of console output exactly right — with no timer, and with a timer every 997, 13 and 1 instructions (61,839 interrupts). Three levels deep; the parent's heap intact; memory reused; stack and `F` restored at the end |
 | **P5** | P4 with `fs.c` in the kernel, the programs as files in `/bin` on a PigeonFS image made by `pfs.py`, the shell turning a name into `/bin/<name>.bin` for the kernel's `exec`, which takes a path, and an `ls` program listing `/bin` through a kernel call | The same output plus a correct listing, with a timer every instruction too. Programs were loaded by 28 `READ_DMA` transfers, with no block reads through the IO window |
 | **P6** | Three relocated programs switched by a timer interrupt | §14. **Control:** a print without `DI`/`EI` lost one character of 280 |
 | **P7** | The cost of checking for interrupts, on copies of `Machine.run`'s loop; medians of 5 runs of 3.57 million instructions | CPython, 2.74 million IPS: every instruction −4.1%, in the slow path +1.4%. PyPy, 34.8 million IPS: +1.9% and +0.7%. Only CPython's every-instruction check cost more than the noise |
@@ -701,7 +706,67 @@ form.
 1. **Relocatable programs:** the startup code, the frame stack and heap after
    the image, `__heap_limit`, and the build step that compares two builds,
    as `cc.py --relocatable` and for `[files]` (Q6, Q7). Testable with no
-   kernel: patch a program to another address and call it.
+   kernel: patch a program to another address and call it. ***Done.***
+   - **What was built:**
+     - `compiler/codegen.py`, a relocatable mode. `__start` is called as
+       `entry(argc, argv)`, moves `F` to `__frame_base = __image_end`, writes
+       the arguments into `main`'s frame, and returns `main`'s value with the
+       caller's `F` given back. Every program, fixed or not, gets
+       `__heap_limit` after `__heap_ptr`; only a relocatable one gets the
+       `__image_end` label, so the prototype's scripts, which add their own,
+       still run.
+     - `lib/pigeon/mem.c`: `heap_limit()` returns `__heap_limit`, or the old
+       `0x07F00000` when it is 0.
+     - `assembler/assembler.py`: a definition that uses a label is settled
+       after layout, and `Assembler(path, origin=…)` builds for another
+       address than the `.ORG` names.
+     - `compiler/program_file.py` builds at `LINK_ADDR`, `0x01000000`, and
+       `0x01021238` above it; refuses a word that differs by anything but
+       that distance; and writes §8's header, with the magic `PGEX`.
+       `relocate()` patches a program file on the host.
+     - `emulator/memory_map.py`: `PROGRAM_FILE_MAGIC`, `PROGRAM_FILE_VERSION`
+       and `PROGRAM_FILE_HEADER`, for the kernel's C to use.
+     - `cc.py --relocatable`, which refuses `-S`, `--org` and `--project`;
+       `Program(relocatable=True)`; and `--project` building each `.c` in
+       `[files]` as a program file, under a build name of its own.
+   - **Sizes:** `user/files.c` is a 182,004-byte program file, a 174,196-byte
+     image with 1,944 addresses. A program with `mem.c` grew by 44 bytes:
+     the `__heap_limit` word and `heap_limit()`'s check. The example disc is
+     482.0 KiB.
+   - **`tests/test_relocatable.py`, 41 cases:**
+     - a program with a function pointer, a string table, recursion,
+       `malloc` and arguments, loaded at four addresses, returns the right
+       value, gives back `F` and a balanced stack, and writes nothing to the
+       fixed program region or the frame stack at `HEAP_START`;
+     - the patched image is byte for byte the build made for that address;
+     - its frames and heap are after its image, at exactly the addresses
+       expected;
+     - C built for `0x20000` calls it through a function pointer, as the
+       kernel will, and keeps its own local;
+     - `malloc` stops at `__heap_limit` to the byte, five ways, and a program
+       built for `0x20000` sets its own limit;
+     - all six C programs in `user/` become program files that patch
+       exactly;
+     - refused: a word shifted from an address, a byte cut from one, an
+       address off a word, a fixed build, five damaged files, and an address
+       that isn't a multiple of 8;
+     - the assembler's new definitions, and `cc.py --relocatable` on the
+       command line.
+   - **`test_project.py`** checks that a `.c` in `[files]` is a program file
+     while the installer, the system and an `.asm` are not, and that the
+     example's `/bin` holds program files.
+   - **Seventeen deliberate breakages each failed the tests:** the startup
+     not giving back `F`, or not passing `argv`; the frame stack at
+     `HEAP_START`, with and without `build()` checking; `__heap_limit`
+     moved; `mem.c` ignoring it; the comparison accepting any difference;
+     `relocate()` ignoring the link address, or patching nothing; the header
+     not checking its length; the assembler ignoring its origin, or refusing
+     a label in a definition; `Program` building an image; `--project`
+     building `[files]` as images, or the system as a program file;
+     `--relocatable` accepting `--org`; and assembly built relocatable.
+   - **The full suite passes: 1,012 tests**, the 970 from before and 42 new.
+     The prototype's P0 and P2–P6 still run; their figures moved with the
+     44 bytes, and §11, §16 and kernel_exec.md §5 carry the new ones.
 2. **The CPU:** `GETSP`, `SETSP` and faults first; then `EI`, `DI`, `IRET`,
    `SETIV`, the timer interrupt and break.
 3. **The kernel:** system calls, `exec` from `/bin`, `exit`, faults and break.

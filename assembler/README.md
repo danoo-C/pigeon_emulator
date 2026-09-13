@@ -53,6 +53,10 @@ LOOP:
   than being silently shadowed by the register.
 - `.ORG` takes any constant expression (`.ORG PROGRAM_LOAD_ADDR`), and must come
   before any code or data — the image is one contiguous block and cannot jump.
+- A static definition may use a label, `END = table_end + 4`: it is settled
+  once every line has its address. So it can't size a `.space` or `.align`.
+  `Assembler(path, origin=...)` builds for another address than the `.ORG`
+  names, which is how `compiler/program_file.py` builds a program twice.
 - Labels may contain `.`, so a compiler can emit `.L1:`, `.L2:` locals.
 - A duplicate label is an error; it used to be accepted with the last one
   winning.

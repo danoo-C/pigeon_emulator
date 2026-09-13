@@ -4,6 +4,7 @@
     python3 compiler/cc.py program.c -o build/program.bin
     python3 compiler/cc.py program.c -S            # keep the assembly
     python3 compiler/cc.py firmware/bios2.c --org BIOS2_LOAD_ADDR -o build/bios2.bin
+    python3 compiler/cc.py program.c --relocatable   # a program file the kernel loads anywhere
     python3 compiler/cc.py --project user/os/pigeon_compiler_init.txt   # an install disc
 
 Emits assembly text and hands it to assembler/assembler.py, which already
@@ -16,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from compiler import program_file                     # noqa: E402
 from compiler.analyzer import analyze                 # noqa: E402
 from compiler.codegen import generate                 # noqa: E402
 from compiler.lexer import CompileError, tokenize     # noqa: E402
@@ -81,27 +83,42 @@ def _remap(error: CompileError, origins) -> CompileError:
     return error
 
 
+def _origin_for(origin: str, relocatable: bool) -> str:
+    """A relocatable program has no origin of its own. It is emitted for
+    program_file.LINK_ADDR, and program_file.build() builds it from there."""
+    if not relocatable:
+        return origin
+    if origin != DEFAULT_ORIGIN:
+        raise ValueError("a relocatable program runs wherever the kernel loads it, "
+                         "so it takes no origin")
+    return f"{program_file.LINK_ADDR:#x}"
+
+
 def compile_to_asm(source: str, filename: str = "<source>", include_paths=None,
-                   origin: str = DEFAULT_ORIGIN) -> str:
+                   origin: str = DEFAULT_ORIGIN, relocatable: bool = False) -> str:
     """C text -> pigeon assembly text."""
+    origin = _origin_for(origin, relocatable)
     text, origins = Preprocessor(include_paths or [LIB_DIR], BUILTIN_DEFINES).process(
         source, filename, Path(filename).parent)
     try:
         program = analyze(parse(tokenize(text, filename)))
     except CompileError as e:
         raise _remap(e, origins) from None
-    return generate(program, text.splitlines(), origin)
+    return generate(program, text.splitlines(), origin, relocatable)
 
 
-def compile_units(paths, include_paths=None, origin: str = DEFAULT_ORIGIN) -> str:
+def compile_units(paths, include_paths=None, origin: str = DEFAULT_ORIGIN,
+                  relocatable: bool = False) -> str:
     """Compile several .c files as ONE translation unit.
 
-    There is no linker: the machine has no relocation and the assembler
-    emits one flat image. Compiling everything together is simpler than
-    inventing an object format, and for programs this size costs nothing.
+    There is no linker: the assembler emits one flat image. Compiling
+    everything together is simpler than inventing an object format, and
+    for programs this size costs nothing.
 
     `origin` is what origin_of() returns: where the image is built to run.
+    `relocatable` emits a program for compiler/program_file.py instead.
     """
+    origin = _origin_for(origin, relocatable)
     include_paths = list(include_paths or []) + [LIB_DIR]
     pre = Preprocessor(include_paths, BUILTIN_DEFINES)
     chunks, origins = [], []
@@ -115,7 +132,7 @@ def compile_units(paths, include_paths=None, origin: str = DEFAULT_ORIGIN) -> st
         program = analyze(parse(tokenize(combined, str(paths[0]))))
     except CompileError as e:
         raise _remap(e, origins) from None
-    return generate(program, combined.splitlines(), origin)
+    return generate(program, combined.splitlines(), origin, relocatable)
 
 
 def compile_file(path, asm_out=None, bin_out=None, keep_asm=False, extra=(),
@@ -175,13 +192,19 @@ def main(argv=None):
     parser.add_argument("--project", type=Path, metavar="FILE",
                         help="build an installation disc from a project file "
                              "(docs/os_cd.md): to -o, or build/<name>.img")
+    parser.add_argument("--relocatable", action="store_true",
+                        help="build a program file the kernel can load at any address "
+                             "(docs/kernel.md §8), with its frame stack and heap after it")
     args = parser.parse_args(argv)
     if args.project is not None:
-        if args.sources or args.assembly or args.org != DEFAULT_ORIGIN:
-            parser.error("--project takes no sources, -S or --org")
+        if args.sources or args.assembly or args.org != DEFAULT_ORIGIN or args.relocatable:
+            parser.error("--project takes no sources, -S, --org or --relocatable")
         return _build_project(args)
     if not args.sources:
         parser.error("name one or more .c files, or a project with --project FILE")
+    if args.relocatable and (args.assembly or args.org != DEFAULT_ORIGIN):
+        parser.error("--relocatable takes no -S or --org: a program file runs wherever "
+                     "the kernel loads it")
     args.source = args.sources[0]
     try:
         origin = origin_of(args.org)
@@ -189,7 +212,7 @@ def main(argv=None):
         parser.error(str(e))
 
     try:
-        asm_text = compile_units(args.sources, args.include, origin)
+        asm_text = compile_units(args.sources, args.include, origin, args.relocatable)
 
         if args.assembly:
             asm_path = args.output or args.source.with_suffix(".asm")
@@ -203,12 +226,21 @@ def main(argv=None):
         asm_path.parent.mkdir(parents=True, exist_ok=True)
         asm_path.write_text(asm_text)
 
+        if args.relocatable:
+            blob = program_file.build(asm_path)
+            Path(output).write_bytes(blob)
+            header = program_file.Header.read(blob)
+            print(f"Compiled {' '.join(str(s) for s in args.sources)} -> {output} "
+                  f"({len(blob)} bytes: a program file, a {header.image_size}-byte image "
+                  f"with {header.patch_count} addresses to patch)")
+            return 0
+
         from assembler.assembler import assemble_file
         binary = assemble_file(asm_path, output, quiet=True)
         print(f"Compiled {' '.join(str(s) for s in args.sources)} -> {output} "
               f"({len(binary)} bytes)")
         return 0
-    except CompileError as e:
+    except (CompileError, program_file.ProgramFileError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 

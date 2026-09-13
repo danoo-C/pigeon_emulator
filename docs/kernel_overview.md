@@ -1,6 +1,6 @@
 # How the OS fits together
 
-> **Status: the short version, nothing built.** The detail is in
+> **Status: the short version. Step 1 of §7, relocatable programs, is built.** The detail is in
 > [kernel.md](kernel.md), [kernel_exec.md](kernel_exec.md) and
 > [kernel_changes.md](kernel_changes.md), and every question in them is now
 > decided (§6). Booting from disk is already built ([os_cd.md](os_cd.md)).
@@ -137,9 +137,9 @@ Decided 2026-09-14, left to me. Each is recorded where the question was asked.
 
 ## 7. Build order
 
-1. **Relocatable programs:** new startup code in the compiler, program files
-   with an address list to patch, a heap limit in each program, and
-   `cc.py --relocatable`.
+1. ***Done.*** **Relocatable programs:** new startup code in the compiler,
+   program files with an address list to patch, a heap limit in each
+   program, and `cc.py --relocatable` (kernel.md §17).
 2. **The CPU:** `GETSP`, `SETSP` and faults; then interrupts, the timer and
    break.
 3. **The kernel:** system calls, `exec`, `exit` and faults, installed as the

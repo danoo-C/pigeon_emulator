@@ -29,6 +29,12 @@ so `free(p)` finds it at `p - 8` without searching. **No coalescing and no
 splitting** — freeing large blocks then allocating small ones fragments.
 Adequate here because the other two libraries allocate nothing at runtime.
 
+The heap stops at `__heap_limit`, a word the compiler emits after
+`__heap_ptr`, and `malloc` returns `NULL` past it. The kernel writes it for
+each program it runs, and for itself ([docs/kernel.md](../docs/kernel.md)
+Q7). Left at 0, the limit is a megabyte below the top of RAM, where the
+hardware stack grows down.
+
 `memcpy` and `memset` move a word at a time while both pointers are aligned,
 then finish byte by byte. That is not a micro-optimisation: the byte loop is
 about four instructions per byte and the framebuffer is 82,944 bytes.
