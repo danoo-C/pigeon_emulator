@@ -7,12 +7,13 @@
 > §2 were checked in the code on 2026-09-13. Anything reasoned but not run is
 > marked *unverified*. Details live in [kernel_exec.md](kernel_exec.md)
 > (running a program, relocation) and [kernel_changes.md](kernel_changes.md)
-> (printing from programs). Five questions are open, in
-> [§18](#18-open-questions), for you to answer inline.
+> (printing from programs). Three questions are still open, in
+> [§18](#18-open-questions), for you to answer inline. Booting from disk is
+> now designed in [os_cd.md](os_cd.md).
 
 | Area | Today | Proposed | Run in the prototype |
 |---|---|---|---|
-| Boot | The BIOS copies a whole program from channel 1 | The BIOS loads a boot sector, which loads the kernel | No |
+| Boot | The BIOS copies a whole program from channel 1 | The BIOS loads bios2 from channel 7; bios2 loads a boot sector, which loads the kernel ([os_cd.md](os_cd.md)) | No |
 | Programs in memory | Every C program is built for `0x20000` | The kernel stays there; each program is relocated to wherever there's room | Yes |
 | Starting a program | — | The kernel loads `/bin/<name>.bin`, patches it and calls it | Yes, from a PigeonFS disk |
 | Ending one | `HALT` stops the machine | Return from `main`, or `exit()` from anywhere | Yes |
@@ -161,6 +162,10 @@ Checked in the code, not assumed:
 ---
 
 ## 4. Boot: the BIOS loads a sector
+
+> **Replaced by [os_cd.md](os_cd.md).** The 1 KB BIOS loads a second stage,
+> bios2, from a firmware device on channel 7, and bios2 copies the boot sector
+> into memory. Block 0's layout is option A of §5.
 
 **Files:** `firmware/bios.asm`, `emulator/machine.py`, `emulator/cli.py`, `config.json`
 
@@ -667,10 +672,9 @@ Answers inline, please — then I'll fold them into the sections above and turn
 this into a decision log. Smaller shell questions are still open in
 kernel_exec.md §10 and kernel_changes.md §4.
 
-1. **The boot record.** Option A keeps the disk format as it is, and puts the
-   boot code and record in the superblock's unused bytes — which means changing
-   `pfs.py` to stop erasing them. Option B reserves boot blocks before the
-   filesystem, which is a new format version. Which?
+1. ~~**The boot record.**~~ **Decided 2026-09-13 (left to me):** option A. The
+   record goes in bytes 52–63 of block 0 and the boot sector in bytes
+   128–511, so the disk format doesn't change. See os_cd.md §6 and §10.
 
 2. ~~**The shell.**~~ **Decided 2026-09-13 (you):** the shell is a separate
    program that the kernel starts, not part of the kernel.
