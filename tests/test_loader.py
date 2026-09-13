@@ -13,6 +13,11 @@ the load area and the clear zeroed the front of the program. That is
 what DISPLAY_CEILING below is about, and it is why these tests compare
 the whole image rather than only the tail.
 
+Every check runs twice (docs/os_cd.md, phase 2): once through stage 1's
+own loader, the one described above, and once through bios2, which loads
+the whole program with one READ_DMA instead. Both must hand over the same
+program, whole, on a blank screen.
+
     python3 tests/test_loader.py      (or: python3 -m pytest tests/)
 """
 import contextlib
@@ -20,6 +25,7 @@ import io
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -30,6 +36,7 @@ from emulator.instruction_set import NONE_REG, encode                 # noqa: E4
 from emulator.machine import Machine                                  # noqa: E402
 from emulator.memory_map import (                                     # noqa: E402
     DISPLAY_SIZE, DISPLAY_START, IO_SIZE, IOHeader, PROGRAM_LOAD_ADDR)
+from emulator.programs import Program                                 # noqa: E402
 
 BIOS = REPO_ROOT / "build" / "bios.bin"
 WINDOW = IO_SIZE - IOHeader.USABLE_AFTER      # 4096: one DMA transfer
@@ -39,6 +46,15 @@ SENTINEL = 0xC0FFEE
 # it is loading. Derived, not typed: it moves with the display geometry.
 DISPLAY_CEILING = PROGRAM_LOAD_ADDR - DISPLAY_START
 
+# bios2 is built from its source, into a folder that lasts for the run:
+# build/bios2.bin is only whatever the launcher last built.
+_BUILD = tempfile.TemporaryDirectory()
+with contextlib.redirect_stdout(io.StringIO()):
+    BIOS2 = Program(name="bios2", source=REPO_ROOT / "firmware" / "bios2.c",
+                    binary=Path(_BUILD.name) / "bios2.bin",
+                    origin="BIOS2_LOAD_ADDR").ensure_built(quiet=True)
+ROUTES = (("stage 1", None), ("bios2", BIOS2))
+
 
 def program_of(instruction_count):
     """NOPs, then set A to the sentinel and halt. The sentinel only
@@ -47,21 +63,32 @@ def program_of(instruction_count):
     return body + encode("MOV", dst=0, src1=NONE_REG, imm=SENTINEL) + encode("HALT")
 
 
-def boot(program_bytes, max_steps=8_000_000):
+def boot(program_bytes, bios2=None, max_steps=8_000_000):
+    """Power on with the program on channel 1 -- and bios2 on channel 7,
+    when given -- and run to HALT."""
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "prog.bin"
         path.write_bytes(program_bytes)
-        machine = Machine(bios_path=str(BIOS), program_path=str(path))
+        machine = Machine(bios_path=str(BIOS), program_path=str(path),
+                          bios2_path=str(bios2) if bios2 else None)
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 for _ in range(max_steps):
                     if machine.step() == 1:
                         break
-            loaded = bytes(machine.ram.mem[PROGRAM_LOAD_ADDR:
-                                           PROGRAM_LOAD_ADDR + len(program_bytes)])
-            return machine.cpu.reg.read(0), loaded, machine.cpu.halted
+            mem = machine.ram.mem
+            end = PROGRAM_LOAD_ADDR + len(program_bytes)
+            return SimpleNamespace(
+                a=machine.cpu.reg.read(0), halted=machine.cpu.halted,
+                loaded=bytes(mem[PROGRAM_LOAD_ADDR:end]),
+                after=bytes(mem[end:end + 64]),
+                screen=bytes(mem[DISPLAY_START:DISPLAY_START + DISPLAY_SIZE]))
         finally:
             machine.close()
+
+
+def differs_at(loaded, program):
+    return next(i for i in range(len(program)) if loaded[i] != program[i])
 
 
 @cases(
@@ -73,15 +100,15 @@ def boot(program_bytes, max_steps=8_000_000):
 )
 def test_program_loads_whole(label, nops):
     program = program_of(nops)
-    result, loaded, halted = boot(program)
-
-    assert loaded == program, (
-        f"{label} ({len(program)} bytes): image differs from the file at byte "
-        f"{next(i for i in range(len(program)) if loaded[i] != program[i])}")
-    assert halted, f"{label}: never reached HALT"
-    assert result == SENTINEL, (
-        f"{label} ({len(program)} bytes): A={result:#x}, want {SENTINEL:#x} -- "
-        f"the final instruction did not survive the load")
+    for route, bios2 in ROUTES:
+        r = boot(program, bios2)
+        assert r.loaded == program, (
+            f"{label} via {route} ({len(program)} bytes): image differs from the file "
+            f"at byte {differs_at(r.loaded, program)}")
+        assert r.halted, f"{label} via {route}: never reached HALT"
+        assert r.a == SENTINEL, (
+            f"{label} via {route} ({len(program)} bytes): A={r.a:#x}, want {SENTINEL:#x} -- "
+            f"the final instruction did not survive the load")
 
 
 def test_the_old_ceiling_is_really_gone():
@@ -89,9 +116,10 @@ def test_the_old_ceiling_is_really_gone():
     garbage value, silently. This is that exact case."""
     program = program_of(700)
     assert len(program) > WINDOW, "test must exceed one window to be meaningful"
-    result, loaded, _ = boot(program)
-    assert loaded[-8:] == program[-8:], "the tail never arrived"
-    assert result == SENTINEL
+    for route, bios2 in ROUTES:
+        r = boot(program, bios2)
+        assert r.loaded[-8:] == program[-8:], f"via {route}: the tail never arrived"
+        assert r.a == SENTINEL, f"via {route}: A={r.a:#x}, want {SENTINEL:#x}"
 
 
 @cases(
@@ -111,36 +139,24 @@ def test_a_program_bigger_than_the_screen_loads_whole(label, size):
     """
     program = program_of(size // 8 - 2)
     assert len(program) > DISPLAY_SIZE, "must exceed the framebuffer to mean anything"
-    result, loaded, halted = boot(program, max_steps=40_000_000)
-
-    assert loaded == program, (
-        f"{label} ({len(program)} bytes): image differs from the file at byte "
-        f"{next(i for i in range(len(program)) if loaded[i] != program[i])} "
-        f"-- the loader wrote over the program it was loading")
-    assert halted, f"{label}: never reached HALT"
-    assert result == SENTINEL, f"{label}: A={result:#x}, want {SENTINEL:#x}"
+    for route, bios2 in ROUTES:
+        r = boot(program, bios2, max_steps=40_000_000)
+        assert r.loaded == program, (
+            f"{label} via {route} ({len(program)} bytes): image differs from the file at "
+            f"byte {differs_at(r.loaded, program)} -- the loader wrote over the program "
+            f"it was loading")
+        assert r.halted, f"{label} via {route}: never reached HALT"
+        assert r.a == SENTINEL, f"{label} via {route}: A={r.a:#x}, want {SENTINEL:#x}"
 
 
 def test_the_screen_is_clear_when_the_program_starts():
     """A program bigger than the screen must still find a clean
     framebuffer -- and nothing zeroed past the end of it."""
     program = program_of(DISPLAY_CEILING // 8)       # comfortably over
-    with tempfile.TemporaryDirectory() as d:
-        path = Path(d) / "p.bin"
-        path.write_bytes(program)
-        machine = Machine(bios_path=str(BIOS), program_path=str(path))
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                for _ in range(40_000_000):
-                    if machine.step() == 1:
-                        break
-            screen = bytes(machine.ram.mem[DISPLAY_START:DISPLAY_START + DISPLAY_SIZE])
-            assert screen == b"\x00" * DISPLAY_SIZE, "the boot bar was left on screen"
-            loaded = bytes(machine.ram.mem[PROGRAM_LOAD_ADDR:
-                                           PROGRAM_LOAD_ADDR + len(program)])
-            assert loaded == program
-        finally:
-            machine.close()
+    for route, bios2 in ROUTES:
+        r = boot(program, bios2, max_steps=40_000_000)
+        assert r.screen == b"\x00" * DISPLAY_SIZE, f"via {route}: the boot bar was left on screen"
+        assert r.loaded == program, f"via {route}: the program did not load whole"
 
 
 def test_exact_window_multiple_terminates():
@@ -150,27 +166,17 @@ def test_exact_window_multiple_terminates():
     nops = (WINDOW // 8) - 2                     # exactly 4096 bytes total
     program = program_of(nops)
     assert len(program) == WINDOW
-    result, loaded, halted = boot(program)
-    assert loaded == program and halted and result == SENTINEL
+    for route, bios2 in ROUTES:
+        r = boot(program, bios2)
+        assert r.loaded == program and r.halted and r.a == SENTINEL, f"via {route}"
 
 
 def test_load_address_is_untouched_below_the_program():
     """The loader must not scribble outside the program area."""
     program = program_of(600)
-    with tempfile.TemporaryDirectory() as d:
-        path = Path(d) / "p.bin"
-        path.write_bytes(program)
-        machine = Machine(bios_path=str(BIOS), program_path=str(path))
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                for _ in range(8_000_000):
-                    if machine.step() == 1:
-                        break
-            after = PROGRAM_LOAD_ADDR + len(program)
-            tail = bytes(machine.ram.mem[after:after + 64])
-            assert tail == b"\x00" * 64, "wrote past the end of the program"
-        finally:
-            machine.close()
+    for route, bios2 in ROUTES:
+        r = boot(program, bios2)
+        assert r.after == b"\x00" * 64, f"via {route}: wrote past the end of the program"
 
 
 if __name__ == "__main__":

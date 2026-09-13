@@ -3,6 +3,7 @@
 
     python3 compiler/cc.py program.c -o build/program.bin
     python3 compiler/cc.py program.c -S            # keep the assembly
+    python3 compiler/cc.py firmware/bios2.c --org BIOS2_LOAD_ADDR -o build/bios2.bin
 
 Emits assembly text and hands it to assembler/assembler.py, which already
 owns encoding, label resolution and the memory map -- and is pinned by
@@ -35,6 +36,35 @@ LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
 # prevent.
 BUILTIN_DEFINES = {name: str(value) for name, value in memory_map.symbols().items()}
 
+# Where a program is built to run unless --org says otherwise. A name
+# rather than a number, so the assembly says what it means.
+DEFAULT_ORIGIN = "PROGRAM_LOAD_ADDR"
+
+
+def origin_of(text: str) -> str:
+    """What --org puts after .ORG: a memory-map name, kept as the name, or a
+    number. Either must be a multiple of 8 inside RAM, an address an
+    instruction can start at.
+
+    Only the code and data move. The frame stack and heap stay at
+    HEAP_START, so a program built for anywhere else must not reach into
+    them -- bios2 (docs/os_cd.md) is built for BIOS2_LOAD_ADDR, far above.
+    """
+    text = text.strip()
+    symbols = memory_map.symbols()
+    if text in symbols:
+        value, emitted = symbols[text], text
+    else:
+        try:
+            value = int(text, 0)
+        except ValueError:
+            raise ValueError(f"--org wants a number or a memory-map name such as "
+                             f"BIOS2_LOAD_ADDR, not {text!r}") from None
+        emitted = f"{value:#x}"
+    if not 0 <= value < memory_map.RAM_SIZE or value % 8:
+        raise ValueError(f"--org {text}: not a multiple of 8 inside RAM")
+    return emitted
+
 
 def _remap(error: CompileError, origins) -> CompileError:
     """Rewrite a diagnostic's position back to the file the user wrote.
@@ -50,7 +80,8 @@ def _remap(error: CompileError, origins) -> CompileError:
     return error
 
 
-def compile_to_asm(source: str, filename: str = "<source>", include_paths=None) -> str:
+def compile_to_asm(source: str, filename: str = "<source>", include_paths=None,
+                   origin: str = DEFAULT_ORIGIN) -> str:
     """C text -> pigeon assembly text."""
     text, origins = Preprocessor(include_paths or [LIB_DIR], BUILTIN_DEFINES).process(
         source, filename, Path(filename).parent)
@@ -58,15 +89,17 @@ def compile_to_asm(source: str, filename: str = "<source>", include_paths=None) 
         program = analyze(parse(tokenize(text, filename)))
     except CompileError as e:
         raise _remap(e, origins) from None
-    return generate(program, text.splitlines())
+    return generate(program, text.splitlines(), origin)
 
 
-def compile_units(paths, include_paths=None) -> str:
+def compile_units(paths, include_paths=None, origin: str = DEFAULT_ORIGIN) -> str:
     """Compile several .c files as ONE translation unit.
 
     There is no linker: the machine has no relocation and the assembler
     emits one flat image. Compiling everything together is simpler than
     inventing an object format, and for programs this size costs nothing.
+
+    `origin` is what origin_of() returns: where the image is built to run.
     """
     include_paths = list(include_paths or []) + [LIB_DIR]
     pre = Preprocessor(include_paths, BUILTIN_DEFINES)
@@ -81,12 +114,13 @@ def compile_units(paths, include_paths=None) -> str:
         program = analyze(parse(tokenize(combined, str(paths[0]))))
     except CompileError as e:
         raise _remap(e, origins) from None
-    return generate(program, combined.splitlines())
+    return generate(program, combined.splitlines(), origin)
 
 
-def compile_file(path, asm_out=None, bin_out=None, keep_asm=False, extra=()):
+def compile_file(path, asm_out=None, bin_out=None, keep_asm=False, extra=(),
+                 origin=DEFAULT_ORIGIN):
     path = Path(path)
-    asm_text = compile_units([path, *extra])
+    asm_text = compile_units([path, *extra], origin=origin)
 
     asm_path = Path(asm_out) if asm_out else Path(bin_out or path).with_suffix(".asm")
     asm_path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,11 +145,19 @@ def main(argv=None):
                         help="stop after generating assembly, and keep it")
     parser.add_argument("-I", "--include", type=Path, action="append", default=[],
                         metavar="DIR", help="add an include search path")
+    parser.add_argument("--org", metavar="ADDR", default=DEFAULT_ORIGIN,
+                        help="where the program is built to run: a number or a "
+                             "memory-map name (default PROGRAM_LOAD_ADDR). The "
+                             "frame stack and heap stay at HEAP_START")
     args = parser.parse_args(argv)
     args.source = args.sources[0]
+    try:
+        origin = origin_of(args.org)
+    except ValueError as e:
+        parser.error(str(e))
 
     try:
-        asm_text = compile_units(args.sources, args.include)
+        asm_text = compile_units(args.sources, args.include, origin)
 
         if args.assembly:
             asm_path = args.output or args.source.with_suffix(".asm")

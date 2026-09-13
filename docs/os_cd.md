@@ -1,8 +1,8 @@
 # Installation media: a two-stage BIOS, the boot sector and `cc.py --project`
 
-> **Status: phase 1 is built** (§9): stage 1 of the BIOS and the firmware
-> device. Everything after it is still a sketch. Power-on runs through four
-> stages:
+> **Status: phases 1 and 2 are built** (§9): stage 1 of the BIOS, the
+> firmware device, and a bios2 with no screen yet. Everything after them is
+> still a sketch. Power-on runs through four stages:
 >
 > 1. **The BIOS**, 1 KB at address 0, loads **bios2** from a firmware
 >    device on IO channel 7, and jumps to it.
@@ -25,7 +25,7 @@
 | Piece | Where it runs | What it does | Size |
 |---|---|---|---|
 | **BIOS** (`firmware/bios.asm`) | `0x0` | Loads bios2 from channel 7 by DMA and jumps. Without bios2, runs today's channel-1 loader | 944 of 1,024 bytes, built |
-| **bios2** (`firmware/bios2.c`) | `0x07000000` | Screen, countdown, menu; boots channel 1, or a boot sector from the hard disk or the CD | Probe: 28,496 bytes |
+| **bios2** (`firmware/bios2.c`) | `0x07000000` | Screen, countdown, menu; boots channel 1, or a boot sector from the hard disk or the CD | Phase 2, no screen: 2,024 bytes. The probe with a screen: 28,496 |
 | **Firmware device** | channel 7 | A read-only HDD holding `build/bios2.bin` | — |
 | **Boot sector** (`firmware/boot.asm`) | `0x15898` | Loads the file its boot record names into `0x20000`, and jumps | 320 of 384 bytes, drafted |
 | **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | — |
@@ -72,7 +72,8 @@ installer, at 0x20000
   sector a value in `A` without assembly.
 - **Calling a function pointer in C is a `CALL`**, which leaves a return
   address on the hardware stack. Today's BIOS jumps, so a program starts with
-  SP at `STACK_TOP`. Whether anything depends on that is *unverified*.
+  SP at `STACK_TOP`. Through bios2 it starts 8 bytes lower, which phase 2
+  measured; programs end in `HALT`, and `screen.asm` ran to it that way.
 - **The debugger runs freely until PC reaches `PROGRAM_LOAD_ADDR`**, then
   steps (`emulator/cli.py:168`). A bios2 at `0x07000000` would count as the
   program.
@@ -234,8 +235,8 @@ ENTER    boot
   - write the channel number to `BOOT_CHANNEL`, `0x15A18`, the word just after
     the copy;
   - call `0x15898`.
-- **Both are calls**, so the program starts with a few bytes of bios2's
-  return addresses on the hardware stack *(unverified whether anything minds)*.
+- **Both are calls**, so the program starts on top of two of bios2's return
+  addresses: SP is `STACK_TOP - 8`. `tests/test_bios2.py` pins it.
 
 ---
 
@@ -355,9 +356,51 @@ What this step has to leave room for:
      - the debugger's upper bound;
      - either library guard.
    - **The full suite passes: 874 tests**, the 844 from before and 30 new.
-2. **bios2, with no screen yet.** It boots channel-1 programs, and
-   `test_loader.py`'s checks pass through it too. This phase also adds
-   `bios2_source`, rebuilding bios2 when it changes, and `cc.py --org`.
+2. **bios2, with no screen yet.** ***Done.***
+   - **`firmware/bios2.c`, 2,024 bytes.** It asks channel 1 for its size,
+     copies the program to `0x20000` with one `READ_DMA`, clears the screen
+     with the display's `FILL`, and calls it. There's no progress bar and no
+     wait. When it can't boot, it halts with the reason in `A`: 1 when there's
+     nothing to boot, including a program over `PROGRAM_MAX_SIZE`, where its
+     own frame stack starts; 2 when the transfer was short or refused.
+   - **Emptying the key queue and resetting the scanout base wait for
+     phase 3.** This bios2 reads no keys and draws nothing.
+   - **Boot cost, measured on `build/files.bin` (169 KB):**
+
+     | Route | Instructions from power-on to `0x20000` | Time |
+     |---|---|---|
+     | Stage 1 alone | 2,887,051 | 2.44 s, 2 s of it the wait |
+     | Through bios2 | 267 | under 0.01 s |
+
+   - **`cc.py --org ADDR`** takes a number or a memory-map name, which it
+     keeps as a name, and refuses anything that isn't a multiple of 8 inside
+     RAM. `generate()` and `compile_units()` take the origin too, and
+     `Program` has an `origin`.
+   - **The launcher** gains `bios2_source` and rebuilds bios2 when it or its
+     libraries are newer than the build, as it does the BIOS. A file named
+     with `--bios2` is used as it is, and never built over. Run end to end,
+     `start_emulator.py screen --headless --run` built `build/bios2.bin` and
+     booted `screen` through it to `HALT`.
+   - **Tests:**
+     - **`test_bios2.py` covers the real bios2:** programs up to exactly
+       `PROGRAM_MAX_SIZE` boot on a screen painted beforehand that ends up
+       blank; the three ways there is nothing to boot halt with 1; a short or
+       refused transfer halts with 2; the launcher builds bios2 and doesn't
+       rebuild an up-to-date build.
+     - **Every check in `test_loader.py` now runs twice**, through stage 1
+       and through bios2.
+     - **`test_compiler.py`** has a program with a global table, a string and
+       a function-pointer call, built for `BIOS2_LOAD_ADDR` and run there. It
+       also checks what `--org` accepts and refuses.
+   - **Eight deliberate breakages each failed the tests:**
+     - in bios2, removing the screen clear, the size limit or the transfer
+       check;
+     - `.ORG` ignoring the origin;
+     - `--org` accepting any alignment;
+     - `Program` ignoring its origin;
+     - the launcher building over `--bios2`, or rebuilding an up-to-date
+       bios2.
+   - **The full suite passes: 892 tests**, the 874 from phase 1 and 18 new.
 3. **bios2's screen, countdown and menu.** Tests queue keys through HID before
    the machine runs.
 4. **The boot sector, and bios2 booting it.** A test builds an image with

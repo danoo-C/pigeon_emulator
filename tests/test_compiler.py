@@ -17,11 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import cases, run_module                          # noqa: E402
 from assembler.assembler import Assembler                      # noqa: E402
-from compiler.cc import compile_to_asm                         # noqa: E402
+from compiler.cc import compile_to_asm, origin_of              # noqa: E402
 from compiler.lexer import CompileError                        # noqa: E402
 from emulator.cpu import CPU                                   # noqa: E402
-from emulator.memory_map import (PROGRAM_LOAD_ADDR, RAM_SIZE,  # noqa: E402
-                                 STACK_TOP)
+from emulator.memory_map import (BIOS2_LOAD_ADDR,              # noqa: E402
+                                 PROGRAM_LOAD_ADDR, RAM_SIZE, STACK_TOP)
 from emulator.ram import RAM                                   # noqa: E402
 
 STEP_LIMIT = 3_000_000
@@ -379,6 +379,64 @@ def test_image_is_small():
 def test_generated_assembly_carries_the_c_source():
     asm = compile_to_asm("int main(void) {\n    return 42;\n}\n", "t.c")
     assert "; 2: return 42;" in asm, "source lines should be interleaved as comments"
+
+
+# --- where the program runs: cc.py --org ----------------------------------
+
+def test_a_program_built_for_another_address_runs_there():
+    """cc.py --org (docs/os_cd.md): the code and data move, and every
+    absolute address in them moves too -- a global table, a string, a call
+    through a function pointer. Built for BIOS2_LOAD_ADDR and run there, it
+    gives the same answer, and nothing lands at PROGRAM_LOAD_ADDR."""
+    source = """
+        int table[3] = {5, 7, 11};
+        int twice(int x) { return x + x; }
+        int main(void) {
+            int (*f)(int);
+            char *word;
+            f = twice;
+            word = "pigeon";
+            return f(table[2]) + word[1];
+        }"""
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "t.asm"
+        path.write_text(compile_to_asm(source, "t.c", origin="BIOS2_LOAD_ADDR"))
+        image = Assembler(str(path)).assemble()
+    assert image != build(source), "the origin changed nothing"
+    ram = RAM(RAM_SIZE)
+    ram.load_bytes(image, BIOS2_LOAD_ADDR)
+    cpu = CPU(ram)
+    cpu.pc = BIOS2_LOAD_ADDR
+    for _ in range(STEP_LIMIT):
+        if cpu.run() == 1:
+            break
+    else:
+        raise AssertionError(f"did not halt within {STEP_LIMIT:,} instructions")
+    assert cpu.reg.read(0) == 22 + ord("i"), f"main() returned {cpu.reg.read(0)}"
+    assert cpu.sp == STACK_TOP, f"hardware stack unbalanced: SP={cpu.sp:#x}"
+    assert bytes(ram.mem[PROGRAM_LOAD_ADDR:PROGRAM_LOAD_ADDR + len(image)]) == \
+        bytes(len(image)), "something was written where the program would normally be"
+
+
+@cases(("BIOS2_LOAD_ADDR", "BIOS2_LOAD_ADDR"),
+       ("PROGRAM_LOAD_ADDR", "PROGRAM_LOAD_ADDR"),
+       ("0x07000000", "0x7000000"),
+       ("131072", "0x20000"))
+def test_org_takes_a_number_or_a_memory_map_name(text, emitted):
+    """A name stays a name, so the assembly says what it means."""
+    assert origin_of(text) == emitted
+
+
+@cases(("not a name", "nowhere"),
+       ("not where an instruction can start", "0x20004"),
+       ("past the end of RAM", "0x08000000"),
+       ("negative", "-8"))
+def test_org_refuses_what_is_not_an_address(label, text):
+    try:
+        origin_of(text)
+    except ValueError:
+        return
+    raise AssertionError(f"{label}: --org {text} was accepted")
 
 
 if __name__ == "__main__":

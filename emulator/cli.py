@@ -44,14 +44,34 @@ def build_bios_if_stale(config: Config, force: bool = False) -> bool:
     return True
 
 
+def build_bios2_if_stale(config: Config) -> bool:
+    """Compile the second-stage BIOS when its build is missing, or older than
+    its source or any library the source includes.
+
+    It is built like any C program, but for BIOS2_LOAD_ADDR, where the BIOS
+    puts it (docs/os_cd.md). No source means nothing to build.
+    """
+    if not config.bios2_source.exists():
+        return False
+    bios2 = Program(name="bios2", source=config.bios2_source,
+                    binary=config.bios2_binary, origin="BIOS2_LOAD_ADDR")
+    if bios2.built and not bios2.stale:
+        return False
+    bios2.ensure_built(quiet=True)
+    return True
+
+
 def second_stage(config: Config, explicit: bool) -> Path | None:
     """The second-stage BIOS to put on channel 7, or None.
 
-    Optional until something builds one (docs/os_cd.md): a configured file
-    that is not there means no second stage, and the BIOS boots channel 1
-    as it always has. One named with --bios2 has to exist -- asking for a
-    second stage and quietly getting none would be a surprise.
+    The configured one is built first when auto_build is on, as the BIOS
+    is. One named with --bios2 is used as it is -- never built over -- and
+    has to exist: asking for a second stage and quietly getting none would
+    be a surprise. With neither a build nor a source there is no second
+    stage, and the BIOS boots channel 1 itself.
     """
+    if not explicit and config.auto_build:
+        build_bios2_if_stale(config)
     if config.bios2_binary.exists():
         return config.bios2_binary
     if explicit:
@@ -234,7 +254,8 @@ def build_parser():
                        help="folder to scan for programs; repeatable")
     where.add_argument("--bios", metavar="PATH", dest="bios_binary")
     where.add_argument("--bios2", metavar="PATH", dest="bios2_binary",
-                       help="second-stage BIOS for IO channel 7 (docs/os_cd.md)")
+                       help="second-stage BIOS for IO channel 7, used as it is "
+                            "(docs/os_cd.md)")
     where.add_argument("--disk", metavar="PATH", dest="disk",
                        help="disk image for IO channel 2")
     where.add_argument("--no-autobuild", action="store_true",
@@ -318,6 +339,9 @@ def main(argv=None):
         bios2_path = second_stage(config, explicit=args.bios2_binary is not None)
     except FileNotFoundError as e:
         parser.error(str(e))
+    except Exception as e:
+        print(f"Could not build the second-stage BIOS: {e}", file=sys.stderr)
+        return 1
     if bios2_path is not None:
         print(f"\nSecond-stage BIOS: {short(bios2_path)}")
 

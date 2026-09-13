@@ -108,8 +108,8 @@ everything else works.
 Without `--run` you get a menu (run / single-step debugger / dump RAM / CPU
 state). `--help` lists everything; the useful ones are `--verbose` (log every IO
 transaction, disk read and key event), `--headless` (bind no ports) and
-`--disasm-bios`. `--bios2 PATH` puts a second-stage BIOS on IO channel 7
-([docs/os_cd.md](docs/os_cd.md)).
+`--disasm-bios`. `--bios2 PATH` boots through a second-stage BIOS other than
+the one the launcher builds, used as it is ([docs/os_cd.md](docs/os_cd.md)).
 
 ### config.json
 
@@ -131,6 +131,7 @@ partial or missing file is fine.
 
   "bios_source": "firmware/bios.asm",
   "bios_binary": "build/bios.bin",
+  "bios2_source": "firmware/bios2.c",
   "bios2_binary": "build/bios2.bin",
   "auto_build": true
 }
@@ -143,7 +144,7 @@ partial or missing file is fine.
 | `build_dir` | where assembled output and RAM dumps go |
 | `disk` | the disk on IO channel 2. It lives outside `build/` so that what programs save survives a clean build, and it is created blank, at 4 MiB, if missing. `tools/pfs.py` formats it and shows what's on it ([docs/filesystem.md](docs/filesystem.md)) |
 | `bios_source` / `bios_binary` | the BIOS and where it builds to |
-| `bios2_binary` | the second-stage BIOS, served read-only on IO channel 7. Optional: while the file is missing, the BIOS boots channel 1 as it always has. `--bios2 PATH` names one that must exist ([docs/os_cd.md](docs/os_cd.md)) |
+| `bios2_source` / `bios2_binary` | the second-stage BIOS and where it builds to: C, compiled for `0x07000000`, served read-only on IO channel 7, and rebuilt when stale like the BIOS. With neither, the BIOS boots channel 1 itself. `--bios2 PATH` uses a file as it is, and it must exist ([docs/os_cd.md](docs/os_cd.md)) |
 | `auto_build` | reassemble stale sources automatically (`--no-autobuild` to skip) |
 | `cd_root` | discs may be inserted from anywhere under here. `"."` is the repo root, so the whole project is reachable and nothing outside it is; `null` allows the entire filesystem ([docs/cd-drive.md](docs/cd-drive.md)) |
 | `cd_dirs` | folders the "Load from server" picker lists, non-recursively |
@@ -194,6 +195,7 @@ emulator/             the machine (importable, no side effects on import)
   devices/            hdd.py  cd.py  timer.py  hid.py  display_io.py
 assembler/            assembler.py + README.md
 firmware/bios.asm     boot ROM source: loads bios2 from channel 7, else a program in 4 KB chunks
+firmware/bios2.c      second-stage BIOS, built for 0x07000000: boots the program on channel 1
 user/                 example programs (.asm and .c alike)
 lib/pigeon/           the C libraries: mem, string, fs, cd, display, input, math
 compiler/             pigeon-cc: C -> assembly
@@ -211,18 +213,24 @@ disks/                the channel-2 disk image (gitignored, survives a clean)
 
 1. `bios.py` copies `build/bios.bin` into RAM at `0x0`; the CPU starts at PC = 0.
 2. The BIOS asks **channel 7**, the read-only firmware device, for a
-   second-stage BIOS. If it holds one of at most 15 MB, a single `READ_DMA`
-   copies it to `0x07000000` and the BIOS jumps there
-   ([docs/os_cd.md](docs/os_cd.md)). Nothing builds one yet; without it the
-   BIOS carries on as it always has.
-3. The BIOS programs the IO header and selects **channel 1**, the disk holding
-   the user program.
-4. The controller DMAs it into the IO data window; the BIOS copies it word by
+   second-stage BIOS, which the launcher builds from `firmware/bios2.c`. If
+   it holds one of at most 15 MB, a single `READ_DMA` copies it to
+   `0x07000000` and the BIOS jumps there ([docs/os_cd.md](docs/os_cd.md)).
+3. **bios2** loads the program on channel 1 with one more `READ_DMA`, clears
+   the screen and calls `0x20000` — no progress bar and no wait. With
+   nothing to boot it halts with 1 in `A`; after a failed transfer, with 2.
+
+Without a second stage — a `Machine` built without one, as most tests build
+them — the BIOS boots channel 1 itself:
+
+4. It programs the IO header and selects **channel 1**, the disk holding the
+   user program.
+5. The controller DMAs it into the IO data window; the BIOS copies it word by
    word to `0x20000`, painting each word into the framebuffer as it goes — a
    boot progress bar made of program bytes. The bar stops at the bottom of
    the screen: unclamped, a program larger than the gap from the framebuffer
    to `0x20000` painted over the program it was loading.
-5. It waits 2 s on **channel 4**, clears the screen, and jumps to `0x20000`.
+6. It waits 2 s on **channel 4**, clears the screen, and jumps to `0x20000`.
 
 ---
 

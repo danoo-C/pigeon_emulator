@@ -17,7 +17,14 @@ linker, so name every unit):
 python3 compiler/cc.py user/demo.c lib/pigeon/display.c lib/pigeon/input.c \
         lib/pigeon/mem.c -o build/demo.bin
 python3 compiler/cc.py program.c -S -o program.asm    # stop at assembly
+python3 compiler/cc.py firmware/bios2.c --org BIOS2_LOAD_ADDR -o build/bios2.bin
 ```
+
+Every program is built for `PROGRAM_LOAD_ADDR` unless `--org` names another
+address: a number, or a name from `emulator/memory_map.py`. Only the code and
+data move — the frame stack and heap stay at `HEAP_START`, so a program built
+for elsewhere must not reach into them. The second-stage BIOS is built this
+way, for `BIOS2_LOAD_ADDR` ([docs/os_cd.md](../docs/os_cd.md)).
 
 It emits **assembly text** and hands it to `assembler/assembler.py`, so it
 never touches opcodes, encoding, or the memory map — and the output stays
