@@ -195,7 +195,7 @@ emulator/             the machine (importable, no side effects on import)
   devices/            hdd.py  cd.py  timer.py  hid.py  display_io.py
 assembler/            assembler.py + README.md
 firmware/bios.asm     boot ROM source: loads bios2 from channel 7, else a program in 4 KB chunks
-firmware/bios2.c      second-stage BIOS, built for 0x07000000: boots the program on channel 1
+firmware/bios2.c      second-stage BIOS, built for 0x07000000: boot screen, countdown, menu
 user/                 example programs (.asm and .c alike)
 lib/pigeon/           the C libraries: mem, string, fs, cd, display, input, math
 compiler/             pigeon-cc: C -> assembly
@@ -216,9 +216,11 @@ disks/                the channel-2 disk image (gitignored, survives a clean)
    second-stage BIOS, which the launcher builds from `firmware/bios2.c`. If
    it holds one of at most 15 MB, a single `READ_DMA` copies it to
    `0x07000000` and the BIOS jumps there ([docs/os_cd.md](docs/os_cd.md)).
-3. **bios2** loads the program on channel 1 with one more `READ_DMA`, clears
-   the screen and calls `0x20000` — no progress bar and no wait. With
-   nothing to boot it halts with 1 in `A`; after a failed transfer, with 2.
+3. **bios2** lists what it can boot from — the program on channel 1, the
+   hard disk, the CD — and counts down 2 s to the first that can boot. Enter
+   boots at once; Esc opens a menu. A program is loaded with one more
+   `READ_DMA` and called at `0x20000`. A disk or disc whose block 0 carries a
+   boot sector has that block copied to `0x15818`, and its code called.
 
 Without a second stage — a `Machine` built without one, as most tests build
 them — the BIOS boots channel 1 itself:
@@ -245,6 +247,7 @@ silently overlapping.
 | `0x00000000`–`0x000003FF` | 1 KB | BIOS — CPU boots here |
 | `0x00000400`–`0x00001417` | 4 KB + 24 B | IO controller (header + data window) |
 | `0x00001418`–`0x00015817` | 81 KB | Display framebuffer (192×108 × 4 B, 16:9) |
+| `0x00015818`–`0x00015A1B` | 516 B | A boot sector's copy and its channel, while booting |
 | `0x00020000`–`0x0011FFFF` | 1 MB | User program (fixed load point) |
 | `0x00120000` → | | Heap, grows **up** |
 | `0x07000000`–`0x07EFFFFF` | 15 MB | Second-stage BIOS, when there is one. Only used while booting |

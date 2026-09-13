@@ -1,6 +1,6 @@
 """The two-stage BIOS: stage 1, the firmware device, and bios2.
 
-Phases 1 and 2 of docs/os_cd.md. The BIOS has 1 KB and no room for a font,
+Phases 1 to 3 of docs/os_cd.md. The BIOS has 1 KB and no room for a font,
 so it loads a second stage, bios2, off a read-only HDD on channel 7 with
 one READ_DMA, and jumps to it.
 
@@ -10,42 +10,53 @@ as much. With no bios2 the BIOS boots channel 1 exactly as before, and
 every test that builds a Machine without one boots that way. So does a
 bios2 that is empty, claims to be too big, or arrives short.
 
-The real bios2, firmware/bios2.c, is tested too. In phase 2 it has no
-screen: it boots the program on channel 1 with one READ_DMA, and when it
-cannot, it halts with the reason in A.
+The real bios2, firmware/bios2.c, is tested on a Machine with keys pushed
+through HID and its screen read back as text, with the font reader
+tests/test_files.py already has. Disks and discs that can boot carry a
+stand-in boot sector, which proves it ran, and from which channel, by
+what it leaves in A.
 
-Both are built here from their sources rather than taken from build/,
-which only the launcher rebuilds: these tests are about the sources.
+Both stages are built here from their sources rather than taken from
+build/, which only the launcher rebuilds: these tests are about the
+sources.
 
     python3 tests/test_bios2.py      (or: python3 -m pytest tests/)
 """
 import contextlib
+import functools
 import io
 import logging
 import struct
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import cases, run_module                                 # noqa: E402
-from assembler.assembler import assemble_file                         # noqa: E402
+from assembler.assembler import Assembler, assemble_file              # noqa: E402
 from emulator.cli import build_bios2_if_stale, in_program, second_stage  # noqa: E402
 from emulator.config import load_config                               # noqa: E402
 from emulator.devices.hdd import (                                    # noqa: E402
     CMD_GET_SIZE, CMD_READ, CMD_READ_DMA, CMD_TRUNCATE, CMD_WRITE, CMD_WRITE_DMA,
     DMA_REFUSED, HDD)
+from emulator.devices.timer import CMD_STATUS, STATUS_STOPPED         # noqa: E402
 from emulator.instruction_set import NONE_REG, encode                 # noqa: E402
 from emulator.machine import Machine                                  # noqa: E402
 from emulator.memory_map import (                                     # noqa: E402
-    BIOS2_LOAD_ADDR, BIOS2_MAX, BIOS_MAX, CH_BIOS2, CH_USERPROG, DISPLAY_SIZE,
-    DISPLAY_START, IO_START, PROGRAM_LOAD_ADDR, PROGRAM_MAX_SIZE, STACK_TOP, IOHeader)
+    BIOS2_LOAD_ADDR, BIOS2_MAX, BIOS_MAX, BOOT_BLOCK, BOOT_CHANNEL, BOOT_CODE,
+    BOOT_LOAD_ADDR, BOOT_RECORD, BOOT_SIGNATURE, CH_BIOS2, CH_CD, CH_HDD, CH_USERPROG,
+    DISPLAY_H, DISPLAY_SIZE, IO_START, PROGRAM_LOAD_ADDR, PROGRAM_MAX_SIZE, STACK_TOP,
+    IOHeader)
 from emulator.programs import Program                                 # noqa: E402
 from emulator.ram import RAM                                          # noqa: E402
+from pfs import PgfsImage                                             # noqa: E402
+from test_files import ROW, text_at                                   # noqa: E402
 
 # An empty channel 1, an empty channel 7 and a refused transfer each log a
 # warning, and these tests do all three on purpose.
@@ -62,11 +73,20 @@ with contextlib.redirect_stdout(io.StringIO()):
 
 PROGRAM = 0xC0FFEE              # what a channel-1 program leaves in A
 STAGE2 = 0xB1052                # what the stand-in bios2 leaves in A
-NOTHING_TO_BOOT = 1             # bios2's reasons for halting, from firmware/bios2.c
-TRANSFER_FAILED = 2
+SECTOR = 0x5EC7000              # the stand-in boot sector leaves this plus its channel
 WINDOW = 4096
 WINDOW_BASE = IO_START + IOHeader.USABLE_AFTER
 SMALL_RAM = 1 << 18             # a power of two past PROGRAM_LOAD_ADDR, for device tests
+MiB = 1 << 20
+
+# Keys, in the pigeon keycode space (emulator/devices/keycodes.py).
+ESC, ENTER, UP, DOWN = 0x1B, 0x0D, 0x82, 0x83
+
+# bios2's rows, as firmware/bios2.c lays them out.
+SCREEN_ROWS = DISPLAY_H // ROW
+R_TITLE, R_RAM, R_PROGRAM, R_DISK, R_CD, R_STATUS, R_KEYS = 0, 1, 3, 4, 5, 7, 11
+COUNTDOWN_KEYS = "ESC menu    ENTER boot now"
+MENU_KEYS = "UP DOWN choose   ENTER boot"
 
 
 def image(nops, sentinel):
@@ -82,50 +102,6 @@ def recorder(commands, answer):
         commands.append(command)
         return answer(read_write, command, length, address, data)
     return recording
-
-
-def boot(program=None, bios2=None, fakes=None, before=None, max_steps=8_000_000):
-    """Power on a Machine and run it to HALT.
-
-    fakes maps a channel to fake(real_callback) -> callback, for a test
-    that needs a device to misbehave. Every command reaching channel 1 or
-    channel 7 is recorded either way. before(machine) runs at power-on,
-    before the first instruction."""
-    fakes = fakes or {}
-    with tempfile.TemporaryDirectory() as t:
-        t = Path(t)
-        paths = {}
-        for name, data in (("program", program), ("bios2", bios2)):
-            if data is not None:
-                paths[name] = t / f"{name}.bin"
-                paths[name].write_bytes(data)
-        machine = Machine(bios_path=str(BIOS), disk_path=str(t / "hdd.img"),
-                          program_path=str(paths["program"]) if "program" in paths else None,
-                          bios2_path=str(paths["bios2"]) if "bios2" in paths else None)
-        sent = {CH_USERPROG: [], CH_BIOS2: []}
-        try:
-            for number, commands in sent.items():
-                channel = machine.io_controller.channels.get(number)
-                if channel is not None:
-                    answer = fakes[number](channel.callback) if number in fakes else channel.callback
-                    channel.callback = recorder(commands, answer)
-            if before is not None:
-                before(machine)
-            with contextlib.redirect_stdout(io.StringIO()):
-                for _ in range(max_steps):
-                    if machine.step() == 1:
-                        break
-            assert machine.cpu.halted, f"never halted (PC={machine.cpu.pc:#x})"
-            mem = machine.ram.mem
-            return SimpleNamespace(
-                a=machine.cpu.reg.read(0), sp=machine.cpu.sp,
-                sent=sent[CH_BIOS2], sent1=sent[CH_USERPROG],
-                registered=CH_BIOS2 in machine.io_controller.channels,
-                at_bios2=bytes(mem[BIOS2_LOAD_ADDR:BIOS2_LOAD_ADDR + len(bios2 or b"")]),
-                at_program=bytes(mem[PROGRAM_LOAD_ADDR:PROGRAM_LOAD_ADDR + len(program or b"")]),
-                screen=bytes(mem[DISPLAY_START:DISPLAY_START + DISPLAY_SIZE]))
-        finally:
-            machine.close()
 
 
 def claims_size(size):
@@ -150,7 +126,45 @@ def reports_moved(value_for):
     return fake
 
 
-# --- stage 1: loading bios2 ------------------------------------------------------
+# --- stage 1 ----------------------------------------------------------------------
+
+def boot(program=None, bios2=None, fakes=None, max_steps=8_000_000):
+    """Power on a Machine with a stand-in bios2 and run it to HALT.
+
+    fakes maps a channel to fake(real_callback) -> callback, for a test
+    that needs a device to misbehave. Every command reaching channel 7 is
+    recorded either way."""
+    fakes = fakes or {}
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        paths = {}
+        for name, data in (("program", program), ("bios2", bios2)):
+            if data is not None:
+                paths[name] = t / f"{name}.bin"
+                paths[name].write_bytes(data)
+        machine = Machine(bios_path=str(BIOS), disk_path=str(t / "hdd.img"),
+                          program_path=str(paths["program"]) if "program" in paths else None,
+                          bios2_path=str(paths["bios2"]) if "bios2" in paths else None)
+        sent = []
+        try:
+            channel = machine.io_controller.channels.get(CH_BIOS2)
+            if channel is not None:
+                answer = fakes[CH_BIOS2](channel.callback) if CH_BIOS2 in fakes else channel.callback
+                channel.callback = recorder(sent, answer)
+            with contextlib.redirect_stdout(io.StringIO()):
+                for _ in range(max_steps):
+                    if machine.step() == 1:
+                        break
+            assert machine.cpu.halted, f"never halted (PC={machine.cpu.pc:#x})"
+            mem = machine.ram.mem
+            return SimpleNamespace(
+                a=machine.cpu.reg.read(0), sent=sent,
+                registered=CH_BIOS2 in machine.io_controller.channels,
+                at_bios2=bytes(mem[BIOS2_LOAD_ADDR:BIOS2_LOAD_ADDR + len(bios2 or b"")]),
+                at_program=bytes(mem[PROGRAM_LOAD_ADDR:PROGRAM_LOAD_ADDR + len(program or b"")]))
+        finally:
+            machine.close()
+
 
 @cases(("under one window", 100),        # 816 bytes
        ("just over the window", 512),    # 4,112 bytes
@@ -173,8 +187,6 @@ def test_bios2_comes_before_a_program_on_channel_1():
     assert r.a == STAGE2, f"A={r.a:#x}: the program ran instead of bios2"
     assert r.at_program == bytes(len(program)), "the BIOS loaded the program as well"
 
-
-# --- stage 1: falling back -------------------------------------------------------
 
 @cases(("no firmware device", None), ("an empty bios2 file", b""))
 def test_without_a_bios2_the_program_on_channel_1_boots_as_before(label, bios2):
@@ -210,49 +222,275 @@ def test_the_bios_still_fits_in_its_kilobyte():
     assert size <= BIOS_MAX, f"the BIOS is {size} bytes, over {BIOS_MAX}"
 
 
-# --- bios2, the real one ----------------------------------------------------------
+# --- bios2: a Machine with keys going in and rows coming out -------------------------
 
-def dirty_screen(machine):
-    """Paint the framebuffer at power-on, so a blank screen afterwards
-    proves something cleared it."""
-    machine.ram.mem[DISPLAY_START:DISPLAY_START + DISPLAY_SIZE] = b"\xFF" * DISPLAY_SIZE
+@functools.lru_cache(maxsize=None)
+def stand_in_sector():
+    """A boot sector that proves it ran, and from where: it leaves
+    SECTOR + the channel bios2 wrote to BOOT_CHANNEL in A, and halts."""
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "sector.asm"
+        path.write_text(f".ORG BOOT_ENTRY\n    MOV B #BOOT_CHANNEL\n    MRW A B\n"
+                        f"    ADD A A #{SECTOR}\n    HALT\n")
+        return Assembler(str(path)).assemble()
+
+
+def bootable_image(path, label="PIGEONOS", signed=True, size=MiB):
+    """A PigeonFS image with the stand-in boot sector in block 0. Written
+    after pfs.py is done with it, because its superblock writes rebuild
+    block 0 and would erase the sector."""
+    PgfsImage.mkfs(path, size, label=label).close()
+    raw = bytearray(path.read_bytes())
+    if signed:
+        struct.pack_into("<I", raw, BOOT_RECORD, BOOT_SIGNATURE)
+    code = stand_in_sector()
+    raw[BOOT_CODE:BOOT_CODE + len(code)] = code
+    path.write_bytes(raw)
+    return path
+
+
+class Power:
+    """The real bios2 on a Machine."""
+
+    def __init__(self, folder, program=None, disk=None, disc=None, fakes=None, keys=()):
+        folder = Path(folder)
+        firmware = folder / "bios2.bin"
+        firmware.write_bytes(BIOS2)
+        program_path = None
+        if program is not None:
+            program_path = folder / "program.bin"
+            program_path.write_bytes(program)
+        self.machine = Machine(bios_path=str(BIOS), bios2_path=str(firmware),
+                               program_path=str(program_path) if program_path else None,
+                               disk_path=str(disk or folder / "hdd.img"))
+        if disc is not None:
+            self.machine.cd.root = None
+            self.machine.cd.insert(disc)
+        self.sent1 = []
+        channel = self.machine.io_controller.channels.get(CH_USERPROG)
+        if channel is not None:
+            fake = (fakes or {}).get(CH_USERPROG)
+            channel.callback = recorder(
+                self.sent1, fake(channel.callback) if fake else channel.callback)
+        for code in keys:
+            self.key(code)
+
+    def key(self, code):
+        self.machine.hid.push_key(code, True)
+        self.machine.hid.push_key(code, False)
+
+    def run(self, steps=8_000_000):
+        """Run up to `steps` instructions; True once it has halted."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(steps):
+                if self.machine.step() == 1:
+                    return True
+        return False
+
+    def run_until(self, wanted, steps=6_000_000, every=20_000):
+        """Run until wanted(rows) holds on two looks in a row, `every`
+        instructions apart. One look is not enough: it can catch the
+        screen halfway through a redraw, a status line cleared and half
+        written. False if it halted first, or never settled."""
+        previous = None
+        for _ in range(0, steps, every):
+            if self.run(every):
+                return False
+            rows = self.rows()
+            if rows == previous and wanted(rows):
+                return True
+            previous = rows
+        return False
+
+    def press(self, *codes, steps=1_000_000):
+        for code in codes:
+            self.key(code)
+        return self.run(steps)
+
+    def rows(self):
+        fb = self.machine.display_io.snapshot()
+        return [text_at(fb, 1 + r * ROW) for r in range(SCREEN_ROWS)]
+
+    @property
+    def a(self):
+        return self.machine.cpu.reg.read(0)
+
+
+@contextlib.contextmanager
+def power_on(folder, **kw):
+    power = Power(folder, **kw)
+    try:
+        yield power
+    finally:
+        power.machine.close()
+
+
+def status_is(text):
+    return lambda rows: rows[R_STATUS] == text
+
+
+# --- bios2: the countdown ----------------------------------------------------------
+
+def test_the_boot_screen_lists_the_devices_and_counts_down():
+    """Waits for the keys row, which bios2 draws last. Two matching looks
+    are not enough on their own here: while bios2 clears the empty keys
+    row to BG, the pixels do not change, and the screen looks settled
+    with that row still to come."""
+    with tempfile.TemporaryDirectory() as t, power_on(t, program=image(100, PROGRAM)) as p:
+        assert p.run_until(lambda rows: rows[R_KEYS] == COUNTDOWN_KEYS
+                           and rows[R_STATUS].startswith("Booting")), p.rows()
+        rows = p.rows()
+    assert rows[R_TITLE] == "PIGEON BIOS", rows
+    assert rows[R_RAM] == "128 MB RAM", rows
+    assert rows[R_PROGRAM] == "  Program    816 bytes", rows
+    assert rows[R_DISK] == "  Hard disk  no boot sector", rows
+    assert rows[R_CD] == "  CD         no disc", rows
+    assert rows[R_STATUS] in ("Booting Program in 2", "Booting Program in 1"), rows
+
+
+def test_with_no_key_the_first_bootable_device_boots_when_the_countdown_ends():
+    with tempfile.TemporaryDirectory() as t, power_on(t, program=image(10, PROGRAM)) as p:
+        started = time.time()
+        assert p.run(steps=20_000_000), "never booted"
+        waited = time.time() - started
+        assert p.a == PROGRAM, f"A={p.a:#x}"
+    assert waited >= 1.9, f"booted after {waited:.2f} s, before the countdown ran out"
+
+
+def test_enter_during_the_countdown_boots_at_once():
+    with tempfile.TemporaryDirectory() as t, \
+            power_on(t, program=image(10, PROGRAM), keys=[ENTER]) as p:
+        started = time.time()
+        assert p.run(), "never booted"
+        waited = time.time() - started
+        assert p.a == PROGRAM, f"A={p.a:#x}"
+    assert waited < 1.5, f"Enter took {waited:.2f} s to boot: the countdown ran anyway"
 
 
 @cases(("under one window", 100),
        ("over the display ceiling", 17_000),                  # 136 KB
        ("exactly PROGRAM_MAX_SIZE", PROGRAM_MAX_SIZE // 8 - 2))
-def test_bios2_boots_a_program_on_channel_1(label, nops):
-    """One GET_SIZE and one READ_DMA on channel 1, however big the
-    program, then a blank screen and a CALL into it."""
+def test_a_program_on_channel_1_arrives_in_one_transfer(label, nops):
     program = image(nops, PROGRAM)
-    r = boot(program=program, bios2=BIOS2, before=dirty_screen, max_steps=2_000_000)
-    assert r.a == PROGRAM, f"{label}: A={r.a:#x}, want {PROGRAM:#x}"
-    assert r.at_program == program, f"{label}: the program did not load whole"
-    assert r.sent1 == [CMD_GET_SIZE, CMD_READ_DMA], f"{label}: channel 1 got {r.sent1}"
-    assert r.screen == bytes(DISPLAY_SIZE), f"{label}: the screen was not cleared"
-    # C cannot jump, so the program runs on top of two return addresses:
-    # the startup code's call to main, and main's call into the program.
-    assert r.sp == STACK_TOP - 8, f"{label}: SP={r.sp:#x}, want {STACK_TOP - 8:#x}"
+    with tempfile.TemporaryDirectory() as t, power_on(t, program=program, keys=[ENTER]) as p:
+        assert p.run(steps=3_000_000), f"{label}: never booted"
+        assert p.a == PROGRAM, f"{label}: A={p.a:#x}"
+        loaded = bytes(p.machine.ram.mem[PROGRAM_LOAD_ADDR:PROGRAM_LOAD_ADDR + len(program)])
+        assert loaded == program, f"{label}: the program did not load whole"
+        assert p.sent1.count(CMD_READ_DMA) == 1 and CMD_READ not in p.sent1, \
+            f"{label}: channel 1 got {p.sent1}"
 
 
-@cases(("channel 1 empty", None),
-       ("an empty program file", b""),
-       ("a program over PROGRAM_MAX_SIZE", bytes(PROGRAM_MAX_SIZE + 8)))
-def test_bios2_halts_when_there_is_nothing_to_boot(label, program):
-    """PROGRAM_MAX_SIZE is where bios2's own frame stack begins, at
-    HEAP_START: a bigger program would be copied over it."""
-    r = boot(program=program, bios2=BIOS2)
-    assert r.a == NOTHING_TO_BOOT, f"{label}: A={r.a:#x}, want {NOTHING_TO_BOOT}"
-    assert CMD_READ_DMA not in r.sent1, f"{label}: bios2 started a transfer anyway"
+def test_the_program_finds_a_blank_screen_empty_queues_and_a_stopped_timer():
+    """The menu's keys are the menu's. bios2 read ENTER, but ENTER's two
+    edges and an 'x' typed after it are still queued when it hands over,
+    and none of them may reach the program."""
+    with tempfile.TemporaryDirectory() as t, \
+            power_on(t, program=image(10, PROGRAM), keys=[ENTER, ord("x")]) as p:
+        assert p.run() and p.a == PROGRAM, "never booted"
+        hid, machine = p.machine.hid, p.machine
+        assert hid.pop_key() == 0, "a typed key reached the program"
+        assert hid.pop_key_event() == b"\x00\x00", "a key edge reached the program"
+        status = struct.unpack_from("<I", machine.timer.callback(0, CMD_STATUS, 8, 1,
+                                                                 bytearray(8)))[0]
+        assert status == STATUS_STOPPED, f"bios2 left timer 1 in status {status}"
+        assert machine.display_io.snapshot() == bytes(DISPLAY_SIZE), "the screen was not cleared"
+        # A CALL, not a jump: the program runs a few return addresses down.
+        assert STACK_TOP - 32 <= machine.cpu.sp < STACK_TOP, f"SP={machine.cpu.sp:#x}"
+
+
+# --- bios2: the menu ---------------------------------------------------------------
+
+def test_esc_opens_the_menu_and_enter_boots_the_one_chosen():
+    """The disk's boot sector runs from BOOT_ENTRY with its whole block 0
+    copied to BOOT_LOAD_ADDR and its channel at BOOT_CHANNEL."""
+    with tempfile.TemporaryDirectory() as t:
+        disk = bootable_image(Path(t) / "disk.img")
+        with power_on(t, program=image(10, PROGRAM), disk=disk, keys=[ESC]) as p:
+            assert p.run_until(lambda rows: rows[R_STATUS] == "BOOT MENU"
+                               and rows[R_KEYS] == MENU_KEYS), p.rows()
+            rows = p.rows()
+            assert rows[R_PROGRAM] == "> Program    96 bytes", rows
+            assert rows[R_DISK] == "  Hard disk  PIGEONOS", rows
+            assert rows[R_KEYS] == MENU_KEYS, rows
+            assert not p.press(DOWN)
+            assert p.rows()[R_DISK] == "> Hard disk  PIGEONOS", p.rows()
+            assert p.press(ENTER), "the disk did not boot"
+            assert p.a == SECTOR + CH_HDD, f"A={p.a:#x}, want {SECTOR + CH_HDD:#x}"
+            mem = p.machine.ram.mem
+            assert bytes(mem[BOOT_LOAD_ADDR:BOOT_LOAD_ADDR + BOOT_BLOCK]) == \
+                disk.read_bytes()[:BOOT_BLOCK], "block 0 was not copied whole"
+            assert struct.unpack_from("<I", mem, BOOT_CHANNEL)[0] == CH_HDD
+
+
+def test_a_disc_with_a_boot_sector_counts_down_and_boots_from_the_cd():
+    with tempfile.TemporaryDirectory() as t:
+        disc = bootable_image(Path(t) / "disc.img", label="INSTALL")
+        with power_on(t, disc=disc) as p:
+            assert p.run_until(status_is("Booting CD in 2")), p.rows()
+            assert p.rows()[R_CD] == "  CD         INSTALL", p.rows()
+            assert p.press(ENTER), "the disc did not boot"
+            assert p.a == SECTOR + CH_CD, f"A={p.a:#x}, want {SECTOR + CH_CD:#x}"
+
+
+@cases(("nothing on channel 1", lambda d: {}, R_PROGRAM, "Program    none"),
+       ("a program over PROGRAM_MAX_SIZE", lambda d: {"program": bytes(PROGRAM_MAX_SIZE + 8)},
+        R_PROGRAM, "Program    too big"),
+       ("a PigeonFS disk with no boot record",
+        lambda d: {"disk": bootable_image(d / "disk.img", signed=False)},
+        R_DISK, "Hard disk  no boot sector"),
+       ("a bootable disk with no label",
+        lambda d: {"disk": bootable_image(d / "disk.img", label="")},
+        R_DISK, "Hard disk  bootable"),
+       ("an empty drive", lambda d: {}, R_CD, "CD         no disc"),
+       ("a disc of raw bytes", lambda d: {"disc": raw_disc(d / "disc.bin")},
+        R_CD, "CD         no boot sector"))
+def test_each_device_says_what_it_holds(label, prepare, row, detail):
+    """Read in the menu, past the "> " that marks the selected row."""
+    with tempfile.TemporaryDirectory() as t, \
+            power_on(t, keys=[ESC], **prepare(Path(t))) as p:
+        assert p.run_until(lambda rows: rows[R_STATUS] in ("BOOT MENU", "Nothing to boot")), \
+            f"{label}: {p.rows()}"
+        assert p.rows()[row][2:] == detail, f"{label}: {p.rows()[row]!r}"
+
+
+def raw_disc(path):
+    path.write_bytes(bytes(4096))
+    return path
+
+
+def test_with_nothing_to_boot_the_menu_waits_and_notices_a_disc_going_in():
+    """No key is pressed after the disc goes in: the drive's generation
+    counter moving is what redraws the menu and selects the CD."""
+    with tempfile.TemporaryDirectory() as t:
+        disc = bootable_image(Path(t) / "disc.img", label="INSTALL")
+        with power_on(t) as p:
+            assert p.run_until(status_is("Nothing to boot")), p.rows()
+            assert not p.run(300_000), "halted with nothing to boot"
+            p.machine.cd.root = None
+            p.machine.cd.insert(disc)
+            assert p.run_until(lambda rows: rows[R_CD] == "> CD         INSTALL"), p.rows()
+            assert p.rows()[R_STATUS] == "BOOT MENU", p.rows()
+            assert p.press(ENTER), "the disc did not boot"
+            assert p.a == SECTOR + CH_CD, f"A={p.a:#x}"
+
+
+def test_enter_on_a_device_that_cannot_boot_says_so():
+    with tempfile.TemporaryDirectory() as t, power_on(t, keys=[ENTER]) as p:
+        assert p.run_until(status_is("Program: can't boot")), p.rows()
+        assert not p.run(300_000), "halted"
 
 
 @cases(("a short transfer", reports_moved(lambda n: n - 4)),
        ("a refused transfer", reports_moved(lambda n: DMA_REFUSED)))
-def test_bios2_does_not_run_a_program_that_arrived_short(label, fake):
+def test_a_program_that_arrives_short_is_not_run_and_the_menu_says_so(label, fake):
     """The short case copies the whole program and only reports less, so
-    running it anyway would still reach the sentinel. It must not."""
-    r = boot(program=image(10, PROGRAM), bios2=BIOS2, fakes={CH_USERPROG: fake})
-    assert r.a == TRANSFER_FAILED, f"{label}: A={r.a:#x}, want {TRANSFER_FAILED}"
+    running it anyway would still halt with the sentinel. It must not."""
+    with tempfile.TemporaryDirectory() as t, \
+            power_on(t, program=image(10, PROGRAM), fakes={CH_USERPROG: fake},
+                     keys=[ENTER]) as p:
+        assert p.run_until(status_is("Program: load failed")), f"{label}: {p.rows()}"
+        assert not p.run(300_000), f"{label}: halted -- the program ran"
 
 
 # --- the firmware device -------------------------------------------------------

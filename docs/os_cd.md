@@ -182,27 +182,37 @@ lose anything to fit.
 
 The screen is 32 characters by 12 rows.
 
+As built in phase 3, and as `tests/test_bios2.py` reads it back. Rows 8 to
+10 are empty:
+
 ```
 PIGEON BIOS
 128 MB RAM
 
   Program    32044 bytes
-  Hard disk  PIGEONOS
-  CD         no disc
+  Hard disk  no boot sector
+  CD         INSTALL
 
 Booting Program in 2
-ESC  boot menu
+
+
+
+ESC menu    ENTER boot now
 ```
 
 ```
-BOOT MENU
+PIGEON BIOS
+128 MB RAM
 
 > Program    32044 bytes
-  Hard disk  PIGEONOS
-  CD         PIGEONOS
+  Hard disk  no boot sector
+  CD         INSTALL
 
-UP DOWN  choose
-ENTER    boot
+BOOT MENU
+
+
+
+UP DOWN choose   ENTER boot
 ```
 
 1. **Check each device.** Channel 1 is bootable when it holds a program.
@@ -214,8 +224,10 @@ ENTER    boot
    arrow keys choose and Enter boots the choice.
 4. **With no key pressed, boot the first bootable device**, in this order:
    the program on channel 1, the hard disk, the CD.
-5. **A device that can't boot** is shown in grey with its reason: `no disc`,
-   `no disk` or `no boot sector`.
+5. **A device that can't boot** is shown in grey with its reason: `none` or
+   `too big` for a program, and `no disk`, `no disc` or `no boot sector`
+   otherwise. Enter on one says it can't boot, and so does a boot that
+   fails, such as a short transfer.
 6. **With nothing bootable**, the menu waits. It checks the CD again whenever
    the drive's generation counter moves, so a disc put in from a front end
    shows up without a key press.
@@ -223,11 +235,11 @@ ENTER    boot
 ### 5.3 Handing over
 
 - **Before either jump:**
-  - clear the screen, which `test_loader.py` expects;
-  - point the display back at the framebuffer, if bios2 drew into a back
-    buffer;
-  - empty the key queue, so the Esc and Enter from the menu don't reach the
-    program.
+  - stop its countdown timer;
+  - clear the screen to 0, which `test_loader.py` expects. bios2 draws
+    straight to the screen, so there is no scanout base to restore;
+  - empty the character, key-edge and mouse queues, so the Esc and Enter
+    from the menu don't reach the program.
 - **A program on channel 1:** `READ_DMA` it into `0x20000`, and call it.
 - **A boot sector:**
   - read block 0 through the IO window, and copy it to `0x15818`. It's the
@@ -401,12 +413,68 @@ What this step has to leave room for:
      - the launcher building over `--bios2`, or rebuilding an up-to-date
        bios2.
    - **The full suite passes: 892 tests**, the 874 from phase 1 and 18 new.
-3. **bios2's screen, countdown and menu.** Tests queue keys through HID before
-   the machine runs.
-4. **The boot sector, and bios2 booting it.** A test builds an image with
-   `pfs.py`, writes block 0 by hand, and boots a program from it on channel 2
-   and on channel 6. Include a program bigger than 4 KB and one that is an
-   exact multiple of 4 KB.
+3. **bios2's screen, countdown and menu, and its half of booting a disk.**
+   ***Done.*** Booting a disk moved here from phase 4: a menu that lists the
+   hard disk and the CD but can't boot them is half a feature, and bios2's
+   side is only copying block 0 and calling it.
+   - **`firmware/bios2.c` is 46,068 bytes**, with `display.c`, `input.c`,
+     `mem.c` and `string.c`. The screen is §5.2's:
+     - a title, the RAM, and one row per device, with what it holds or why it
+       can't boot;
+     - a 2-second countdown to the first device that can boot: Enter boots at
+       once, Esc opens the menu;
+     - in the menu, the arrow keys choose and Enter boots;
+     - with nothing to boot, it waits in the menu. A disc put in changes the
+       drive's generation counter, which re-checks the CD and selects it;
+     - a boot that fails comes back to the menu and says why.
+
+     Phase 2's halts with 1 and 2 in `A` are gone.
+   - **Handing over:**
+     - the timer stops, the screen is cleared to 0, and the character,
+       key-edge and mouse queues are emptied;
+     - a program is loaded with one `READ_DMA` and called;
+     - a disk's block 0 is copied to `BOOT_LOAD_ADDR`, its channel written to
+       `BOOT_CHANNEL`, and `BOOT_ENTRY` called.
+   - **The memory map** gains `BOOT_BLOCK`, `BOOT_RECORD`, `BOOT_CODE`,
+     `BOOT_SIGNATURE`, `BOOT_LOAD_ADDR` (`0x15818`), `BOOT_ENTRY` and
+     `BOOT_CHANNEL`, for the C, the assembler and Python alike.
+   - **Run end to end,** `start_emulator.py screen --headless --run` waited
+     out the countdown and booted `screen` to `HALT` in 2.65 s.
+   - **Tests:**
+     - **`tests/test_bios2.py`, now 45 cases,** reads bios2's screen back as
+       text, using `test_files.py`'s font reader, split out as `text_at()`.
+       Disks and discs that can boot carry a stand-in boot sector of four
+       instructions, which leaves its channel in `A`.
+     - **What they cover:** the countdown screen; booting when the countdown
+       ends, not before; Enter booting at once; a program up to exactly
+       `PROGRAM_MAX_SIZE` arriving in one transfer; Esc, the arrows and Enter
+       booting a hard disk, with block 0 and the channel where they belong; a
+       disc counting down and booting; each device's reason, six ways; a disc
+       put in while the menu waits; Enter on a device that can't boot; a short
+       or refused transfer; and the program finding a blank screen, empty
+       queues and a stopped timer.
+     - **A screen caught mid-redraw doesn't count.** A test waits for two
+       matching looks, or for the row bios2 draws last. The first version
+       caught "Booting Progr" half written. Afterwards the 13 screen-reading
+       tests passed five runs in a row.
+     - **`test_loader.py`'s bios2 route** now waits out the countdown too.
+   - **Nine deliberate breakages each failed the tests:**
+     - not emptying the input queues;
+     - not stopping the timer;
+     - not clearing the screen at hand-over;
+     - ignoring Esc;
+     - not waiting for the countdown;
+     - not checking the boot signature;
+     - never writing the channel;
+     - ignoring the CD's generation counter;
+     - running a short transfer anyway.
+   - **The full suite: 902 of 903 tests passed.** The one failure was the
+     countdown-screen test before the fix above, in a run started earlier.
+     Since the fix, all 45 cases in its file pass, and nothing else changed.
+4. **The boot sector, `firmware/boot.asm`.** A test builds an image with
+   `pfs.py`, writes block 0 by hand, and boots a program through bios2 from
+   channel 2 and from channel 6. Include a program bigger than 4 KB and one
+   that is an exact multiple of 4 KB.
 5. **The project file, `cc.py --project`, and `--cd`.** The disc boots its
    installer on a `Machine`.
 

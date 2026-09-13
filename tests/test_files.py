@@ -103,33 +103,37 @@ def glyphs():
     return table
 
 
-def screen_text(fb):
-    """The screen's text rows, as files.c lays them out.
-
-    Returns {row key -> string}: HEADER, 0..ROWS-1 for the list area, and
-    STATUS. A cell whose ink matches no glyph comes back as '?' -- a
-    caret or the scrollbar can land inside one.
-    """
+def text_at(fb, y):
+    """The row of text whose glyphs start at pixel row y, one cell per
+    column. A cell whose ink matches no glyph comes back as '?' -- a caret
+    or the scrollbar can land inside one. Shared with tests/test_bios2.py,
+    whose screen uses the same font and cells."""
     table = glyphs()
 
     def ink(x, y):
         i = (y * DISPLAY_W + x) * 4
         return sum(fb[i:i + 3]) > INK_THRESHOLD
 
-    def read(y):
-        out = []
-        for col in range(COLS):
-            x = col * CELL
-            rows = tuple(
-                sum(1 << (GLYPH_W - 1 - c) for c in range(GLYPH_W)
-                    if x + c < DISPLAY_W and y + r < DISPLAY_H and ink(x + c, y + r))
-                for r in range(GLYPH_H))
-            out.append(table.get(rows, " " if not any(rows) else "?"))
-        return "".join(out).rstrip()
+    out = []
+    for col in range(COLS):
+        x = col * CELL
+        rows = tuple(
+            sum(1 << (GLYPH_W - 1 - c) for c in range(GLYPH_W)
+                if x + c < DISPLAY_W and y + r < DISPLAY_H and ink(x + c, y + r))
+            for r in range(GLYPH_H))
+        out.append(table.get(rows, " " if not any(rows) else "?"))
+    return "".join(out).rstrip()
 
-    lines = {HEADER: read(HEAD_Y), STATUS: read(STATUS_Y)}
+
+def screen_text(fb):
+    """The screen's text rows, as files.c lays them out.
+
+    Returns {row key -> string}: HEADER, 0..ROWS-1 for the list area, and
+    STATUS.
+    """
+    lines = {HEADER: text_at(fb, HEAD_Y), STATUS: text_at(fb, STATUS_Y)}
     for r in range(ROWS):
-        lines[r] = read(LIST_Y + r * ROW)
+        lines[r] = text_at(fb, LIST_Y + r * ROW)
     return lines
 
 
