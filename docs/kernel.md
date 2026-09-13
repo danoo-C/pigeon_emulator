@@ -3,9 +3,11 @@
 > **Status: proposal, nothing in the repository changed — but most of it has
 > been run.** A prototype added the proposed CPU instructions to the emulator
 > at runtime, and ran C kernels and programs compiled by `pigeon-cc` through
-> them (§16). Boot (§4–7) and the console (§12) were not prototyped. Facts in
-> §2 were checked in the code on 2026-09-13. Anything reasoned but not run is
-> marked *unverified*. Details live in [kernel_exec.md](kernel_exec.md)
+> them (§16). The console (§12) was not prototyped; boot (§4–7) is built
+> instead ([os_cd.md](os_cd.md)). Facts in §2 were checked in the code again
+> on 2026-09-14, when §16's scripts, all but P7, were also run again. Anything
+> reasoned but not run is marked *unverified*. Details live in
+> [kernel_exec.md](kernel_exec.md)
 > (running a program, relocation) and [kernel_changes.md](kernel_changes.md)
 > (printing from programs). Every question is now decided, in
 > [§18](#18-open-questions). Booting from disk is built, as
@@ -14,7 +16,7 @@
 
 | Area | Today | Proposed | Run in the prototype |
 |---|---|---|---|
-| Boot | The BIOS copies a whole program from channel 1 | The BIOS loads bios2 from channel 7; bios2 loads a boot sector, which loads the kernel ([os_cd.md](os_cd.md)) | No |
+| Boot | Built: the BIOS loads bios2 from channel 7; bios2 boots a program on channel 1, or a disk's boot sector, which loads `/boot.bin` ([os_cd.md](os_cd.md)) | The kernel is that `/boot.bin` | No; built and tested instead |
 | Programs in memory | Every C program is built for `0x20000` | The kernel stays there; each program is relocated to wherever there's room | Yes |
 | Starting a program | — | The kernel loads `/bin/<name>.bin`, patches it and calls it | Yes, from a PigeonFS disk |
 | Ending one | `HALT` stops the machine | Return from `main`, or `exit()` from anywhere | Yes |
@@ -64,7 +66,7 @@ Checked in the code, not assumed:
   in step.
 - `Machine.run` does its slow work — the clock, the display — once every
   10,000 instructions (`CLOCK_SAMPLE_INTERVAL`). It doesn't catch a fetch past
-  the end of memory: that `try` is commented out (`machine.py:185`).
+  the end of memory: that `try` is commented out (`machine.py:208`).
 
 **IO and devices**
 - **A device is programmed one field at a time** — `IO_RW`, `IO_CMD`,
@@ -91,14 +93,19 @@ Checked in the code, not assumed:
 | → `0x07FFFFFC` | | hardware stack, growing down (`STACK_TOP`) |
 
 **The compiler and assembler** (`compiler/`, `assembler/assembler.py`)
-- Every C program is emitted with `.ORG PROGRAM_LOAD_ADDR` (`codegen.py:80`).
+- Every C program is emitted with `.ORG PROGRAM_LOAD_ADDR`, or the address
+  `cc.py --org` names (`codegen.py:83`).
 - The startup code `__start` sets the frame pointer `F` to `__frame_base`,
   sets up the heap, calls `main` with no arguments, then **`HALT`s**
-  (`codegen.py:91–97`).
+  (`codegen.py:94–100`).
 - `__frame_base = HEAP_START`, the frame stack is 262,144 bytes, and
-  `__heap_base` follows it (`codegen.py:164–166`).
-- `cc.py`'s only options are the sources, `-o`, `-S` and `-I`.
-- `mem.c`'s heap limit is a typed literal, `0x08000000 - 0x00100000`.
+  `__heap_base` follows it (`codegen.py:167–169`). `__heap_ptr` is a word the
+  compiler emits in every program (`codegen.py:157`), which `mem.c` reaches
+  as `extern unsigned __heap_ptr;`.
+- `cc.py` takes the sources, `-o`, `-S`, `-I`, `--org ADDR` and
+  `--project FILE`.
+- `mem.c`'s heap limit is a typed literal, `0x08000000 - 0x00100000`
+  (`mem.c:96`).
 - Function pointers compile to `CALL E` and have tests.
 - **Variadic functions are rejected** (`parser.py:288`), so there is no
   `printf` (kernel_changes.md §3.1).
@@ -113,26 +120,33 @@ Checked in the code, not assumed:
 
 **The BIOS** (`firmware/bios.asm`, `emulator/bios.py`)
 - It must fit in 1 KB, which is 128 instructions; `bios.py` refuses anything
-  larger. Today's BIOS is 688 bytes, 86 instructions.
-- It reads channel 1 in 4 KB chunks, copies to `PROGRAM_LOAD_ADDR`, paints a
-  progress bar, waits two seconds on the timer, clears the screen and jumps.
+  larger. Today's BIOS is 944 bytes, 118 instructions: it loads bios2 from
+  channel 7, and runs the old loader below only when there is no bios2
+  ([os_cd.md](os_cd.md) §4).
+- The old loader reads channel 1 in 4 KB chunks, copies to
+  `PROGRAM_LOAD_ADDR`, paints a progress bar, waits two seconds on the timer,
+  clears the screen and jumps.
 - It stops when a chunk returns 0 bytes. It does not treat `0xFFFFFFFF`, the
   answer from a channel with no device, as an error. Read from the code: with
   channel 1 empty it would try to copy 0x3FFFFFFF words *(unverified, not run)*.
 - `Machine` registers channel 1 only when it is given a program, and the CLI
   allows running with none.
+- **bios2 writes `BOOT_CHANNEL` only when it boots a disk or a disc**
+  (`firmware/bios2.c:322`). Booting a program on channel 1 leaves the word as
+  it was (`:305–310`).
 
 **The filesystem** (`lib/pigeon/fs.c`, `tools/pfs.py`, `docs/filesystem.md` §3.1)
 - Block 0 is the superblock. Its first word is the magic `0x53464750`, stored
   as the bytes `50 47 46 53`, so its first byte read as an opcode is 80 —
   past the 29 that exist. Jumping to it would stop the emulator.
 - `FS__FAT_START` is fixed at 1, and `fs_mount` rejects any other value.
-- The superblock's bytes 52–63 and 128–511 are unused. `fs_mount` checks only
-  words 0–6 and 24–26, and `__fs_put_hints` updates the block in place, so the
-  guest keeps whatever is in the unused bytes.
-- **`pfs.py` does not.** `_write_super()` rebuilds block 0 from a fresh zeroed
-  buffer, so a host-side write would erase anything stored there. `fsck` does
-  not check those bytes either way.
+- The superblock's bytes 52–63 and 128–511 were unused. A bootable disk now
+  keeps its boot record and boot sector there ([os_cd.md](os_cd.md) §6).
+  `fs_mount` checks only words 0–6 and 24–26, and `__fs_put_hints` updates the
+  block in place, so the guest keeps those bytes.
+- **So does `pfs.py`, since os_cd.md:** `_write_super()` updates block 0 in
+  place instead of rebuilding it from zeros. `fsck` doesn't check the boot
+  record; `pfs.py info` shows it.
 - The HDD refuses a DMA transfer into or out of memory below
   `PROGRAM_LOAD_ADDR` (`emulator/devices/hdd.py`).
 - `fs.c` keeps its cache, open files and current directory in `static`
@@ -144,8 +158,8 @@ Checked in the code, not assumed:
   at a buffer on its own heap.
 - The screen holds 32×12 characters. `display.h` has `disp_text` and
   `disp_char`, and nothing that scrolls or tracks a cursor.
-- A program that includes `<pigeon/fs.h>` is about 99 KB. `user/files.c` and
-  `user/disc.c` are both about 169 KB.
+- A program that includes `<pigeon/fs.h>` is about 101 KB. `user/files.c` and
+  `user/disc.c` are about 170 KB and 168 KB.
 
 ---
 
@@ -191,6 +205,10 @@ Checked in the code, not assumed:
 
 ## 5. Where the boot code and the kernel live on disk
 
+> **Built as option A** ([os_cd.md](os_cd.md) §6). The kernel is the ordinary
+> contiguous file `/boot.bin`, not `/kernel.bin`, and `fs.c` and `pfs.py`
+> both keep bytes 52–63 and 128–511. `fsck` doesn't check the record yet.
+
 **Files:** `tools/pfs.py`, possibly `lib/pigeon/fs.c`, `docs/filesystem.md` §3
 
 The BIOS cannot jump to the start of block 0 as it is (§2). Two ways round it:
@@ -228,6 +246,11 @@ size.
 
 ## 6. Installing it
 
+> **Built differently** ([os_cd.md](os_cd.md) §6–8). There is no
+> `install-boot`: `pfs.py boot PATH` writes the record and the sector, and
+> `cc.py --project` and the installer put the kernel on the disk as the
+> project's `system`.
+
 **Files:** `tools/pfs.py`
 
 - **`pfs.py install-boot boot.bin kernel.bin`**: write the stage-1 code,
@@ -240,6 +263,10 @@ size.
 ---
 
 ## 7. Stage 1 has to be hand-written assembly
+
+> **Built** as `firmware/boot.asm`: 376 bytes, 47 instructions
+> ([os_cd.md](os_cd.md) §6). It reads through the IO window rather than by
+> DMA, because the CD has no DMA.
 
 **Files:** new `firmware/boot.asm`
 
@@ -272,14 +299,20 @@ simpler and more general**, and it has been run
   holds an address; every other byte is identical. The list of differing words
   is what the loader patches. Across every C program in `user/`, every
   differing word differed by exactly the distance between the two addresses,
-  and no other byte differed at all. The largest program has 1,934 words to
+  and no other byte differed at all. The largest program has 1,937 words to
   patch, 99% of them in an instruction's address field.
 - **The frame stack and heap move to just after the image.** Startup code
   uses `__image_end` and `__image_end + frame size`, written into the
   instructions, because `NAME = expression` can't use a label (§2).
 - **A program file** is a 32-byte header — magic, version, image size,
   entry, patch count, frame-stack size, where `__heap_ptr` is, and the address
-  it was built for — then the image, then the offsets.
+  it was built for — then the image, then the offsets. The prototype's magic
+  is `PGX1`.
+- **What is built this way** (Q6): every `.c` in a project's `[files]`, and
+  `cc.py --relocatable`. The installer and the `system` stay built for
+  `0x20000`, where the boot sector puts them.
+- **Each program has its own heap limit** (Q7): `__heap_limit`, the word the
+  compiler emits right after `__heap_ptr`, so the header needs no new field.
 
 **Where the kernel puts it**
 
@@ -288,7 +321,7 @@ simpler and more general**, and it has been run
 0x00015818  boot sector copy, boot channel      left by bios2 (os_cd.md §5.3)
 0x00015A1C  system-call table                   just past the boot channel
 0x00020000  kernel image                        fixed; vector table and interrupt frame stack are kernel globals
-0x00120000  kernel frame stack and heap         the heap must stop below 0x01000000
+0x00120000  kernel frame stack and heap         its heap stops at 0x00FFFFE0 (Q7)
 0x01000000  shell │ image │ frame stack │ heap →
             ls    │ image │ frame stack │ heap →     loaded just above the shell's heap top
             ...
@@ -304,8 +337,10 @@ simpler and more general**, and it has been run
 - **The file loads straight into place.** `fs_load` reads the whole file to 32
   bytes below the program's address, so the header lands in the gap and the
   image lands where it runs. P5 loaded every program this way by DMA.
-- **The kernel's heap needs a limit below `0x01000000`.** Today `mem.c` returns
-  a typed `0x07F00000` for every program.
+- **The kernel's heap stops at `0x00FFFFE0`**, where the shell's header lands,
+  and each program's at `0x07F00000`. `exec` writes a program's
+  `__heap_limit` before calling it (Q7). Today `mem.c` returns a typed
+  `0x07F00000` for every program.
 - **Only multitasking breaks the plates** (§14).
 
 ---
@@ -403,8 +438,10 @@ A first set of calls is in kernel_exec.md §8.
 
 **Files:** new, built at `0x20000`
 
-**At boot:** mount the disk it was booted from, whose channel bios2 left at
-`BOOT_CHANNEL`; fill in the system-call and vector tables; set up the console;
+**At boot:** set its own heap limit (Q7); mount the disk it was booted from —
+the channel bios2 left at `BOOT_CHANNEL` when that is the hard disk or the
+CD, and the hard disk otherwise (Q8); fill in the system-call and vector
+tables; set up the console;
 and start `/bin/sh.bin`. When the shell exits, the kernel starts it again. If
 it can't be started at all, the kernel prints why and halts (kernel_exec.md
 Q2). The prototype's kernel stopped.
@@ -416,7 +453,7 @@ Q2). The prototype's kernel stopped.
 2. `fs_load` the file to 32 bytes below that address
 3. check the header: magic, version, and that the file is as long as the
    header says
-4. patch every listed address
+4. patch every listed address, and write its `__heap_limit` (Q7)
 5. record it — address, heap-top pointer, saved stack — and `exec_call` it
 6. take the status: from `main`, from `exit`, or from a fault or break
 
@@ -424,7 +461,8 @@ Q2). The prototype's kernel stopped.
 display back at the screen, stop timers it started, empty the input queues,
 and close files it left open.
 
-**Size.** P5's kernel, with `fs.c`, was 123,192 bytes.
+**Size.** P5's kernel, with `fs.c`, was 123,256 bytes when run again on
+2026-09-14.
 
 ---
 
@@ -586,8 +624,9 @@ switches.
 **Still needed:**
 - **A memory allocator.** Programs no longer finish in reverse order of
   starting, so the plates of §8 don't work. P6 used fixed 16 MB slots.
-- **A heap limit for each program.** `mem.c`'s typed `0x07F00000` is shared
-  by every program.
+- **Smaller heap limits.** Each program already gets its own `__heap_limit`
+  (Q7). Multitasking writes the end of the program's slot there instead of
+  `0x07F00000`.
 - **A rule for IO.** A switch in the middle of one program's IO lets the next
   program overwrite the header or the reply — P3's problem, at every switch.
   Either all IO goes through system calls with interrupts off, or every switch
@@ -602,26 +641,28 @@ switches.
 
 **Build and launch** (`emulator/programs.py`, `emulator/cli.py`, `config.json`)
 
-- Build stage 1 from assembly, the kernel at `0x20000` as today, and programs
-  as relocatable files.
-- Install them onto `disks/hdd.img` and boot with nothing on channel 1.
-- Keep today's programs in `user/` running the old way. The launcher has to
-  tell the two kinds apart.
+- **Built:** stage 1, bios2, the boot sector, `cc.py --project` and the
+  installer ([os_cd.md](os_cd.md)). The kernel goes on the disc as the
+  project's `system`, and its programs as `[files]` (Q6).
+- **The launcher only builds today's programs**, for channel 1. It never
+  builds a program file, which needs a kernel to run, so it has no two kinds
+  to tell apart.
 
 **Tests** (`tests/`)
 
-- **Boot:** a disk with a valid signature boots; a bad signature, a missing
-  disk and a short read each stop with an error.
-- **Install:** `install-boot` places everything, and `fsck` catches a boot
-  record that no longer matches the kernel file.
+- **Boot and install:** built, in `test_bios2.py`, `test_boot.py`,
+  `test_project.py` and `test_install.py`. Still missing: `fsck` catching a
+  boot record that no longer matches `/boot.bin`.
 - **Relocation:** a program built at one address and patched to another runs
-  there, with its frame stack and heap after its image.
+  there, with its frame stack and heap after its image, and `malloc` stops at
+  its `__heap_limit`.
 - **CPU:** each new instruction; flags and interrupt state restored by
   `IRET`; faults with and without a vector table; `run` and `step` taking
   interrupts at the same instructions.
 - **The kernel:** load, run and return; `exit` from deep recursion; faults and
   break; system calls; programs running programs; the display and timers reset
-  after a program; a file with a bad header refused.
+  after a program; a file with a bad header refused; the right disk mounted
+  after a restart (Q8).
 
 ---
 
@@ -637,7 +678,7 @@ below.
 
 | | What ran | Result |
 |---|---|---|
-| **P1** | The repository's tests, with the six instructions and syntax rows loaded | 844 passed |
+| **P1** | The repository's tests, with the six instructions and syntax rows loaded | 970 passed on 2026-09-14; 844 when first run |
 | **P2** | A compiled workload — a sort, a sieve, recursion, function pointers; 119,032 instructions — interrupted after every instruction, and every 2, 3, 7 and 101 | The same result every time; 119,006 interrupts at every instruction; stack and `F` restored. **Controls:** `IRET` not restoring the flags never halted, or gave a wrong result at every 7th; a handler using the interrupted `F` never halted |
 | **P3** | A program asking the timer for its status 2,000 times, while a handler does IO | Unprotected: 2,000 wrong when interrupted every 1, 3 or 7 instructions; 923 at 31; 394 at 101; 33 at 1,009. `DI`/`EI` around the program's IO: 0. The handler saving the header: 0 |
 | **P4** | A kernel with the system-call and vector tables and relocation. It runs a shell as a relocated program, which runs: `hello` with arguments and `malloc`; `exit(42)` from 50 calls deep; a divide by zero 20 calls deep; a jump into data; a loop stopped by break; and a program that runs two more | All 17 lines of console output exactly right — with no timer, and with a timer every 997, 13 and 1 instructions (61,827 interrupts). Three levels deep; the parent's heap intact; memory reused; stack and `F` restored at the end |
@@ -645,7 +686,8 @@ below.
 | **P6** | Three relocated programs switched by a timer interrupt | §14. **Control:** a print without `DI`/`EI` lost one character of 280 |
 | **P7** | The cost of checking for interrupts, on copies of `Machine.run`'s loop; medians of 5 runs of 3.57 million instructions | CPython, 2.74 million IPS: every instruction −4.1%, in the slow path +1.4%. PyPy, 34.8 million IPS: +1.9% and +0.7%. Only CPython's every-instruction check cost more than the noise |
 
-**Not run:** boot (§4–7); the console and the shell's interface; the timer
+**Not run:** booting the kernel from disk (the boot chain itself is built,
+[os_cd.md](os_cd.md)); the console and the shell's interface; the timer
 and keyboard device changes; cleanup after a program; a fault while entering
 a fault handler; IO from programs that are preempted; `printf`.
 
@@ -657,7 +699,8 @@ Each can be tested before the next exists. Phases 1–3 were run in prototype
 form.
 
 1. **Relocatable programs:** the startup code, the frame stack and heap after
-   the image, and the build step that compares two builds. Testable with no
+   the image, `__heap_limit`, and the build step that compares two builds,
+   as `cc.py --relocatable` and for `[files]` (Q6, Q7). Testable with no
    kernel: patch a program to another address and call it.
 2. **The CPU:** `GETSP`, `SETSP` and faults first; then `EI`, `DI`, `IRET`,
    `SETIV`, the timer interrupt and break.
@@ -705,4 +748,35 @@ kernel_changes.md §4, and [kernel_overview.md](kernel_overview.md) sums them up
 
    Interrupts are checked before every instruction, in `CPU.run`,
    `Machine.step` and `Machine.run` alike. That costs 4.1% on CPython and
-   nothing on PyPy, and `run` and `step` then agree without any extra work. well i want multitasking for sure, since
+   nothing on PyPy, and `run` and `step` then agree without any extra work.
+
+6. ~~**Which programs are built relocatable.**~~ **Decided 2026-09-14 (left
+   to me):** every `.c` in a project's `[files]`, built as a program file,
+   and one source at a time with `cc.py --relocatable`, which refuses `-S`,
+   `--org` and `--project` alongside it. The installer and the `system` stay
+   built for `0x20000`, because the boot sector loads them there. An `.asm`
+   in `[files]` is assembled as today: hand-written assembly has no startup
+   code that returns to the kernel, and `test_project.py` already builds one
+   that way. The kernel refuses such a file, as it has no magic. The rule
+   isn't by path, because the shell also runs programs from the current
+   directory, not only from `/bin`.
+
+7. ~~**Heap limits.**~~ **Decided 2026-09-14 (left to me):** the compiler
+   emits `__heap_limit`, 0 in the image, as the word right after
+   `__heap_ptr`. `mem.c`'s `heap_limit()` returns it, or `0x07F00000` when
+   it is 0, so every program built today behaves the same. The kernel sets
+   its own to `0x00FFFFE0` first thing: 32 bytes below the shell, where the
+   shell's header lands. `exec` writes each program's before calling it —
+   `0x07F00000` in the first version, and the end of the program's slot once
+   there is multitasking. The kernel needed a limit anyway, and this way
+   multitasking changes no program.
+
+8. ~~**Which disk the kernel mounts.**~~ **Decided 2026-09-14 (left to
+   me):** the channel in `BOOT_CHANNEL` when it is the hard disk or the CD,
+   and the hard disk otherwise. If the mount fails, the kernel says why and
+   halts. bios2 also writes `CH_USERPROG` to `BOOT_CHANNEL` before it calls
+   a program on channel 1. Today it writes the word only for a disk
+   (`firmware/bios2.c:322`), so after the installer restarts from the CD, a
+   kernel booted from channel 1 would find 6 there and mount the disc.
+   Without bios2 the word is 0, because RAM starts zeroed, and the hard disk
+   is mounted.

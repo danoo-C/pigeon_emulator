@@ -108,8 +108,8 @@ as in your example is the ASCII version.
 - **Straight into a disk image, from the host:**
 
   ```bash
-  python3 tools/pfs.py mkdir -p --image disks/os.img /etc
-  python3 tools/pfs.py put --image disks/os.img shell_header.conf /etc/shell_header.conf
+  python3 tools/pfs.py mkdir -p --image disks/hdd.img /etc
+  python3 tools/pfs.py put --image disks/hdd.img shell_header.conf /etc/shell_header.conf
   ```
 
 - **On the machine itself:** not yet, as there is no text editor.

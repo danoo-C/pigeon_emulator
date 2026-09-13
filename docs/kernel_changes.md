@@ -14,17 +14,19 @@
 calling the kernel through a table of function addresses compiles and runs,
 and `main(int argc, char **argv)` compiles. The gaps are things kernel.md
 doesn't decide, and one it doesn't mention: **there can be no `printf` today,
-because the compiler rejects variadic functions.**
+because the compiler rejects variadic functions.** Each gap is decided since,
+in §4 and kernel.md §18; the table's middle column says where kernel.md
+covers it now.
 
 | Need | kernel.md | Today |
 |---|---|---|
 | An app calls the kernel's print | §10, system-call table | **Works** — compiled and ran |
-| `printf` | not mentioned | **Blocked** — `...` is a compile error |
-| Output lands in the shell's console | §12, console in the kernel | Only if apps reach the console through the kernel; kernel.md Q3 allows otherwise |
-| `ls` with no argument, relative paths | not mentioned | The current directory is kept separately in each program's copy of `fs.c` |
-| Arguments | §9, "not yet" | `argc`/`argv` compile; how the shell passes them is undecided |
-| The shell's screen after the app | §11 resets the display address | The console's text isn't mentioned |
-| Stopping on an error | §9 and Q4 | No `exit()` from inside a nested function |
+| `printf` | §12: needs variadic functions first | **Blocked** — `...` is a compile error |
+| Output lands in the shell's console | §12, console in the kernel | Only if apps reach the console through the kernel, which kernel.md Q3 now decides |
+| `ls` with no argument, relative paths | §10: the filesystem goes through the kernel | The current directory is kept separately in each program's copy of `fs.c` |
+| Arguments | §9: `entry(argc, argv)` | `argc`/`argv` compile; §4 Q4 decides how the shell passes them |
+| The shell's screen after the app | §11 resets the display address | The console's text: §4 Q5 |
+| Stopping on an error | §9 and Q5 | No `exit()` from inside a nested function |
 
 ---
 
@@ -37,7 +39,7 @@ assemble, run on the CPU, and check that the hardware stack ends balanced.
 |---|---|
 | `int printf(char *fmt, ...)` | **Compile error:** "variadic functions are not supported: the frame layout has no way to walk an unknown argument count" (`compiler/parser.py:288`) |
 | `int main(int argc, char **argv)` | Compiles and runs |
-| Store a function's address at `0x15818` as `unsigned`, cast it back to `int (*)(char *)`, call it with a string literal | Returns 5 for `"hello"` |
+| Store a function's address at `0x15818` (where the table was then; it is `0x15A1C` now, kernel.md §10) as `unsigned`, cast it back to `int (*)(char *)`, call it with a string literal | Returns 5 for `"hello"` |
 | The same through a `typedef`'d function-pointer type | Works |
 | A formatter that takes its arguments as an `int` array | Works |
 
@@ -116,8 +118,9 @@ no directory at all. Either:
 - the filesystem is a system call, and apps use the kernel's `fs.c` and its
   current directory, or
 - the kernel passes the current directory to each app, which mounts the disk
-  and calls `fs_chdir` itself. That comes on top of the unmount and remount
-  kernel.md §10 already needs.
+  and calls `fs_chdir` itself.
+
+kernel.md Q3 chose the first.
 
 ### 3.4 Arguments
 
@@ -142,9 +145,10 @@ no paging.
 ### 3.6 Stopping on an error
 
 Command-line tools often stop deep inside the code — `exit(1)` on the first
-bad input. Without instructions that set the stack pointer (kernel.md §14),
+bad input. Without instructions that set the stack pointer (kernel.md §13),
 an error has to be returned through every caller up to `main`. That is
-kernel.md's Q4, and it matters more for a tool like `ld` than for a game.
+kernel.md's Q5, which adds them, and it matters more for a tool like `ld`
+than for a game.
 
 ---
 

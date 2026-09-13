@@ -129,13 +129,17 @@ Decided 2026-09-14, left to me. Each is recorded where the question was asked.
 | `ls > file` | Later | kernel_changes.md Q6 |
 | How the prompt looks | Read from `/etc/shell_header.conf`, with ``` ``CWD`` ``` and color names; box characters need five more glyphs | [shell.md](shell.md) §2 |
 | System-call table address | `0x15A1C`, past the boot sector copy and boot channel bios2 leaves at `0x15818` | kernel.md §10 |
+| Which programs are relocatable | Every `.c` in a project's `[files]`, and `cc.py --relocatable`; the installer and the system stay at `0x20000` | kernel.md Q6 |
+| Heap limits | A `__heap_limit` word in every program. The kernel's stops at `0x00FFFFE0`; `exec` writes each program's | kernel.md Q7 |
+| Which disk the kernel mounts | `BOOT_CHANNEL` when it's the hard disk or the CD, otherwise the hard disk; bios2 writes the word for channel 1 too | kernel.md Q8 |
 
 ---
 
 ## 7. Build order
 
-1. **Relocatable programs:** new startup code in the compiler, and program
-   files with an address list to patch.
+1. **Relocatable programs:** new startup code in the compiler, program files
+   with an address list to patch, a heap limit in each program, and
+   `cc.py --relocatable`.
 2. **The CPU:** `GETSP`, `SETSP` and faults; then interrupts, the timer and
    break.
 3. **The kernel:** system calls, `exec`, `exit` and faults, installed as the
