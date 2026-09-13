@@ -199,6 +199,7 @@ tools/                disasm.py, bench.py, pfs.py (PigeonFS disk images)
 tests/                test_golden.py, test_smoke.py, test_config.py, golden/
 compiler/design/      design for a C compiler + stdlib/display/input libraries
 docs/ideas/           older sketches toward a C compiler; neither builds
+prototypes/kernel/    runs the design in docs/kernel.md without changing the emulator
 build/                assembled output (gitignored, safe to delete)
 disks/                the channel-2 disk image (gitignored, survives a clean)
 ```
