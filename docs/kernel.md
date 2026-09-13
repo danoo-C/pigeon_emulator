@@ -7,9 +7,10 @@
 > §2 were checked in the code on 2026-09-13. Anything reasoned but not run is
 > marked *unverified*. Details live in [kernel_exec.md](kernel_exec.md)
 > (running a program, relocation) and [kernel_changes.md](kernel_changes.md)
-> (printing from programs). Three questions are still open, in
-> [§18](#18-open-questions), for you to answer inline. Booting from disk is
-> now designed in [os_cd.md](os_cd.md).
+> (printing from programs). Every question is now decided, in
+> [§18](#18-open-questions). Booting from disk is built, as
+> [os_cd.md](os_cd.md) describes. For a short picture of how the pieces fit,
+> start with [kernel_overview.md](kernel_overview.md).
 
 | Area | Today | Proposed | Run in the prototype |
 |---|---|---|---|
@@ -83,7 +84,7 @@ Checked in the code, not assumed:
 | `0x00000000`–`0x000003FF` | 1 KB | BIOS |
 | `0x00000400`–`0x00001417` | 4 KB + 24 B | IO header and data window |
 | `0x00001418`–`0x00015817` | 81 KB | framebuffer, 192×108 |
-| `0x00015818`–`0x0001FFFF` | ~42 KB | **unused** — no constant in `memory_map.py` claims it |
+| `0x00015818`–`0x0001FFFF` | ~42 KB | since os_cd.md: the boot sector copy and boot channel bios2 leaves (`BOOT_LOAD_ADDR`, `BOOT_CHANNEL`); the rest unused |
 | `0x00020000`–`0x0011FFFF` | 1 MB | program code and data (`PROGRAM_LOAD_ADDR`) |
 | `0x00120000`–`0x0015FFFF` | 256 KB | frame stack (`HEAP_START`) |
 | `0x00160000` → `0x07F00000` | ~126 MB | heap |
@@ -284,7 +285,8 @@ simpler and more general**, and it has been run
 
 ```
 0x00000000  BIOS, IO window, framebuffer
-0x00015818  boot sector; system-call table
+0x00015818  boot sector copy, boot channel      left by bios2 (os_cd.md §5.3)
+0x00015A1C  system-call table                   just past the boot channel
 0x00020000  kernel image                        fixed; vector table and interrupt frame stack are kernel globals
 0x00120000  kernel frame stack and heap         the heap must stop below 0x01000000
 0x01000000  shell │ image │ frame stack │ heap →
@@ -374,8 +376,10 @@ kernel, and a crash still ends the emulator.
 
 **Files:** new `lib/pigeon/sys.h` and `sys.c`; the kernel
 
-- **A system call is a call through a table** at a fixed address, `0x15818`,
-  that the kernel fills in at boot. Programs call through a `typedef`'d
+- **A system call is a call through a table** at a fixed address, `0x15A1C`,
+  that the kernel fills in at boot. The prototype used `0x15818`, where bios2
+  now leaves the boot sector copy and the boot channel, so the table moved
+  past them. Programs call through a `typedef`'d
   function pointer:
   `((puts_fn)(*(unsigned *)SYSTAB))(s)`. This ran in P4–P6.
 - **Each entry is a small wrapper:** `DI`, call the C function, `EI`, `RET`.
@@ -399,10 +403,11 @@ A first set of calls is in kernel_exec.md §8.
 
 **Files:** new, built at `0x20000`
 
-**At boot:** mount the disk, fill in the system-call and vector tables, set up
-the console, and start `/bin/sh.bin`. Whether the kernel starts the shell again
-when it exits, or stops, is still open (kernel_exec.md Q2). The prototype's
-kernel stops.
+**At boot:** mount the disk it was booted from, whose channel bios2 left at
+`BOOT_CHANNEL`; fill in the system-call and vector tables; set up the console;
+and start `/bin/sh.bin`. When the shell exits, the kernel starts it again. If
+it can't be started at all, the kernel prints why and halts (kernel_exec.md
+Q2). The prototype's kernel stopped.
 
 **Running a program** (P4, P5):
 
@@ -658,9 +663,10 @@ form.
    `SETIV`, the timer interrupt and break.
 3. **The kernel:** system calls, `exec` from `/bin`, `exit`, faults and break.
    Built at `0x20000`, so the old BIOS path can start it before boot exists.
-4. **The console and the shell.**
-5. **The sector-booting BIOS, stage 1, and `pfs.py install-boot`**, including
-   `pfs.py` keeping the superblock's unused bytes.
+4. **Variadic functions for `printf`, then the console and the shell.**
+5. ~~**The sector-booting BIOS, stage 1, and `pfs.py install-boot`**~~
+   **Done** as bios2, `firmware/boot.asm`, `pfs.py boot` and `cc.py --project`
+   ([os_cd.md](os_cd.md)). The kernel is installed as the project's `system`.
 6. **The launcher, `config.json`, and the docs.**
 7. **Optional: multitasking** (§14).
 
@@ -668,9 +674,8 @@ form.
 
 ## 18. Open questions
 
-Answers inline, please — then I'll fold them into the sections above and turn
-this into a decision log. Smaller shell questions are still open in
-kernel_exec.md §10 and kernel_changes.md §4.
+All decided. The smaller shell questions are decided in kernel_exec.md §10 and
+kernel_changes.md §4, and [kernel_overview.md](kernel_overview.md) sums them up.
 
 1. ~~**The boot record.**~~ **Decided 2026-09-13 (left to me):** option A. The
    record goes in bytes 52–63 of block 0 and the boot sector in bytes
@@ -679,24 +684,25 @@ kernel_exec.md §10 and kernel_changes.md §4.
 2. ~~**The shell.**~~ **Decided 2026-09-13 (you):** the shell is a separate
    program that the kernel starts, not part of the kernel.
 
-3. **How programs use the kernel.** The filesystem and console through
-   system calls, with only libraries that keep no state — `string.c`,
-   `math.c` — bundled into programs? Or programs bundle everything, and the
-   kernel unmounts before each program and mounts again after? P5 ran the
-   first, and the console has to go through the kernel either way. I'd choose
-   system calls.
+3. ~~**How programs use the kernel.**~~ **Decided 2026-09-14 (left to me):**
+   system calls. The filesystem and the console go through the kernel, so there
+   is one `fs.c`, one current directory and one cursor; P5 ran this. Programs
+   bundle only what keeps no shared state: `string.c`, `math.c`, and `mem.c`
+   for their own heap. While one program runs at a time, `display.c` and
+   `input.c` stay bundled too, for games and editors. With multitasking (§14)
+   they move behind system calls.
 
-4. **Where programs go.** Relocation (§8), or one of the other options in
-   kernel_exec.md §4? P4 and P5 ran relocation end to end. I'd choose
-   relocation.
+4. ~~**Where programs go.**~~ **Decided 2026-09-14 (left to me):** relocation
+   (§8). P4 and P5 ran it end to end, and it needs no compile-time layouts.
 
-5. **How far with the CPU, and how precisely.**
+5. ~~**How far with the CPU, and how precisely.**~~ **Decided 2026-09-14 (left
+   to me):** a and b now, c later.
    - **a.** `GETSP`, `SETSP` and faults: `exit()`, and crashes that return to
      the shell.
    - **b.** Plus `EI`, `DI`, `IRET`, `SETIV`, the timer interrupt and break.
-   - **c.** Plus multitasking in the kernel.
+   - **c.** Multitasking waits: it also needs an allocator, per-program heap
+     limits and an IO rule (§14).
 
-   I'd do a and b now, and c later: it also needs an allocator, per-program
-   heap limits and an IO rule (§14). And should interrupts be checked before
-   every instruction — 4.1% slower on CPython, no cost on PyPy, and `run` and
-   `step` agree trivially — or every 10,000? I'd check every instruction.
+   Interrupts are checked before every instruction, in `CPU.run`,
+   `Machine.step` and `Machine.run` alike. That costs 4.1% on CPython and
+   nothing on PyPy, and `run` and `step` then agree without any extra work. well i want multitasking for sure, since

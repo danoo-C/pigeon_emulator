@@ -4,8 +4,8 @@
 > type `ls` at the shell. The kernel boots, starts the shell as its first
 > program, and the shell asks the kernel to run others. §5 was compiled and
 > run on 2026-09-13; anything else reasoned but not run is marked
-> *unverified*. Three questions are open, in [§10](#10-questions), for you to
-> answer inline; a fourth moved to kernel.md.
+> *unverified*. Its questions are decided, in [§10](#10-questions). The short
+> version is [kernel_overview.md](kernel_overview.md).
 >
 > This answers kernel.md Q2 — the shell is a program, not part of the kernel —
 > and changes kernel.md §8: relocation is now needed, and it turned out cheap.
@@ -65,9 +65,10 @@ up and returns to the shell, which prints the next prompt.
    }
    ```
 
-   The loop restarts the shell if it exits, which is only one answer to Q2.
-   The other is to print a message and stop, which is what the prototype's
-   kernel does (kernel.md §16, P4).
+   The loop restarts the shell when it exits (Q2, decided). If `exec` can't
+   start it at all — no `/bin/sh.bin`, or a bad header — the kernel prints why
+   and halts instead of looping. The prototype's kernel stopped (kernel.md §16,
+   P4).
 
 ---
 
@@ -193,7 +194,7 @@ A proposal, not measured against anything:
 
 ```
 0x00000000  BIOS, IO window, framebuffer
-0x00015818  boot sector, system-call table
+0x00015818  boot sector copy and boot channel; system-call table at 0x15A1C
 0x00020000  kernel image                      fixed address, built as today
 0x00120000  kernel frame stack and heap       heap stops at 0x01000000
 0x01000000  shell │ image │ frame stack │ heap →
@@ -290,7 +291,8 @@ in kernel_changes.md §2.
 | `getkey` | a raw key without waiting, for games and editors |
 
 **The shell** (`sh.c`, a program): prompt, split, the commands it handles
-itself, lookup in `/bin`, and `exec`.
+itself, lookup in `/bin`, and `exec`. Its prompt comes from
+`/etc/shell_header.conf` ([shell.md](shell.md)).
 
 **First programs**: `ls`, `cat`, `echo` — small enough to test the whole
 chain.
@@ -314,19 +316,21 @@ them. Protection is still out of reach.
 
 ## 10. Questions
 
-Answers inline, please — then I'll fold them into kernel.md.
+Decided 2026-09-14, left to me.
 
 1. **Where programs go.** Moved to kernel.md §18, Q4. The prototype there
    ran relocation end to end.
 
-2. **When the shell exits.** Should the kernel start it again, as Unix
-   restarts a login prompt, or stop the machine with a message? I'd restart
-   it.
+2. ~~**When the shell exits.**~~ **Decided:** the kernel starts it again, as
+   Unix restarts a login prompt. If it can't be started at all, the kernel
+   prints why and halts rather than looping.
 
-3. **Who edits the typed line.** The kernel's console, so every program that
-   reads a line gets echo and backspace for free, as with a Unix terminal? Or
-   the shell, so the console only prints? I'd put it in the console.
+3. ~~**Who edits the typed line.**~~ **Decided:** the kernel's console.
+   `read(0, …)` returns a finished line with the echo and backspace already
+   done, so every program that reads a line gets them for free.
 
-4. **Finding programs.** Only `/bin`, or `/bin` then the current directory?
-   Must you type the `.bin`? I'd search `/bin` then the current directory,
-   and not require the `.bin`.
+4. ~~**Finding programs.**~~ **Decided:** a name with no `/` is looked up as
+   `/bin/<name>.bin`, then as `<name>.bin` in the current directory. A name
+   with a `/` is used as a path. You never type the `.bin`: it's added when
+   missing. The shell does the lookup, and the kernel's `exec` takes a path,
+   as in P5.

@@ -1,12 +1,12 @@
 # Kernel changes: apps that print to the shell
 
-> **Status: questions, nothing built.** This checks [kernel.md](kernel.md)
+> **Status: decided, nothing built.** This checks [kernel.md](kernel.md)
 > against one requirement: a command-line app — `ls`, `ld`, anything that
 > prints — starts from the shell, prints into the shell's console, and returns
 > to it. Every fact in §2 was checked on 2026-09-13; the compiler facts were
-> compiled and run. Anything reasoned but not run is marked *unverified*. Five
-> questions are open, in [§4](#4-questions), for you to answer inline; two
-> more moved to kernel.md.
+> compiled and run. Anything reasoned but not run is marked *unverified*. Its
+> questions are decided, in [§4](#4-questions); two moved to kernel.md. The
+> short version is [kernel_overview.md](kernel_overview.md).
 
 ## 1. The answer
 
@@ -150,37 +150,34 @@ kernel.md's Q4, and it matters more for a tool like `ld` than for a game.
 
 ## 4. Questions
 
-Answers inline, please — then I'll fold them into kernel.md.
+Decided 2026-09-14, left to me.
 
-1. **`ld` or `ls`?** If you mean `ld`, a linker that runs on the machine:
-   there is no object-file format and no linker, even on the host. `cc.py`
-   compiles every unit together (`lib/README.md`). A linker on the machine
-   would need a relocatable object format first, which kernel.md §8 sets aside
-   as unneeded. Is that in scope, or did you mean `ls` and command-line tools
-   in general?
+1. ~~**`ld` or `ls`?**~~ **Decided:** `ls`, and command-line tools in general.
+   A linker on the machine is out of scope: it would need an object-file
+   format that nothing else needs.
 
-2. **`printf`.** A, fixed print calls; B, a formatter that takes an argument
-   array; or C, variadic functions with a cap (§3.1)? I'd choose **C**: it's
-   the only one that gives you a real `printf`, and it keeps frame sizes
-   constant, so it fits both the ABI and the system-call table. A is the
-   fallback if the compiler shouldn't change now.
+2. ~~**`printf`.**~~ **Decided:** C, variadic functions with a cap of 8 extra
+   word-sized arguments (§3.1). It's the only real `printf`, and frame sizes
+   stay constant, so the ABI and the system-call table keep working. It is
+   built before the shell.
 
 3. **What goes through the kernel.** Moved to kernel.md §18, Q3.
 
-4. **Arguments.** Should startup code write `argc` and `argv` into `main`'s
-   frame, or should apps fetch them with a system call? Should quotes group
-   words? Should the strings stay in kernel memory, or be copied to the app?
-   I'd put `argc` and `argv` in `main`'s frame, split at spaces with double
-   quotes grouping, and keep the strings in kernel memory.
+4. ~~**Arguments.**~~ **Decided:** startup code writes `argc` and `argv` into
+   `main`'s frame. The shell splits at spaces, with double quotes grouping
+   words, up to 16 words on a 255-character line. The strings aren't copied:
+   they stay in the caller's memory, which can't move or be freed while its
+   child runs.
 
-5. **The screen after an app.** Should the kernel redraw the console's grid, or
-   clear the screen and print a fresh prompt? And should output pause with
-   `-- more --` when it fills the 12 rows?
+5. ~~**The screen after an app.**~~ **Decided:** the kernel redraws the
+   console's grid, which it keeps as text, so the shell's lines come back even
+   after a game drew over them. No `-- more --` for now: output that fills the
+   12 rows scrolls.
 
-6. **Redirection.** Should `ls > list.txt` work? If every print goes through
-   one kernel function, the kernel can send the text to a file instead of the
-   screen. Pipes, with only one program running at a time, would need
-   temporary files, as DOS used. In scope now, later, or never?
+6. ~~**Redirection.**~~ **Decided:** later, not in the first version. Every
+   print already goes through the kernel's `write(1, …)`, so `ls > list.txt`
+   can be added in the kernel without changing any program. Pipes wait for
+   multitasking, or never come.
 
 7. **`exit()`.** Moved to kernel.md §18, Q5. The prototype there ran
    `exit()` from 50 calls deep.
