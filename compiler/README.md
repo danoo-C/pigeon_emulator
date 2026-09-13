@@ -26,6 +26,17 @@ data move — the frame stack and heap stay at `HEAP_START`, so a program built
 for elsewhere must not reach into them. The second-stage BIOS is built this
 way, for `BIOS2_LOAD_ADDR` ([docs/os_cd.md](../docs/os_cd.md)).
 
+`--project FILE` builds an installation disc instead. It reads a project
+file, builds the installer and the files it names, and writes a bootable
+PigeonFS image to `-o`, or to `build/<name>.img`
+([docs/os_cd.md](../docs/os_cd.md) §7). Every mistake in the file is
+reported with its line before anything is built.
+`user/os/pigeon_compiler_init.txt` is the example:
+
+```bash
+python3 compiler/cc.py --project user/os/pigeon_compiler_init.txt
+```
+
 It emits **assembly text** and hands it to `assembler/assembler.py`, so it
 never touches opcodes, encoding, or the memory map — and the output stays
 readable, with the C source interleaved as comments:

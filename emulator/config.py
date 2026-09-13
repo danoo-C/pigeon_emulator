@@ -67,6 +67,10 @@ DEFAULTS = {
     # The upload path is the only one that writes to the host disk, so it
     # is the only one with a ceiling. "64M", "512K" or a byte count.
     "cd_max_upload": "64M",
+    # A disc to put in the drive before the machine starts, so bios2 finds
+    # it at power-on (docs/os_cd.md): a path, or null for an empty drive.
+    # --cd PATH does the same for one run.
+    "cd": None,
 }
 
 
@@ -84,6 +88,7 @@ class Config:
     cd_dirs: List[Path]
     cd_upload_dir: Path
     cd_max_upload: int
+    cd: Optional[Path]
     program_dirs: List[Path]
     build_dir: Path
     disk: Path
@@ -112,7 +117,7 @@ class Config:
         given = {k: v for k, v in kwargs.items() if v is not None}
         for key in ("program_dirs", "build_dir", "disk", "bios_source", "bios_binary",
                     "bios2_source", "bios2_binary", "cd_dirs", "cd_upload_dir",
-                    "cd_root"):
+                    "cd_root", "cd"):
             if key in given:
                 given[key] = ([_resolve(p) for p in given[key]]
                               if key in ("program_dirs", "cd_dirs")
@@ -215,6 +220,10 @@ def load_config(path: Optional[Path] = None) -> Config:
     if cd_root is not None and not isinstance(cd_root, str):
         raise ConfigError("cd_root must be a folder name, or null for anywhere -- "
                           f"got {cd_root!r}")
+    disc = settings["cd"]
+    if disc is not None and not isinstance(disc, str):
+        raise ConfigError("cd must be the path of a disc image, or null for an empty "
+                          f"drive -- got {disc!r}")
 
     return Config(
         host=str(settings["host"]),
@@ -225,6 +234,7 @@ def load_config(path: Optional[Path] = None) -> Config:
         cd_dirs=[_resolve(d) for d in cd_dirs],
         cd_upload_dir=_resolve(settings["cd_upload_dir"]),
         cd_max_upload=_size(settings["cd_max_upload"], "cd_max_upload"),
+        cd=None if disc is None else _resolve(disc),
         program_dirs=[_resolve(d) for d in dirs],
         build_dir=_resolve(settings["build_dir"]),
         disk=_resolve(settings["disk"]),

@@ -79,6 +79,17 @@ def second_stage(config: Config, explicit: bool) -> Path | None:
     return None
 
 
+def disc_drive(config: Config) -> CD:
+    """The CD drive, with the disc named by --cd or "cd" already in it --
+    before power-on, so bios2 finds it (docs/os_cd.md). Raises OSError for
+    a disc that is not there, or PermissionError for one outside cd_root."""
+    drive = CD(root=config.cd_root, dirs=config.cd_dirs,
+               upload_dir=config.cd_upload_dir, max_upload=config.cd_max_upload)
+    if config.cd is not None:
+        drive.insert(config.cd)
+    return drive
+
+
 # --------------------------------------------------------------------------
 # The program picker
 # --------------------------------------------------------------------------
@@ -258,6 +269,8 @@ def build_parser():
                             "(docs/os_cd.md)")
     where.add_argument("--disk", metavar="PATH", dest="disk",
                        help="disk image for IO channel 2")
+    where.add_argument("--cd", metavar="PATH", dest="cd",
+                       help="a disc to put in the CD drive before power-on (docs/os_cd.md)")
     where.add_argument("--no-autobuild", action="store_true",
                        help="never reassemble, even when a build is stale")
 
@@ -298,7 +311,7 @@ def main(argv=None):
 
     config = config.override(
         host=args.host, display_port=args.display_port, hid_port=args.hid_port,
-        cd_port=args.cd_port,
+        cd_port=args.cd_port, cd=args.cd,
         program_dirs=args.program_dirs, bios_binary=args.bios_binary,
         bios2_binary=args.bios2_binary, disk=args.disk,
         auto_build=False if args.no_autobuild else None)
@@ -365,8 +378,13 @@ def main(argv=None):
     # --- run ----------------------------------------------------------------
     # The drive is built from the config here rather than inside Machine,
     # so machine.py needs to know nothing about config.json.
-    drive = CD(root=config.cd_root, dirs=config.cd_dirs,
-               upload_dir=config.cd_upload_dir, max_upload=config.cd_max_upload)
+    try:
+        drive = disc_drive(config)
+    except OSError as e:
+        print(f"Could not put {short(config.cd)} in the CD drive: {e}", file=sys.stderr)
+        return 1
+    if config.cd is not None:
+        print(f"CD: {short(config.cd)}")
     try:
         machine = Machine(bios_path=str(config.bios_binary),
                           program_path=str(program_path) if program_path else None,

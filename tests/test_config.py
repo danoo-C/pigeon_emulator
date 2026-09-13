@@ -113,6 +113,9 @@ def test_urls():
     ({"cd_dirs": "cds"}, None),                      # a bare string is allowed
     ({"cd_dirs": [1]}, "list of folder names"),
     ({"cd_root": 7}, "folder name"),
+    ({"cd": 7}, "disc image"),
+    ({"cd": None}, None),                            # null: an empty drive
+    ({"cd": "build/os.img"}, None),
     ({"display_port": 99999}, "between 1 and 65535"),
     ({"display_port": 0}, "between 1 and 65535"),
     ({"display_port": "8000"}, "whole number"),

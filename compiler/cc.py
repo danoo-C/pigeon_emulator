@@ -4,6 +4,7 @@
     python3 compiler/cc.py program.c -o build/program.bin
     python3 compiler/cc.py program.c -S            # keep the assembly
     python3 compiler/cc.py firmware/bios2.c --org BIOS2_LOAD_ADDR -o build/bios2.bin
+    python3 compiler/cc.py --project user/os/pigeon_compiler_init.txt   # an install disc
 
 Emits assembly text and hands it to assembler/assembler.py, which already
 owns encoding, label resolution and the memory map -- and is pinned by
@@ -136,11 +137,33 @@ def compile_file(path, asm_out=None, bin_out=None, keep_asm=False, extra=(),
     return asm_path, binary
 
 
+def _build_project(args) -> int:
+    """--project: an installation disc from a project file (compiler/project.py)."""
+    from compiler.project import ProjectError, build_disc, read_project
+    from emulator.config import ConfigError, load_config
+
+    try:
+        build_dir = load_config().build_dir
+    except ConfigError:
+        build_dir = Path(__file__).resolve().parent.parent / "build"
+    try:
+        project = read_project(args.project)
+        build_disc(project, args.output or build_dir / f"{project.slug}.img", build_dir)
+        return 0
+    except ProjectError as e:
+        for line in e.lines():
+            print(f"error: {line}", file=sys.stderr)
+    except (CompileError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+    return 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="pigeon-cc", description=__doc__.split("\n")[0])
-    parser.add_argument("sources", type=Path, nargs="+",
+    parser.add_argument("sources", type=Path, nargs="*",
                         help="one or more .c files, compiled as a single unit")
-    parser.add_argument("-o", "--output", type=Path, help="the .bin to write")
+    parser.add_argument("-o", "--output", type=Path,
+                        help="the .bin to write; with --project, the disc image")
     parser.add_argument("-S", "--assembly", action="store_true",
                         help="stop after generating assembly, and keep it")
     parser.add_argument("-I", "--include", type=Path, action="append", default=[],
@@ -149,7 +172,16 @@ def main(argv=None):
                         help="where the program is built to run: a number or a "
                              "memory-map name (default PROGRAM_LOAD_ADDR). The "
                              "frame stack and heap stay at HEAP_START")
+    parser.add_argument("--project", type=Path, metavar="FILE",
+                        help="build an installation disc from a project file "
+                             "(docs/os_cd.md): to -o, or build/<name>.img")
     args = parser.parse_args(argv)
+    if args.project is not None:
+        if args.sources or args.assembly or args.org != DEFAULT_ORIGIN:
+            parser.error("--project takes no sources, -S or --org")
+        return _build_project(args)
+    if not args.sources:
+        parser.error("name one or more .c files, or a project with --project FILE")
     args.source = args.sources[0]
     try:
         origin = origin_of(args.org)

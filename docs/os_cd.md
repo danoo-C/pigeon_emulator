@@ -1,9 +1,10 @@
 # Installation media: a two-stage BIOS, the boot sector and `cc.py --project`
 
-> **Status: phases 1 to 4 are built** (§9): stage 1 of the BIOS, the
-> firmware device, bios2 with its screen and menu, and the boot sector.
-> Phase 5, `cc.py --project`, is still a sketch. Power-on runs through four
-> stages:
+> **Status: phases 1 to 5 are built** (§9): stage 1 of the BIOS, the
+> firmware device, bios2 with its screen and menu, the boot sector, and
+> `cc.py --project` with the launcher's `--cd`. The installer is a
+> placeholder; what it does is still to come (§8). Power-on runs through
+> four stages:
 >
 > 1. **The BIOS**, 1 KB at address 0, loads **bios2** from a firmware
 >    device on IO channel 7, and jumps to it.
@@ -14,8 +15,8 @@
 > 4. **The installer.** `cc.py --project` writes the disc. What the installer
 >    does comes later (§8).
 >
-> The first three stages are built and tested; their sizes are in the table
-> below. Facts in §2 were checked in the code on 2026-09-13. Anything
+> The first three stages are built and tested, and the fourth is a
+> placeholder that lists the disc; their sizes are in the table below. Facts in §2 were checked in the code on 2026-09-13. Anything
 > reasoned but not run is marked *unverified*.
 > You left the open questions to me, and the decisions are in
 > [§10](#10-decisions).
@@ -28,8 +29,8 @@
 | **bios2** (`firmware/bios2.c`) | `0x07000000` | Screen, countdown, menu; boots channel 1, or a boot sector from the hard disk or the CD | 46,068 bytes, built, with the display, input, mem and string libraries |
 | **Firmware device** | channel 7 | A read-only HDD holding `build/bios2.bin` | — |
 | **Boot sector** (`firmware/boot.asm`) | `0x15898` | Loads the file its boot record names into `0x20000`, and jumps; returns to bios2 if it can't | 376 of 384 bytes, built |
-| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | — |
-| **Installer** | `0x20000` | Later: writes the hard disk's boot sector, and mirrors the disc onto it | — |
+| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | built; the example disc is 341.5 KiB |
+| **Installer** (`user/os/installer.c`) | `0x20000` | For now, lists what is on the disc. Later: writes the hard disk's boot sector, and mirrors the disc onto it | 120,236 bytes, a placeholder |
 
 ---
 
@@ -312,20 +313,50 @@ bootsector = boot.asm           # optional: firmware/boot.asm when left out
 **`python3 compiler/cc.py --project user/os/pigeon_compiler_init.txt`**
 writes `build/pigeonos.img`:
 
-1. **Check the project file.** Every mistake is reported with its line,
-   before anything is built.
+1. **Check the project file.** Every mistake is reported with its line, all
+   of them at once, before anything is built.
 2. **Build the installer** for `0x20000`, as the launcher builds a program,
-   and every `.c` and `.asm` in `[files]`.
+   and every `.c` and `.asm` in `[files]`. Builds go to `build/<name>/` and
+   happen again only when a source or a library it includes changed. Each
+   build is named after its source as well as its path on the disc, so
+   pointing a path at another source always builds it afresh.
 3. **Assemble the boot sector**, and refuse it if it's over 384 bytes.
-4. **Make the image** with `PgfsImage.mkfs`, big enough, with the label.
-5. **Write `/install.bin` first**, then the files.
+4. **Make the image** with `PgfsImage.mkfs`, sized for every file and
+   directory plus a little room, with the label.
+5. **Write `/install.bin` first.** Then `/pigeon.txt`: the title the
+   installer shows, then the `[project]` keys. Then the files in order,
+   making directories as needed.
 6. **Make the image boot `/install.bin`** with `PgfsImage.make_bootable`,
    which refuses a file that isn't contiguous. The first file on a fresh
    image is.
-7. **Run `fsck`**, and print each file with its size.
+7. **Run `fsck`, then move the image into place.** It is written beside the
+   output first, so a failed build leaves no half-written disc. The same
+   project builds the same disc, byte for byte.
 
-**The launcher gets `--cd PATH`, and a `"cd"` key in `config.json`** that
-defaults to `null`. Otherwise a disc can't be in the drive when bios2 looks.
+As run on the example:
+
+```
+PigeonOS 0.1, from user/os/pigeon_compiler_init.txt
+  /install.bin               120,236 B   user/os/installer.c
+  /pigeon.txt                     60 B
+  /bin/files.bin             174,088 B   user/os/../files.c
+  /bin/cube.bin               40,048 B   user/os/../cube.c
+  /docs/readme.txt               198 B   user/os/readme.txt
+build/pigeonos.img: 341.5 KiB, label PIGEONOS, boots /install.bin
+```
+
+**The launcher's `--cd PATH`, or `"cd"` in `config.json`**, puts a disc in
+the drive before power-on. Otherwise a disc can't be in the drive when
+bios2 looks.
+
+**The installer is a placeholder** (`user/os/installer.c`):
+- it mounts the channel it was booted from, which bios2 left at
+  `BOOT_CHANNEL`, and shows the title from `/pigeon.txt`;
+- it lists the files it would copy, and halts with their number in `A`;
+- through the launcher, `--cd build/pigeonos.img` with no program booted
+  the example disc into it, and it halted. `tests/test_project.py` boots the
+  same disc and reads 4 in `A`, for `/pigeon.txt`, `/bin/files.bin`,
+  `/bin/cube.bin` and `/docs/readme.txt`.
 
 ---
 
@@ -526,8 +557,44 @@ What this step has to leave room for:
      - `make_bootable` without its contiguity check, or without its size
        check.
    - **The full suite passes: 924 tests**, the 903 from phase 3 and 21 new.
-5. **The project file, `cc.py --project`, and `--cd`.** The disc boots its
-   installer on a `Machine`.
+5. **The project file, `cc.py --project`, and `--cd`.** ***Done.***
+   - **`compiler/project.py`:**
+     - `read_project()` checks a project file and reports every mistake at
+       once, each with its line;
+     - `build_disc()` builds and writes the disc (§7).
+   - **`cc.py --project FILE [-o OUT]`** builds to `build/<name>.img` unless
+     `-o` says otherwise, and refuses sources, `-S` or `--org` alongside it.
+   - **The launcher:** `--cd PATH` and `"cd"` in `config.json`, through
+     `disc_drive()`. A disc outside `cd_root`, or one that isn't there, stops
+     the launcher with the reason.
+   - **The example:** `user/os/pigeon_compiler_init.txt`, the placeholder
+     `user/os/installer.c`, and `user/os/readme.txt`. It builds a 341.5 KiB
+     disc that boots through the launcher.
+   - **Tests:**
+     - **`tests/test_project.py`, 26 cases:**
+       - a project reading as written, and a label taken from the name;
+       - fourteen mistakes, each on its line, and several at once;
+       - the disc holding the launcher's own builds, in order, with the boot
+         record on `/install.bin`;
+       - the same project building the same bytes;
+       - a source swapped for an older one being built again;
+       - a named boot sector, and one too big;
+       - the disc booting its installer;
+       - the example building, booting, and its installer listing four files;
+       - the command line;
+       - `--cd`.
+     - **`test_config.py`** gains the `"cd"` cases.
+   - **Nine deliberate breakages each failed the tests:**
+     - losing the line numbers;
+     - writing the installer last;
+     - allowing the disc's own paths;
+     - naming builds without their source;
+     - dropping the file-versus-directory check;
+     - allowing a path twice;
+     - `--cd` not inserting the disc;
+     - not checking the `"cd"` setting;
+     - `--project` accepting sources.
+   - **The full suite passes: 953 tests**, the 924 from phase 4 and 29 new.
 
 | File | Change |
 |---|---|

@@ -110,6 +110,14 @@ state). `--help` lists everything; the useful ones are `--verbose` (log every IO
 transaction, disk read and key event), `--headless` (bind no ports) and
 `--disasm-bios`. `--bios2 PATH` boots through a second-stage BIOS other than
 the one the launcher builds, used as it is ([docs/os_cd.md](docs/os_cd.md)).
+`--cd PATH` puts a disc in the CD drive before power-on, so bios2 can boot it.
+
+An installation disc is a project file away:
+
+```bash
+python3 compiler/cc.py --project user/os/pigeon_compiler_init.txt   # -> build/pigeonos.img
+python3 start_emulator.py --cd build/pigeonos.img --run
+```
 
 ### config.json
 
@@ -150,6 +158,7 @@ partial or missing file is fine.
 | `cd_dirs` | folders the "Load from server" picker lists, non-recursively |
 | `cd_upload_dir` | where a browser upload is written before it is inserted. Keep it inside `cd_dirs`, or an uploaded disc will not appear in the picker afterwards |
 | `cd_max_upload` | the ceiling on an upload — the one path here that writes to the host disk. `"64M"`, `"512K"` or a byte count |
+| `cd` | a disc to put in the drive before the machine starts, so bios2 can boot it: a path, or `null` for an empty drive. `--cd PATH` is the same for one run ([docs/os_cd.md](docs/os_cd.md)) |
 
 Relative paths are resolved against the repo root, so the file means the same
 thing whichever directory you run from. A malformed value is reported with the
@@ -198,6 +207,7 @@ firmware/bios.asm     boot ROM source: loads bios2 from channel 7, else a progra
 firmware/bios2.c      second-stage BIOS, built for 0x07000000: boot screen, countdown, menu
 firmware/boot.asm     boot sector: the code in block 0 of a bootable disk
 user/                 example programs (.asm and .c alike)
+user/os/              an installation disc: its project file and its installer
 lib/pigeon/           the C libraries: mem, string, fs, cd, display, input, math
 compiler/             pigeon-cc: C -> assembly
 display/              pygame client + browser front-end (talks HTTP only)
@@ -363,6 +373,7 @@ python3 tests/test_directives.py  # data directives + the anti-drift guard
 python3 tests/test_loader.py      # programs larger than one DMA window
 python3 tests/test_bios2.py       # the two-stage BIOS: stage 1, channel 7, bios2's screen
 python3 tests/test_boot.py        # the boot sector, and pfs.py boot
+python3 tests/test_project.py     # cc.py --project, and the launcher's --cd
 python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
 python3 tests/test_fs.py          # PigeonFS on the guest, checked against pfs.py
 python3 -m pytest tests/          # all 149, if you have pytest
