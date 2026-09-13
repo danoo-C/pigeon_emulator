@@ -14,6 +14,11 @@ C preprocessor does -- not later in the lexer. Doing it later meant
 macro body, so every use of FP pasted a comment in with it. Harmless in an
 expression; fatal when the expansion landed inside another comment, since
 that produced a nested `/*` the lexer cannot parse.
+
+Names inside string and character literals are text, and are never
+replaced -- again as a real C preprocessor does. Replacing them meant that
+once `#define INSTALLER "/install.bin"` existed, the string "INSTALLER"
+became `""/install.bin""`, which does not compile.
 """
 import re
 from pathlib import Path
@@ -32,6 +37,10 @@ ENDIF_RE = re.compile(r'^\s*#\s*endif\b.*$')
 PRAGMA_RE = re.compile(r'^\s*#\s*pragma\s+(.*)$')
 ANY_DIRECTIVE_RE = re.compile(r'^\s*#')
 IDENTIFIER_RE = re.compile(r'\b[A-Za-z_]\w*\b')
+# A string or character literal, escapes included, or else an identifier.
+# Only the identifiers are ever replaced. An unterminated literal runs to
+# the end of the line, where the lexer reports it.
+WORD_RE = re.compile(r'"(?:\\.|[^"\\])*"?|\'(?:\\.|[^\'\\])*\'?|\b[A-Za-z_]\w*\b')
 
 MAX_INCLUDE_DEPTH = 32
 
@@ -242,7 +251,9 @@ class Preprocessor:
     def _expand_once(self, line: str) -> str:
         out, i = [], 0
         while i < len(line):
-            match = IDENTIFIER_RE.match(line, i)
+            # A literal is matched whole, and no macro is named like one,
+            # so it is copied as it is.
+            match = WORD_RE.match(line, i)
             if not match:
                 out.append(line[i])
                 i += 1
@@ -327,12 +338,13 @@ def _substitute(body: str, params, args) -> str:
 
     The parentheses matter: `#define SQ(x) ((x)*(x))` is written that way
     by hand for a reason, and adding them here makes `M(a+b)` behave even
-    when the macro author forgot.
+    when the macro author forgot. A parameter's name inside a literal in
+    the body is text, and stays.
     """
     if len(args) != len(params):
         return body
     mapping = {p: f"({a})" for p, a in zip(params, args)}
-    return IDENTIFIER_RE.sub(lambda m: mapping.get(m.group(0), m.group(0)), body)
+    return WORD_RE.sub(lambda m: mapping.get(m.group(0), m.group(0)), body)
 
 
 def preprocess(source: str, filename: str, include_paths=None, defines=None):

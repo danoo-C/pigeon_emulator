@@ -19,6 +19,7 @@ from _runner import cases, run_module                          # noqa: E402
 from assembler.assembler import Assembler                      # noqa: E402
 from compiler.cc import compile_to_asm, origin_of              # noqa: E402
 from compiler.lexer import CompileError                        # noqa: E402
+from compiler.preprocess import Preprocessor                   # noqa: E402
 from emulator.cpu import CPU                                   # noqa: E402
 from emulator.memory_map import (BIOS2_LOAD_ADDR,              # noqa: E402
                                  PROGRAM_LOAD_ADDR, RAM_SIZE, STACK_TOP)
@@ -272,6 +273,41 @@ def test_string_literals():
     returns('int main(void){ char *s = "pigeon"; int n=0; while(s[n]) n++; return n; }', 6)
     returns('int main(void){ char *s = "AB"; return s[0]*100 + s[1] + s[2]; }',
             ord('A') * 100 + ord('B'))
+
+
+# --- the preprocessor -------------------------------------------------------
+
+def expand(source: str) -> str:
+    """Preprocessed text, without the blank lines directives leave behind."""
+    text, _ = Preprocessor().process(source, "t.c")
+    return "\n".join(line for line in text.splitlines() if line.strip())
+
+
+@cases(
+    ("a string", '#define NAME "/x"\nchar *s = "NAME"; char *t = NAME;',
+     'char *s = "NAME"; char *t = "/x";'),
+    ("a character", "#define A 5\nint c = 'A' + A;", "int c = 'A' + 5;"),
+    ("an escaped quote", '#define N 1\nchar *s = "say \\"N\\" N"; int n = N;',
+     'char *s = "say \\"N\\" N"; int n = 1;'),
+    ("an escaped character", "#define N 1\nint q = '\\''; int n = N;",
+     "int q = '\\''; int n = 1;"),
+    ("a string a macro expands to", '#define A "B"\n#define B 1\nchar *s = A;',
+     'char *s = "B";'),
+    ("a parameter's name in the body", '#define SHOW(x) puts("x"), x\nSHOW(y);',
+     'puts("x"), (y);'),
+    ("an argument", '#define ID(x) x\n#define N 1\nchar *s = ID("N");',
+     'char *s = ("N");'),
+)
+def test_names_inside_literals_are_not_replaced(what, source, expected):
+    assert expand(source) == expected, f"{what}: {expand(source)}"
+
+
+def test_a_string_can_hold_a_macro_name():
+    """What broke user/os/installer.c: "INSTALLER" became ""/install.bin""."""
+    returns('#define GREETING "hi"\n'
+            'int main(void){ char *s = "GREETING"; char *t = GREETING;'
+            ' return s[1]*256 + t[1]; }',
+            ord('R') * 256 + ord('i'))
 
 
 def test_volatile_mmio():

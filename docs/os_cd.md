@@ -638,8 +638,8 @@ record again (`pfs.py boot` does, on the host; kernel.md §5).
    - **Found on the way: pigeon-cc's preprocessor expands macros inside
      string literals.** With `#define INSTALLER "/install.bin"`, the string
      `"INSTALLER"` became `""/install.bin""`, and the installer didn't
-     compile. The installer's macros were renamed around it; the
-     preprocessor is unchanged.
+     compile. The installer's macros were renamed around it. *(Since fixed:
+     the preprocessor leaves string and character literals alone.)*
    - **Eight deliberate breakages each failed the tests:**
      - in the installer: not copying `/boot.bin` first, never writing
        block 0, taking the boot sector from the hard disk instead of the
