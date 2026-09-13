@@ -16,8 +16,16 @@ Parameters provided by the `IOController`:
   empty/zeroed bytearray for reads.
 
 Behavior:
-- Reads return exactly `length` bytes (zero-filled if past EOF).
+- Reads come back SHORT past EOF -- they are not zero-filled, whatever an
+  older version of this line said. Both the BIOS loader and fs.c's
+  __fs_blk_read find the end of a program that way, by comparing
+  IO_RETURN_DATA against what they asked for.
 - Writes extend the file if necessary.
+- A READ-ONLY HDD, readonly=True, is the firmware device on CH_BIOS2
+  (docs/os_cd.md). Its file is opened "rb" and never created: a missing
+  file is FileNotFoundError, because 4 MiB of zeros is a blank disk and
+  not a BIOS. WRITE, TRUNCATE and anything sent with R/W 1 get 0 bytes,
+  as the CD drive answers them, and WRITE_DMA gets DMA_REFUSED.
 
 Command list:
   CMD_NOP = 0         - No-op, returns `length` zero bytes.
@@ -26,21 +34,54 @@ Command list:
   CMD_WRITE = 3       - Write `length` bytes from `data` to disk at `address`.
   CMD_TRUNCATE = 4    - Truncate/resize disk to `address` bytes (length ignored).
   CMD_FLUSH = 5       - Flush OS buffers to disk; returns zero-length bytes.
+  CMD_READ_DMA = 6    - Read straight into guest RAM (see DMA below).
+  CMD_WRITE_DMA = 7   - Write straight from guest RAM.
 
-The module creates `build/pigeon_hard_drive.bin` at the repo root if it
-does not exist. Defaults to a small initial size (1 MiB) when creating a new image.
+DMA (docs/filesystem.md, section 9):
+  R/W       0 -- for BOTH commands, and not by accident: IOController
+              copies a device's reply back into the window only when R/W
+              is 0, and these commands have a reply worth reading.
+  ADDRESS   the byte offset on the disk
+  LENGTH    8, the size of the parameter block
+  window    [ram_address, byte_count], two LE words. The device reads them
+            out of RAM itself -- it holds the RAM for the transfer anyway,
+            and with R/W = 0 the controller hands it a zeroed buffer.
+  reply     one word: bytes transferred, or 0xFFFFFFFF if the range was
+            refused. A read past EOF is SHORT, and the rest of the range
+            is zero-filled, so the guest's buffer is always fully defined.
+
+  A range must start at or above PROGRAM_LOAD_ADDR -- below it are the
+  BIOS, the IO header and the framebuffer -- and end inside RAM. There is
+  no 4 KB limit: a contiguous run of any length is one command.
+
+  An HDD built without RAM does not know commands 6 and 7, and answers
+  them like any unknown command, with LENGTH zero bytes. That is older
+  hardware, and it is what lets the library DETECT DMA: a reply of 4 bytes
+  means yes, 8 means no, and one fs.c runs on either.
+
+The module creates `disks/hdd.img` at the repo root if it does not exist.
+That is outside build/ on purpose: it is a disk, and what programs save
+on it (docs/filesystem.md) has to survive a clean build. A new image is
+DEFAULT_SIZE bytes of zeros -- blank, so a program's fs_format() or
+`pfs mkfs` formats it without having to be forced.
 """
 
 import logging
 import os
+import struct
 from pathlib import Path
 from typing import Optional
+
+from ..memory_map import IO_START, PROGRAM_LOAD_ADDR, IOHeader
 
 log = logging.getLogger(__name__)
 
 # The repo root: devices/ -> emulator/ -> root
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DISK = REPO_ROOT / "build" / "pigeon_hard_drive.bin"
+DEFAULT_DISK = REPO_ROOT / "disks" / "hdd.img"
+# The size of a newly created image. tools/pfs.py gives a new image the
+# same size, and tests/test_pfs.py checks that the two agree.
+DEFAULT_SIZE = 4 * 1024 * 1024
 
 
 CMD_NOP = 0
@@ -49,16 +90,32 @@ CMD_READ = 2
 CMD_WRITE = 3
 CMD_TRUNCATE = 4
 CMD_FLUSH = 5
+CMD_READ_DMA = 6
+CMD_WRITE_DMA = 7
+
+DMA_PARAMS = 8                  # [ram_address, byte_count] in the window
+DMA_REFUSED = 0xFFFFFFFF
+_WINDOW_BASE = IO_START + IOHeader.USABLE_AFTER
 
 
 class HDD:
-    def __init__(self, path: Optional[str] = None, create_size: int = 1024 * 1024):
+    def __init__(self, path: Optional[str] = None, create_size: int = DEFAULT_SIZE,
+                 ram=None, readonly: bool = False):
         self.path = Path(path) if path is not None else DEFAULT_DISK
         self.create_size = create_size
+        # DMA needs the RAM it copies to and from. Without it commands 6 and
+        # 7 are unknown here, exactly as on an HDD from before they existed.
+        self.ram = ram
+        self.readonly = readonly
         self._f = None
         self._open()
 
     def _open(self):
+        if self.readonly:
+            # Before the mkdir below: a firmware path that does not exist
+            # must not leave a folder behind, let alone a blank image.
+            self._f = open(self.path, "rb")
+            return
         exists = self.path.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # open in r+b if exists, else create and fill to create_size
@@ -97,6 +154,34 @@ class HDD:
         # ensure file length reflects write if we wrote past EOF
         self._f.flush()
 
+    def _dma_range_ok(self, address: int, count: int) -> bool:
+        """DisplayIO._valid_base's rule, for a byte range instead of a screen.
+
+        Below PROGRAM_LOAD_ADDR are the BIOS, the IO header and the
+        framebuffer; a transfer into the IO header would rewrite the very
+        command being run. Past the end of RAM a slice assignment does not
+        raise -- it grows the bytearray, and every address mask in the
+        machine is wrong from then on.
+        """
+        return address >= PROGRAM_LOAD_ADDR and address + count <= len(self.ram.mem)
+
+    def _dma(self, cmd: int, offset: int) -> bytes:
+        address, count = struct.unpack_from("<II", self.ram.mem, _WINDOW_BASE)
+        if not self._dma_range_ok(address, count):
+            log.warning("HDD: refusing DMA %s of %d bytes at %#x",
+                        "read" if cmd == CMD_READ_DMA else "write", count, address)
+            return struct.pack("<I", DMA_REFUSED)
+
+        if cmd == CMD_READ_DMA:
+            data = self._read_at(offset, count)
+            # EXACTLY count bytes go in. A shorter slice assignment would
+            # SHRINK RAM and slide every address above the buffer down.
+            self.ram.mem[address:address + count] = data + bytes(count - len(data))
+            return struct.pack("<I", len(data))
+
+        self._write_at(offset, bytes(self.ram.mem[address:address + count]))
+        return struct.pack("<I", count)
+
     def _truncate(self, size: int):
         self._f.truncate(size)
         self._f.flush()
@@ -115,6 +200,11 @@ class HDD:
         addr = int(address) & 0xFFFFFFFF
         cmd = int(command)
         length = int(length) if length is not None else 0
+
+        # Read-only is refusal before decoding, the rule cd.py follows:
+        # anything the bus can express as a write never reaches the file.
+        if self.readonly and (read_write == 1 or cmd in (CMD_WRITE, CMD_TRUNCATE)):
+            return b""
 
         if cmd == CMD_NOP:
             return b"\x00" * length
@@ -138,9 +228,15 @@ class HDD:
             self._truncate(addr)
             return b""
 
+        if self.ram is not None and cmd in (CMD_READ_DMA, CMD_WRITE_DMA):
+            if cmd == CMD_WRITE_DMA and self.readonly:
+                return struct.pack("<I", DMA_REFUSED)
+            return self._dma(cmd, addr)
+
         if cmd == CMD_FLUSH:
-            self._f.flush()
-            os.fsync(self._f.fileno())
+            if not self.readonly:           # nothing was ever written to flush
+                self._f.flush()
+                os.fsync(self._f.fileno())
             return b""
 
         # unknown command -> return zeros for reads, ignore for writes

@@ -10,9 +10,10 @@ from pathlib import Path
 
 from . import programs as programs_mod
 from .config import DEFAULTS, Config, ConfigError, load_config
+from .devices.cd import CD
 from .instruction_set import INSTR_SIZE, disassemble, disassemble_range
 from .machine import Machine
-from .memory_map import PROGRAM_LOAD_ADDR
+from .memory_map import PROGRAM_LOAD_ADDR, PROGRAM_MAX_SIZE
 from .programs import Program, short
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,52 @@ def build_bios_if_stale(config: Config, force: bool = False) -> bool:
 
     assemble_file(source, output)
     return True
+
+
+def build_bios2_if_stale(config: Config) -> bool:
+    """Compile the second-stage BIOS when its build is missing, or older than
+    its source or any library the source includes.
+
+    It is built like any C program, but for BIOS2_LOAD_ADDR, where the BIOS
+    puts it (docs/os_cd.md). No source means nothing to build.
+    """
+    if not config.bios2_source.exists():
+        return False
+    bios2 = Program(name="bios2", source=config.bios2_source,
+                    binary=config.bios2_binary, origin="BIOS2_LOAD_ADDR")
+    if bios2.built and not bios2.stale:
+        return False
+    bios2.ensure_built(quiet=True)
+    return True
+
+
+def second_stage(config: Config, explicit: bool) -> Path | None:
+    """The second-stage BIOS to put on channel 7, or None.
+
+    The configured one is built first when auto_build is on, as the BIOS
+    is. One named with --bios2 is used as it is -- never built over -- and
+    has to exist: asking for a second stage and quietly getting none would
+    be a surprise. With neither a build nor a source there is no second
+    stage, and the BIOS boots channel 1 itself.
+    """
+    if not explicit and config.auto_build:
+        build_bios2_if_stale(config)
+    if config.bios2_binary.exists():
+        return config.bios2_binary
+    if explicit:
+        raise FileNotFoundError(f"second-stage BIOS not found: {short(config.bios2_binary)}")
+    return None
+
+
+def disc_drive(config: Config) -> CD:
+    """The CD drive, with the disc named by --cd or "cd" already in it --
+    before power-on, so bios2 finds it (docs/os_cd.md). Raises OSError for
+    a disc that is not there, or PermissionError for one outside cd_root."""
+    drive = CD(root=config.cd_root, dirs=config.cd_dirs,
+               upload_dir=config.cd_upload_dir, max_upload=config.cd_max_upload)
+    if config.cd is not None:
+        drive.insert(config.cd)
+    return drive
 
 
 # --------------------------------------------------------------------------
@@ -100,6 +147,11 @@ def choose_program(config: Config) -> Program | None:
 # The running machine
 # --------------------------------------------------------------------------
 
+def in_program(pc: int) -> bool:
+    """Whether PC is inside the program region, where the debugger steps."""
+    return PROGRAM_LOAD_ADDR <= pc < PROGRAM_LOAD_ADDR + PROGRAM_MAX_SIZE
+
+
 class Console:
     """The interactive menu and debugger wrapped around a Machine."""
 
@@ -153,18 +205,22 @@ Pigeon Emulator
             raise
 
     def run_debug(self):
-        """Free-run through the BIOS, then step once per Enter.
+        """Free-run through the firmware, then step once per Enter.
 
-        The threshold is PROGRAM_LOAD_ADDR, not a hardcoded address -- it
-        used to be a literal 0x10000, left behind when the load address
-        moved to 0x20000, so this silently free-ran through the gap.
+        Stepping happens while PC is inside the program region. It used to
+        start at PC >= PROGRAM_LOAD_ADDR -- and before that at a literal
+        0x10000, left behind when the load address moved to 0x20000, so
+        this silently free-ran through the gap. A lower bound alone stopped
+        being enough when a second-stage BIOS appeared at BIOS2_LOAD_ADDR,
+        far above the program: it would have single-stepped through all of
+        it.
         """
-        print(f"Debug mode: free-running until PC >= {PROGRAM_LOAD_ADDR:#06x}, "
-              f"then Enter to step. Ctrl-C for the menu.")
+        print(f"Debug mode: free-running until PC is in the program at "
+              f"{PROGRAM_LOAD_ADDR:#06x}, then Enter to step. Ctrl-C for the menu.")
         machine, cpu = self.machine, self.machine.cpu
         try:
             while True:
-                if cpu.pc >= PROGRAM_LOAD_ADDR:
+                if in_program(cpu.pc):
                     print(disassemble(bytes(machine.ram.mem[cpu.pc:cpu.pc + INSTR_SIZE]), cpu.pc))
                     print("  " + cpu.dump())
                     try:
@@ -208,8 +264,13 @@ def build_parser():
                        dest="program_dirs",
                        help="folder to scan for programs; repeatable")
     where.add_argument("--bios", metavar="PATH", dest="bios_binary")
+    where.add_argument("--bios2", metavar="PATH", dest="bios2_binary",
+                       help="second-stage BIOS for IO channel 7, used as it is "
+                            "(docs/os_cd.md)")
     where.add_argument("--disk", metavar="PATH", dest="disk",
                        help="disk image for IO channel 2")
+    where.add_argument("--cd", metavar="PATH", dest="cd",
+                       help="a disc to put in the CD drive before power-on (docs/os_cd.md)")
     where.add_argument("--no-autobuild", action="store_true",
                        help="never reassemble, even when a build is stale")
 
@@ -217,6 +278,8 @@ def build_parser():
     net.add_argument("--host")
     net.add_argument("--display-port", type=int)
     net.add_argument("--hid-port", type=int)
+    net.add_argument("--cd-port", type=int,
+                     help="port for the CD drive's endpoints (docs/cd-drive.md)")
     net.add_argument("--headless", action="store_true",
                      help="don't bind the display/input HTTP servers")
 
@@ -248,7 +311,9 @@ def main(argv=None):
 
     config = config.override(
         host=args.host, display_port=args.display_port, hid_port=args.hid_port,
-        program_dirs=args.program_dirs, bios_binary=args.bios_binary, disk=args.disk,
+        cd_port=args.cd_port, cd=args.cd,
+        program_dirs=args.program_dirs, bios_binary=args.bios_binary,
+        bios2_binary=args.bios2_binary, disk=args.disk,
         auto_build=False if args.no_autobuild else None)
 
     if args.list:
@@ -283,6 +348,16 @@ def main(argv=None):
         parser.error(f"BIOS not found: {short(config.bios_binary)} "
                      f"(and {short(config.bios_source)} was not there to build it)")
 
+    try:
+        bios2_path = second_stage(config, explicit=args.bios2_binary is not None)
+    except FileNotFoundError as e:
+        parser.error(str(e))
+    except Exception as e:
+        print(f"Could not build the second-stage BIOS: {e}", file=sys.stderr)
+        return 1
+    if bios2_path is not None:
+        print(f"\nSecond-stage BIOS: {short(bios2_path)}")
+
     program_path = None
     if program is not None:
         try:
@@ -295,13 +370,29 @@ def main(argv=None):
                   file=sys.stderr)
             return 1
         print(f"\nProgram: {program.name}  ({short(Path(program_path))})")
+    elif bios2_path is not None:
+        print("\nNo program selected -- the second-stage BIOS runs with channel 1 empty.")
     else:
         print("\nNo program selected -- the BIOS will boot into an empty load address.")
 
     # --- run ----------------------------------------------------------------
-    machine = Machine(bios_path=str(config.bios_binary),
-                      program_path=str(program_path) if program_path else None,
-                      disk_path=str(config.disk))
+    # The drive is built from the config here rather than inside Machine,
+    # so machine.py needs to know nothing about config.json.
+    try:
+        drive = disc_drive(config)
+    except OSError as e:
+        print(f"Could not put {short(config.cd)} in the CD drive: {e}", file=sys.stderr)
+        return 1
+    if config.cd is not None:
+        print(f"CD: {short(config.cd)}")
+    try:
+        machine = Machine(bios_path=str(config.bios_binary),
+                          program_path=str(program_path) if program_path else None,
+                          disk_path=str(config.disk), cd=drive,
+                          bios2_path=str(bios2_path) if bios2_path else None)
+    except ValueError as e:
+        print(f"Could not start the machine: {e}", file=sys.stderr)
+        return 1
     try:
         if args.disasm_bios:
             print(f"\n=== BIOS ({len(machine.bios.bios_bytes)} bytes) ===")
@@ -312,8 +403,10 @@ def main(argv=None):
         if not args.headless:
             machine.start_servers(host=config.host,
                                   display_port=config.display_port,
-                                  hid_port=config.hid_port)
-            print(f"Display: {config.display_url}   HID: {config.hid_url}")
+                                  hid_port=config.hid_port,
+                                  cd_port=config.cd_port)
+            print(f"Display: {config.display_url}   HID: {config.hid_url}   "
+                  f"CD: {config.cd_url}")
 
         console = Console(machine, config)
         if args.run:

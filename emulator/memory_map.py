@@ -15,9 +15,11 @@ and silently drew into the IO region instead of the screen.
     0x00000000 - 0x000003FF   BIOS              (1 KB)   <- CPU boots here
     0x00000400 - 0x00001417   IO controller     (4 KB + 24 B header)
     0x00001418 - 0x00015817   display           (81 KB, 192x108 x 4 B, 16:9)
+    0x00015818 - 0x00015A1B   a boot sector's copy and its channel, while booting
     0x00020000 - 0x0011FFFF   program (static)  (1 MB, fixed load point)
     0x00120000 - ...          HEAP -- grows UP toward higher addresses
                                   ... free space ...
+    0x07000000 - 0x07EFFFFF   second-stage BIOS, when there is one (15 MB max)
                               STACK -- grows DOWN toward lower addresses
     ...                - 0x07FFFFFC   (stack starts here, at the very top)
 
@@ -42,6 +44,17 @@ REGISTER_COUNT = 6   # A-F
 # --- BIOS ---
 BIOS_START = 0x00000000
 BIOS_MAX   = 0x00000400   # 1 KB reserved
+
+# --- Second-stage BIOS (docs/os_cd.md) ---
+# 1 KB has no room for a font, so the BIOS above loads a second stage off
+# the read-only firmware device on CH_BIOS2 and jumps to it. It runs here,
+# high up: one READ_DMA reaches it (the HDD refuses DMA below
+# PROGRAM_LOAD_ADDR), and nothing it loads lands on it -- a program goes
+# to PROGRAM_LOAD_ADDR, with its frame stack and heap at HEAP_START. It
+# ends before the last megabyte, which the hardware stack grows down into;
+# lib/pigeon/mem.c stops the heap at 0x07F00000 for the same reason.
+BIOS2_LOAD_ADDR = 0x07000000
+BIOS2_MAX       = 0x07F00000 - BIOS2_LOAD_ADDR   # 15 MB
 
 # --- IO controller (channel-based, DMA-capable bus: HDD, sound, keyboard, ...) ---
 # Header (byte offsets from IO_START), all little-endian 4-byte fields:
@@ -79,6 +92,24 @@ if DISPLAY_SIZE + DISPLAY_START > PROGRAM_LOAD_ADDR: #check for overlap with dis
     raise RuntimeError("Display memory overlaps program load address")
 PROGRAM_MAX_SIZE  = 0x00100000   # 1 MB reserved for code + static data
 
+# --- Boot sector (docs/os_cd.md) ---
+# A bootable disk keeps a boot record and a boot sector in the unused bytes
+# of block 0, its PigeonFS superblock: the record -- signature, first block,
+# size in bytes -- at BOOT_RECORD, and the code from BOOT_CODE to the end
+# of the block. bios2 copies the whole block to BOOT_LOAD_ADDR, the first
+# address after the framebuffer, writes the channel it came from to
+# BOOT_CHANNEL, and calls BOOT_ENTRY. It sits below PROGRAM_LOAD_ADDR so
+# the boot sector can load a program there without overwriting itself.
+BOOT_BLOCK     = 512
+BOOT_RECORD    = 52
+BOOT_CODE      = 128                  # 384 bytes: 48 instructions
+BOOT_SIGNATURE = 0x54424750           # "PGBT" in byte order
+BOOT_LOAD_ADDR = DISPLAY_START + DISPLAY_SIZE
+BOOT_ENTRY     = BOOT_LOAD_ADDR + BOOT_CODE
+BOOT_CHANNEL   = BOOT_LOAD_ADDR + BOOT_BLOCK
+if BOOT_CHANNEL + 4 > PROGRAM_LOAD_ADDR:
+    raise RuntimeError("A boot sector's copy overlaps the program load address")
+
 # --- Heap: dynamic allocations, grows UP from just above the program ---
 HEAP_START = PROGRAM_LOAD_ADDR + PROGRAM_MAX_SIZE
 
@@ -91,6 +122,10 @@ CH_HDD      = 2   # general-purpose file-backed disk
 CH_HID      = 3   # mouse + keyboard
 CH_TIMER    = 4   # wall-clock countdown timers
 CH_DISPLAY  = 5   # framebuffer: scanout base, block fill
+CH_CD       = 6   # removable read-only disc, swapped from the host
+CH_BIOS2    = 7   # read-only firmware: the second-stage BIOS (docs/os_cd.md)
+# 8 is free. <pigeon/cd.h> takes a channel, so a second drive is a
+# one-line change here and nowhere else.
 
 
 def symbols():

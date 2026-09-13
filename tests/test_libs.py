@@ -76,6 +76,7 @@ MEM = "#include <pigeon/mem.h>\n"
 DISPLAY = "#include <pigeon/display.h>\n"
 INPUT = "#include <pigeon/input.h>\n"
 MATH = "#include <pigeon/math.h>\n"
+STRING = "#include <pigeon/string.h>\n"
 
 
 # --- <pigeon/mem.h> ---------------------------------------------------------
@@ -135,6 +136,226 @@ def test_calloc_zeroes():
 def test_heap_used_grows():
     returns(MEM + "int main(void){ unsigned before=heap_used(); malloc(32);"
                   " return heap_used()>before ? 1 : 0; }", 1, "mem.c")
+
+
+# --- <pigeon/string.h> ------------------------------------------------------
+
+def string_returns(body, expected):
+    returns(f"{STRING}int main(void) {{ {body} }}", expected, "string.c")
+
+
+@cases(
+    ("strlen of the empty string", 'return strlen("");', 0),
+    ("strlen",                     'return strlen("pigeon");', 6),
+    ("strcmp equal",               'return strcmp("abc", "abc");', 0),
+    ("strcmp both empty",          'return strcmp("", "");', 0),
+    ("strcmp less",                'return strcmp("abc", "abd") < 0;', 1),
+    ("strcmp greater",             'return strcmp("abd", "abc") > 0;', 1),
+    ("a prefix sorts first",       'return strcmp("ab", "abc") < 0;', 1),
+    ("a longer string sorts after", 'return strcmp("abc", "ab") > 0;', 1),
+    ("strncmp equal within n",     'return strncmp("abcX", "abcY", 3);', 0),
+    ("strncmp differs within n",   'return strncmp("abcX", "abcY", 4) < 0;', 1),
+    ("strncmp of nothing",         'return strncmp("a", "b", 0);', 0),
+    ("strncmp stops at the NUL",   'return strncmp("ab", "ab", 10);', 0),
+)
+def test_string_length_and_compare(label, body, expected):
+    string_returns(body, expected)
+
+
+@cases(
+    ("strcmp", r'return strcmp("\xE9", "a") > 0;', 1),
+    ("strncmp", r'return strncmp("\xE9", "a", 1) > 0;', 1),
+)
+def test_high_bytes_compare_unsigned(label, body, expected):
+    """char is signed in this compiler. Compared as char, 0xE9 is -23 and
+    sorts below 'a'; every C library compares bytes as unsigned char."""
+    string_returns(body, expected)
+
+
+@cases(
+    ("strcpy copies and terminates",
+     'char b[8]; strcpy(b, "hey"); return b[3] == 0 && strcmp(b, "hey") == 0;', 1),
+    ("strcpy returns dst", 'char b[4]; return strcpy(b, "x") == b;', 1),
+    ("strlcpy that fits",
+     'char b[8]; unsigned n = strlcpy(b, "abc", 8);'
+     ' return n * 10 + (strcmp(b, "abc") == 0);', 31),
+    ("strlcpy filling size exactly",
+     'char b[4]; unsigned n = strlcpy(b, "abc", 4);'
+     ' return n * 10 + (strcmp(b, "abc") == 0);', 31),
+    ("strlcpy one over: cut, terminated, full length back",
+     'char b[4]; unsigned n = strlcpy(b, "abcd", 4);'
+     ' return n * 100 + (b[3] == 0) * 10 + (strcmp(b, "abc") == 0);', 411),
+    ("strlcpy into size 0 writes nothing",
+     'char b[2]; b[0] = 88; unsigned n = strlcpy(b, "abc", 0);'
+     ' return n * 100 + b[0];', 388),
+    ("strlcat that fits",
+     'char b[8]; strcpy(b, "ab"); unsigned n = strlcat(b, "cd", 8);'
+     ' return n * 10 + (strcmp(b, "abcd") == 0);', 41),
+    ("strlcat cut short",
+     'char b[5]; strcpy(b, "ab"); unsigned n = strlcat(b, "cdef", 5);'
+     ' return n * 10 + (strcmp(b, "abcd") == 0);', 61),
+    ("strlcat onto an unterminated buffer writes nothing",
+     'char b[4]; b[0] = 65; b[1] = 65; b[2] = 65; b[3] = 65;'
+     ' unsigned n = strlcat(b, "xy", 4); return n * 10 + (b[3] == 65);', 61),
+)
+def test_string_copy(label, body, expected):
+    """The bounded copies are the point: on a machine with no memory
+    protection an overrun faults nothing, it just rewrites the neighbour.
+    Every edge is here -- fits, fills exactly, one over, no room at all."""
+    string_returns(body, expected)
+
+
+@cases(
+    ("strchr finds the first",
+     'char *s = "hello"; return (unsigned)strchr(s, 108) - (unsigned)s;', 2),
+    ("strchr absent", 'return strchr("hello", 122) == NULL;', 1),
+    ("strchr finds the terminator",
+     'char *s = "abc"; return (unsigned)strchr(s, 0) - (unsigned)s;', 3),
+    ("strrchr finds the last",
+     'char *s = "hello"; return (unsigned)strrchr(s, 108) - (unsigned)s;', 3),
+    ("strrchr absent", 'return strrchr("hello", 122) == NULL;', 1),
+    ("strrchr finds the terminator",
+     'char *s = "hello"; return (unsigned)strrchr(s, 0) - (unsigned)s;', 5),
+    ("strchr of a byte held in a char",
+     r'char *s = "a\xE9b"; char c = s[1];'
+     r' return (unsigned)strchr(s, c) - (unsigned)s;', 1),
+)
+def test_string_search(label, body, expected):
+    """The last case is the one that goes wrong: a char holding 0xE9 is
+    passed as the int -23, and a search that compares it to the unsigned
+    byte in the string never finds it."""
+    string_returns(body, expected)
+
+
+def utoa_case(label, value, base, text):
+    body = (f'char b[STR_UTOA_MAX]; int n = utoa({value}u, b, {base});'
+            f' return n * 10 + (strcmp(b, "{text}") == 0);')
+    return (label, body, len(text) * 10 + 1)
+
+
+@cases(
+    utoa_case("zero", 0, 10, "0"),
+    utoa_case("decimal", 1234, 10, "1234"),
+    utoa_case("largest decimal", 0xFFFFFFFF, 10, "4294967295"),
+    utoa_case("hex is lower case", 0xBEEF, 16, "beef"),
+    utoa_case("largest hex", 0xFFFFFFFF, 16, "ffffffff"),
+    utoa_case("binary", 5, 2, "101"),
+    utoa_case("largest binary fills STR_UTOA_MAX", 0xFFFFFFFF, 2, "1" * 32),
+    ("base 1 is refused",
+     'char b[4]; b[0] = 88; int n = utoa(5, b, 1); return n * 10 + (b[0] == 0);', 1),
+    ("base 17 is refused",
+     'char b[4]; b[0] = 88; int n = utoa(5, b, 17); return n * 10 + (b[0] == 0);', 1),
+)
+def test_utoa(label, body, expected):
+    """Base 0 or 1 is not just nonsense: DIV by zero raises in the emulator
+    and takes the machine down, so the base check is also the guard."""
+    string_returns(body, expected)
+
+
+def itoa_case(label, value, text):
+    body = (f'char b[16]; int n = itoa({value}, b);'
+            f' return n * 10 + (strcmp(b, "{text}") == 0);')
+    return (label, body, len(text) * 10 + 1)
+
+
+@cases(
+    itoa_case("zero", 0, "0"),
+    itoa_case("minus one", -1, "-1"),
+    itoa_case("largest int", 2147483647, "2147483647"),
+    itoa_case("most negative int", "-2147483647 - 1", "-2147483648"),
+)
+def test_itoa(label, body, expected):
+    """-(-2147483648) does not fit in an int. itoa takes the magnitude as
+    an unsigned, which is the case a naive `v = -v` gets wrong."""
+    string_returns(body, expected)
+
+
+@cases(
+    ("leading spaces", 'return strtou("  42", NULL, 10);', 42),
+    ("a plus sign", 'return strtou("+7", NULL, 10);', 7),
+    ("base 0 finds hex", 'return strtou("0x1F", NULL, 0);', 31),
+    ("base 0 finds binary", 'return strtou("0b101", NULL, 0);', 5),
+    ("base 0 defaults to decimal", 'return strtou("019", NULL, 0);', 19),
+    ("base 16 accepts 0x", 'return strtou("0XfF", NULL, 16);', 255),
+    ("0b is a hex digit in base 16", 'return strtou("0b1", NULL, 16);', 0xB1),
+    ("end stops at the first unused character",
+     'char *s = "123abc"; char *e; unsigned v = strtou(s, &e, 10);'
+     ' return v * 10 + ((unsigned)e - (unsigned)s);', 1233),
+    ("no digits leaves end at the start",
+     'char *s = "  xyz"; char *e; strtou(s, &e, 10); return e == s;', 1),
+    ("0x with no hex digit after it is just 0",
+     'char *s = "0xg"; char *e; unsigned v = strtou(s, &e, 0);'
+     ' return v * 10 + ((unsigned)e - (unsigned)s);', 1),
+    ("an invalid base parses nothing",
+     'char *s = "5"; char *e; unsigned v = strtou(s, &e, 1);'
+     ' return v * 10 + (e == s);', 1),
+    ("the largest value", 'return strtou("4294967295", NULL, 10) == 0xFFFFFFFF;', 1),
+    ("one below it", 'return strtou("4294967294", NULL, 10) == 0xFFFFFFFE;', 1),
+)
+def test_strtou(label, body, expected):
+    string_returns(body, expected)
+
+
+@cases(
+    ("one past the top, where the add carries out",
+     'return strtou("4294967296", NULL, 10) == 0xFFFFFFFF;'),
+    ("far past the top, where the multiply would",
+     'return strtou("99999999999", NULL, 10) == 0xFFFFFFFF;'),
+    ("in hex", 'return strtou("123456789", NULL, 16) == 0xFFFFFFFF;'),
+)
+def test_strtou_saturates_rather_than_wrapping(label, body):
+    """4294967296 is 429496729 * 10 + 6: the multiply fits and only the
+    final add overflows. A wrapped result would be 0, which is a perfectly
+    plausible number to get back from a config file."""
+    string_returns(body, 1)
+
+
+@cases(
+    ("negative with spaces", 'return atoi("  -42");', -42),
+    ("plus sign", 'return atoi("+17");', 17),
+    ("stops at garbage", 'return atoi("12abc");', 12),
+    ("no digits", 'return atoi("abc");', 0),
+    ("most negative int", 'return atoi("-2147483648");', -2147483648),
+)
+def test_atoi(label, body, expected):
+    string_returns(body, expected)
+
+
+@cases(
+    ("ten digits", "int n = 0; for (int c = -1; c < 256; c++) if (isdigit(c)) n++; return n;", 10),
+    ("52 letters", "int n = 0; for (int c = -1; c < 256; c++) if (isalpha(c)) n++; return n;", 52),
+    ("six spaces", "int n = 0; for (int c = -1; c < 256; c++) if (isspace(c)) n++; return n;", 6),
+    ("true is exactly 1", "return isdigit('7') + isalpha('B') + isspace(' ');", 3),
+    ("toupper", "return toupper('a') == 'A' && toupper('z') == 'Z' && toupper('A') == 'A'"
+                " && toupper('`') == '`' && toupper('{') == '{' && toupper('1') == '1';", 1),
+    ("tolower", "return tolower('A') == 'a' && tolower('Z') == 'z' && tolower('a') == 'a'"
+                " && tolower('@') == '@' && tolower('[') == '[' && tolower(-1) == -1;", 1),
+)
+def test_character_classes(label, body, expected):
+    """Every class is one unsigned compare, so the neighbours of each range
+    are where it would break: '@' and '[' sit either side of A-Z, '`' and
+    '{' either side of a-z, and -1 must not wrap into anything."""
+    string_returns(body, expected)
+
+
+def test_the_documented_example():
+    """lib/README.md and string.h both show this; it has to work."""
+    string_returns('char line[32]; int score = -42;'
+                   ' unsigned n = strlcpy(line, "score ", sizeof(line));'
+                   ' itoa(score, line + n); return strcmp(line, "score -42") == 0;', 1)
+
+
+def test_string_does_not_pull_in_the_heap():
+    """string.h defines size_t and NULL itself instead of including mem.h,
+    so formatting a number does not drag an allocator into the image."""
+    assert libraries_for(LIB / "string.c") == [LIB / "string.c"]
+
+
+def test_string_and_mem_together():
+    """Both headers define size_t and NULL; one program may include both."""
+    returns(MEM + STRING + "int main(void){ char *p = (char *)malloc(16);"
+            " strlcpy(p, \"pigeon\", 16); int n = strlen(p); free(p); return n; }",
+            6, "mem.c", "string.c")
 
 
 # --- <pigeon/display.h> -----------------------------------------------------

@@ -17,11 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import cases, run_module                          # noqa: E402
 from assembler.assembler import Assembler                      # noqa: E402
-from compiler.cc import compile_to_asm                         # noqa: E402
+from compiler.cc import compile_to_asm, origin_of              # noqa: E402
 from compiler.lexer import CompileError                        # noqa: E402
+from compiler.preprocess import Preprocessor                   # noqa: E402
 from emulator.cpu import CPU                                   # noqa: E402
-from emulator.memory_map import (PROGRAM_LOAD_ADDR, RAM_SIZE,  # noqa: E402
-                                 STACK_TOP)
+from emulator.memory_map import (BIOS2_LOAD_ADDR,              # noqa: E402
+                                 PROGRAM_LOAD_ADDR, RAM_SIZE, STACK_TOP)
 from emulator.ram import RAM                                   # noqa: E402
 
 STEP_LIMIT = 3_000_000
@@ -274,6 +275,41 @@ def test_string_literals():
             ord('A') * 100 + ord('B'))
 
 
+# --- the preprocessor -------------------------------------------------------
+
+def expand(source: str) -> str:
+    """Preprocessed text, without the blank lines directives leave behind."""
+    text, _ = Preprocessor().process(source, "t.c")
+    return "\n".join(line for line in text.splitlines() if line.strip())
+
+
+@cases(
+    ("a string", '#define NAME "/x"\nchar *s = "NAME"; char *t = NAME;',
+     'char *s = "NAME"; char *t = "/x";'),
+    ("a character", "#define A 5\nint c = 'A' + A;", "int c = 'A' + 5;"),
+    ("an escaped quote", '#define N 1\nchar *s = "say \\"N\\" N"; int n = N;',
+     'char *s = "say \\"N\\" N"; int n = 1;'),
+    ("an escaped character", "#define N 1\nint q = '\\''; int n = N;",
+     "int q = '\\''; int n = 1;"),
+    ("a string a macro expands to", '#define A "B"\n#define B 1\nchar *s = A;',
+     'char *s = "B";'),
+    ("a parameter's name in the body", '#define SHOW(x) puts("x"), x\nSHOW(y);',
+     'puts("x"), (y);'),
+    ("an argument", '#define ID(x) x\n#define N 1\nchar *s = ID("N");',
+     'char *s = ("N");'),
+)
+def test_names_inside_literals_are_not_replaced(what, source, expected):
+    assert expand(source) == expected, f"{what}: {expand(source)}"
+
+
+def test_a_string_can_hold_a_macro_name():
+    """What broke user/os/installer.c: "INSTALLER" became ""/install.bin""."""
+    returns('#define GREETING "hi"\n'
+            'int main(void){ char *s = "GREETING"; char *t = GREETING;'
+            ' return s[1]*256 + t[1]; }',
+            ord('R') * 256 + ord('i'))
+
+
 def test_volatile_mmio():
     """The pattern the input library depends on: a device register at a
     fixed address, written and read through a volatile pointer."""
@@ -379,6 +415,64 @@ def test_image_is_small():
 def test_generated_assembly_carries_the_c_source():
     asm = compile_to_asm("int main(void) {\n    return 42;\n}\n", "t.c")
     assert "; 2: return 42;" in asm, "source lines should be interleaved as comments"
+
+
+# --- where the program runs: cc.py --org ----------------------------------
+
+def test_a_program_built_for_another_address_runs_there():
+    """cc.py --org (docs/os_cd.md): the code and data move, and every
+    absolute address in them moves too -- a global table, a string, a call
+    through a function pointer. Built for BIOS2_LOAD_ADDR and run there, it
+    gives the same answer, and nothing lands at PROGRAM_LOAD_ADDR."""
+    source = """
+        int table[3] = {5, 7, 11};
+        int twice(int x) { return x + x; }
+        int main(void) {
+            int (*f)(int);
+            char *word;
+            f = twice;
+            word = "pigeon";
+            return f(table[2]) + word[1];
+        }"""
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "t.asm"
+        path.write_text(compile_to_asm(source, "t.c", origin="BIOS2_LOAD_ADDR"))
+        image = Assembler(str(path)).assemble()
+    assert image != build(source), "the origin changed nothing"
+    ram = RAM(RAM_SIZE)
+    ram.load_bytes(image, BIOS2_LOAD_ADDR)
+    cpu = CPU(ram)
+    cpu.pc = BIOS2_LOAD_ADDR
+    for _ in range(STEP_LIMIT):
+        if cpu.run() == 1:
+            break
+    else:
+        raise AssertionError(f"did not halt within {STEP_LIMIT:,} instructions")
+    assert cpu.reg.read(0) == 22 + ord("i"), f"main() returned {cpu.reg.read(0)}"
+    assert cpu.sp == STACK_TOP, f"hardware stack unbalanced: SP={cpu.sp:#x}"
+    assert bytes(ram.mem[PROGRAM_LOAD_ADDR:PROGRAM_LOAD_ADDR + len(image)]) == \
+        bytes(len(image)), "something was written where the program would normally be"
+
+
+@cases(("BIOS2_LOAD_ADDR", "BIOS2_LOAD_ADDR"),
+       ("PROGRAM_LOAD_ADDR", "PROGRAM_LOAD_ADDR"),
+       ("0x07000000", "0x7000000"),
+       ("131072", "0x20000"))
+def test_org_takes_a_number_or_a_memory_map_name(text, emitted):
+    """A name stays a name, so the assembly says what it means."""
+    assert origin_of(text) == emitted
+
+
+@cases(("not a name", "nowhere"),
+       ("not where an instruction can start", "0x20004"),
+       ("past the end of RAM", "0x08000000"),
+       ("negative", "-8"))
+def test_org_refuses_what_is_not_an_address(label, text):
+    try:
+        origin_of(text)
+    except ValueError:
+        return
+    raise AssertionError(f"{label}: --org {text} was accepted")
 
 
 if __name__ == "__main__":

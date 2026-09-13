@@ -2,13 +2,16 @@
   "host": "127.0.0.1",
   "display_port": 1234,
   "hid_port": 1235,
+  "cd_port": 1236,
 
   "program_dirs": ["user"],
 
   "build_dir": "build",
-  "disk": "build/pigeon_hard_drive.bin",
+  "disk": "disks/hdd.img",
 
   "bios_source": "firmware/bios.asm",
   "bios_binary": "build/bios.bin",
+  "bios2_source": "firmware/bios2.c",
+  "bios2_binary": "build/bios2.bin",
   "auto_build": true
 }

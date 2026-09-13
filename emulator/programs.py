@@ -33,6 +33,9 @@ class Program:
     source: Optional[Path] = None    # .asm or .c
     binary: Optional[Path] = None    # .bin, built or prebuilt
     prebuilt: bool = False           # a .bin with no source next to it
+    # Where a C source is built to run, as cc.py --org takes it. None is
+    # PROGRAM_LOAD_ADDR; bios2 is built for "BIOS2_LOAD_ADDR".
+    origin: Optional[str] = None
 
     @property
     def language(self) -> str:
@@ -81,7 +84,7 @@ class Program:
         from assembler.assembler import assemble_file
 
         if self.language == "c":
-            from compiler.cc import compile_units
+            from compiler.cc import DEFAULT_ORIGIN, compile_units, origin_of
 
             units = [self.source, *libraries_for(self.source)]
             if not quiet and len(units) > 1:
@@ -89,7 +92,8 @@ class Program:
                 print(f"Compiling {self.source.name} with {names}")
             asm_path = self.binary.with_suffix(".asm")
             asm_path.parent.mkdir(parents=True, exist_ok=True)
-            asm_path.write_text(compile_units(units))
+            origin = origin_of(self.origin) if self.origin else DEFAULT_ORIGIN
+            asm_path.write_text(compile_units(units, origin=origin))
             assemble_file(asm_path, self.binary, quiet=quiet)
         else:
             assemble_file(self.source, self.binary, quiet=quiet)

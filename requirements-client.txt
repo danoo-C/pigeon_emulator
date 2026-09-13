@@ -3,3 +3,8 @@
 # and not needed for the browser front-end at http://127.0.0.1:8000
 pygame>=2.5
 requests>=2.31
+
+# Optional, and NOT installable with pip: the pygame client's "Load from PC"
+# button opens a native file dialog through tkinter, which on most Linux
+# distributions is the system package python3-tk. Without it that one
+# button reports what is missing and everything else works.

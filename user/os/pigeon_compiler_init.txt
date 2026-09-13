@@ -1,0 +1,21 @@
+# The PigeonOS installation disc (docs/os_cd.md, section 7).
+#
+#     python3 compiler/cc.py --project user/os/pigeon_compiler_init.txt
+#     python3 start_emulator.py --cd build/pigeonos.img --run
+#
+# Paths on the right are relative to this file.
+
+[project]
+name    = PigeonOS
+version = 0.1
+label   = PIGEONOS              # the disc's volume label, 15 bytes at most
+
+[boot]
+installer = installer.c         # the disc's boot sector loads and runs this
+system    = ../graph.c          # what the installed hard disk boots: the graphing calculator
+# bootsector = boot.asm         # optional: firmware/boot.asm when left out
+
+[files]                         # what the installer will put on the hard disk
+/bin/files.bin   = ../files.c   # a .c or .asm is built; anything else is copied
+/bin/cube.bin    = ../cube.c
+/docs/readme.txt = readme.txt

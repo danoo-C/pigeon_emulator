@@ -1,11 +1,15 @@
 # The C libraries
 
-Four headers, compiled by `pigeon-cc` and covered by execution tests in
-`tests/test_libs.py` — every test compiles the C and *runs* it.
+Seven headers, compiled by `pigeon-cc` and covered by execution tests in
+`tests/test_libs.py`, `tests/test_fs.py` and `tests/test_cdlib.py`. Every test compiles the C and
+*runs* it.
 
 | Header | What it gives you |
 |---|---|
 | `<pigeon/mem.h>` | `memcpy` `memmove` `memset` `memcmp`, `malloc` `calloc` `free`, `heap_used` |
+| `<pigeon/string.h>` | `strlen` `strcmp` `strlcpy` `strlcat` `strchr` …, numbers as text (`utoa` `itoa` `strtou` `atoi`), `isdigit` and friends |
+| `<pigeon/fs.h>` | files and directories on the HDD channels: `fs_open`/`read`/`write`/`seek`, `fs_mkdir`/`readdir`/`rename`, `fs_load`/`fs_save`, a current directory |
+| `<pigeon/cd.h>` | the CD drive: `cd_info`, `cd_read`, `cd_has_fs`/`cd_label` for a disc that carries a filesystem, `cd_save` to copy a disc onto the current volume, and `cd_eject` |
 | `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped |
 | `<pigeon/input.h>` | mouse position/buttons/edges, keyboard characters, key edges, held-key state |
 | `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
@@ -29,6 +33,32 @@ Adequate here because the other two libraries allocate nothing at runtime.
 then finish byte by byte. That is not a micro-optimisation: the byte loop is
 about four instructions per byte and the framebuffer is 82,944 bytes.
 (`disp_clear` no longer pays that: it is a hardware fill on CH_DISPLAY.)
+
+## string
+
+Strings, numbers as text, and character classes. The names are the
+standard C ones, cut down to what this machine needs. There is no printf, so
+to show a number you write it into a buffer first:
+
+```c
+char line[32];
+unsigned n = strlcpy(line, "score ", sizeof(line));
+itoa(score, line + n);
+disp_text(2, 2, line, WHITE);
+```
+
+**Copies are bounded.** `strlcpy` and `strlcat` always leave the result
+terminated. They return the length they *tried* to make, so a result
+`>= size` means the copy was cut short. There is no `strcat` and no
+`strncpy`. With no memory protection, an overrun doesn't fault; it
+overwrites whatever comes next.
+
+**Bytes compare as unsigned.** `char` is signed here, so compared as `char`,
+`0xE9` would sort below `'a'`. `strtou` saturates at `0xFFFFFFFF`, as
+`strtoul` does, while `atoi` wraps.
+
+**It stands alone.** It uses no heap and doesn't need `mem.c`, so a program
+that only formats numbers doesn't pull in an allocator.
 
 ## display
 
@@ -113,3 +143,61 @@ v3_project(&v, DIST, CX, CY, &sx, &sy);
 
 That is exactly what `user/cube.c` does, and why the aliasing rule is a
 documented guarantee rather than an accident.
+
+## fs
+
+PigeonFS keeps files and directories on the HDD channels, in a FAT-style
+format that `tools/pfs.py` can also read and write from the host. A disk is
+named by its IO channel. You mount `CH_HDD`, and a path can pick a disk
+explicitly with a prefix, as in `2:/saves/a`.
+
+```c
+if (fs_mount(CH_HDD) == FS_ENOFS) {      /* a blank disk: format it once */
+    fs_format(CH_HDD, "PIGEON", 0);
+    fs_mount(CH_HDD);
+}
+fs_save("/saves/score", &score, 4);
+```
+
+**Every call writes through before it returns**, so stopping the emulator
+between two calls loses nothing. **A disk is only formatted on purpose:**
+`fs_format` refuses anything that isn't blank unless you force it. The
+design, the limits and every error code are in
+[docs/filesystem.md](../docs/filesystem.md).
+
+It's the biggest library here: a program that includes it is about 99 KB.
+Blocks move by DMA, straight between the disk and RAM, at 84 instructions a
+transfer of any length, so a 100 KB file loads in about 30 ms. On a disk
+without DMA, or into a buffer the disk will not reach, it falls back to the IO
+window, where one block costs about 4,350 instructions.
+
+`user/files.c` is the worked example — a file browser that walks
+directories, reads text files and writes notes, and reports every refusal
+through `fs_strerror()`. Run it with `python3 start_emulator.py files --run`.
+
+## cd
+
+The CD drive on channel 6: a removable, read-only disc that the display front
+ends put in and take out while the machine runs. A disc is raw bytes. If it
+happens to carry a PigeonFS image it is also a read-only volume, and
+`fs_mount(CH_CD)` mounts it with the ordinary `<pigeon/fs.h>`.
+
+```c
+cd_info_t disc;
+if (cd_info(CH_CD, &disc) == CD_OK) {
+    fs_mount(CH_HDD);
+    cd_save(CH_CD, NULL);            /* the whole disc, under its own name */
+}
+```
+
+**Including it compiles `fs.c` too** — about 99 KB — because `cd_save` writes
+through the filesystem. **Its errors are -101 and down**, so one can never be
+mistaken for an `FS_*` code, and `cd_strerror` names both kinds.
+**`cd_present` and `cd_has_fs` answer 1 or 0, never an error**, so
+`if (cd_present(CH_CD))` is safe; `cd_info` says why an answer is 0.
+**A disc can be swapped while you are reading it**: compare `cd_generation`
+before and after. `cd_save` does, removes the mixed copy, and returns
+`CD_ECHANGED`. **`cd_eject` takes the disc out from inside the machine**,
+unmounting it first if it was mounted, and refuses with `FS_EBUSY` while
+files on it are still open. The design is in
+[docs/cd-drive.md](../docs/cd-drive.md).
