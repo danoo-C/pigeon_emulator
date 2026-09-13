@@ -31,7 +31,8 @@ A CD drive is `hdd.py` with three differences, and they are the whole device:
 
 - **It can be empty.** `HDD` is bound to one host file at construction and
   keeps it for the life of the `Machine`. A disc is swapped while the machine
-  runs, from outside the machine.
+  runs, from outside the machine — and, since the guest gained `EJECT`
+  (§3.5), taken out from inside it too.
 - **It is read-only.** Not by a flag — by having no write path at all.
 - **It knows what it is holding.** A disc reports a size and a name, because
   the guest's reason for reading it is usually to write a copy somewhere with
@@ -95,6 +96,7 @@ and nothing else — the rule `display_io.py` documents at length, because a
 | 4 | `TRUNCATE` | — | — | — | refused: 0 bytes |
 | 5 | `FLUSH` | 0 | — | 0 | 0 bytes — a no-op that succeeds |
 | 8 | `MEDIA` | 0 | — | 48 | `magic`, `present`, `generation`, `size`, `name[32]` |
+| 9 | `EJECT` | 0 | — | 8 | `ejected` (1, or 0 if already empty), `generation` |
 
 0–5 are `hdd.py`'s numbers and mean what they mean there, so anything that can
 already drive a disk can drive this. 3 and 4 exist only to be refused: a
@@ -196,6 +198,30 @@ is safe — the device refused the write, and the host file did not change by a
 byte — but `fs_save()` returned 1 as though it had written one. The guest is
 told a lie it has no way to detect. That is what `FS_EROFS` is for, and phase
 1 is where it lands.
+
+### 3.5 `EJECT`, added after the rest
+
+The first design had only the host take discs out. The owner of the project
+asked for full control over the disc from inside the machine, so command 9
+takes it out, and `<pigeon/cd.h>` has `cd_eject()`.
+
+- **It is sent with `R/W = 0`.** It carries no payload, and that keeps the
+  read-only rule exactly as it was: anything in the write direction is
+  refused before it is decoded, `EJECT` included. Ejecting closes a handle;
+  it never touches the file behind it.
+- **The reply is taken under the same lock as the eject**, so the guest
+  learns whether there *was* a disc without a check-then-eject that the host
+  could race. The host's `eject()` and the guest's `EJECT` share one
+  function, so an empty drive is left alone and its generation does not
+  move, whoever asked.
+- **The device knows nothing about guest mounts**; the library does.
+  `cd_eject()` unmounts a mounted disc before it goes, and refuses with
+  `FS_EBUSY` while files on it are open. On an already-empty drive it still
+  unmounts — the way a program recovers after a *host* eject left it
+  holding a volume that is not there.
+- **It checks the channel is a drive before unmounting anything.** In the
+  other order `cd_eject(CH_HDD)` would unmount the hard disk, and a disk
+  answers command 9 with zeros, which would read as "the drive was empty".
 
 ---
 
@@ -467,6 +493,7 @@ unsigned cd_generation(unsigned channel);
 int      cd_read      (unsigned channel, unsigned offset, void *buf, unsigned n);
 int      cd_label     (unsigned channel, char *out, unsigned size);
 int      cd_save      (unsigned channel, char *path);   /* NULL: the disc's name */
+int      cd_eject     (unsigned channel);        /* unmounts it first (§3.5)  */
 ```
 
 **Revised while it was built** — each of these changed the API above from
@@ -714,10 +741,12 @@ Stated so it does not have to be rediscovered:
 - **It does not notify.** There are no interrupts on this bus, so a guest
   learns a disc arrived by polling. One IO command, but a program that never
   polls never notices.
-- **It does not protect a mounted disc from being ejected.** The host can
-  eject at any moment; `fs.c` will be holding a cache of blocks that are no
-  longer there. The generation counter lets a program detect it. Nothing
-  prevents it.
+- **It does not protect a mounted disc from a host eject.** The front ends
+  can eject at any moment, and `fs.c` is then holding a cache of blocks that
+  are no longer there. The generation counter lets a program detect it;
+  nothing prevents it. A program's own `cd_eject()` is the safe way out — it
+  unmounts first — and calling it on the empty drive afterwards clears the
+  stale volume a host eject left behind.
 
 ---
 
@@ -751,6 +780,10 @@ Stated so it does not have to be rediscovered:
 13. **The HTTP routes are not unit-tested** (left to me): path and state logic
     lives on `CD`, which is tested, and the routes stay thin enough that this
     holds.
+14. **A program can eject the disc** (2026-09-13): command 9 on the device and
+    `cd_eject()` in the library. The owner wanted full control over the disc
+    from inside the machine, which revises the first design's assumption that
+    only the host took discs out. §3.5 has what that required.
 
 ---
 

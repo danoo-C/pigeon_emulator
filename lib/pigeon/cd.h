@@ -1,10 +1,11 @@
 /* <pigeon/cd.h> -- the CD drive: removable, read-only discs.
  *
  * The design, with the reasoning for every choice here, is in
- * docs/cd-drive.md. The drive is on channel CH_CD, and a disc is put in
- * or taken out from OUTSIDE the machine -- the display front ends'
- * "Load from server", "Load from PC" and "Eject" buttons -- so a program
- * cannot assume the disc it started with is still the one in the drive.
+ * docs/cd-drive.md. The drive is on channel CH_CD. A disc is put in from
+ * OUTSIDE the machine -- the display front ends' "Load from server" and
+ * "Load from PC" buttons -- and can be taken out from outside ("Eject") or
+ * by a program with cd_eject(). Either way a program cannot assume the
+ * disc it started with is still the one in the drive.
  *
  *     cd_info_t disc;
  *     if (cd_info(CH_CD, &disc) == CD_OK) {
@@ -90,5 +91,15 @@ int cd_label(unsigned channel, char *out, unsigned size);
  * fails partway, or whose disc was swapped while it ran, is removed
  * rather than left looking complete. */
 int cd_save(unsigned channel, char *path);
+
+/* Take the disc out. CD_OK; CD_ENODISC if the drive was already empty;
+ * CD_ENODEV if the channel is not a drive; FS_EBUSY if files are still
+ * open on the disc -- close them first.
+ *
+ * A disc mounted as a volume is UNMOUNTED before it goes, so <pigeon/fs.h>
+ * is never left holding cached blocks of a disc that is not there. On an
+ * empty drive it still unmounts, which is how a program cleans up after
+ * the front ends ejected a mounted disc out from under it. */
+int cd_eject(unsigned channel);
 
 #endif

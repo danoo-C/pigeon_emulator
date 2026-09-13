@@ -15,6 +15,8 @@
 #define CD__READ      2u
 #define CD__MEDIA     8u
 #define CD__MEDIA_LEN 48u
+#define CD__EJECT     9u
+#define CD__EJECT_LEN 8u               /* ejected, generation            */
 #define CD__MAGIC     0x44434750u      /* "PGCD", emulator/devices/cd.py  */
 #define CD__PGFS      0x53464750u      /* "PGFS", fs.c's FS__MAGIC        */
 #define CD__LABEL_AT  36u              /* docs/filesystem.md section 3.1  */
@@ -177,6 +179,25 @@ int cd_save(unsigned channel, char *path) {
         return CD_ECHANGED;
     }
     return (int)offset;
+}
+
+int cd_eject(unsigned channel) {
+    int r;
+
+    /* The drive has to be established FIRST. The unmount below takes a
+     * channel on trust, so cd_eject(CH_HDD) done in the other order would
+     * unmount the hard disk -- and a disk answers command 9 with zeros,
+     * which reads as "the drive was empty" rather than "no drive here". */
+    r = __cd_media(channel);
+    if (r == CD_ENODEV) return r;
+
+    /* FS_OK: it was mounted and is not now. FS_ENODEV: it never was. Only
+     * FS_EBUSY stops the eject, and says what to do about it. */
+    r = fs_unmount(channel);
+    if (r == FS_EBUSY) return r;
+
+    if (__cd_io(channel, CD__EJECT, CD__EJECT_LEN, 0u) != CD__EJECT_LEN) return CD_ENODEV;
+    return (IO_DATAW[0] != 0u) ? CD_OK : CD_ENODISC;
 }
 
 char *cd_strerror(int err) {

@@ -308,7 +308,7 @@ that fires the command.
 | 3 `CH_HID` | input | **real-time:** `1` mouse pos (x≪16\|y) `2` button mask `6` one key's state `7` 32-byte held-key bitmap · **FIFO:** `3` pop character `4` pop mouse edge `5` pop key edge |
 | 4 `CH_TIMER` | timers | `1` START `2` STOP `4` RESET `5` STATUS → `(status, remaining_ms)` |
 | 5 `CH_DISPLAY` | framebuffer | `1` INFO → `(w, h, size)` `2` SET_BASE (page flip, ADDRESS = the buffer to scan out) `3` GET_BASE `4` FILL (ADDRESS = destination, colour in the data window) |
-| 6 `CH_CD` | removable disc | `0`-`5` as HDD, but **read-only**: WRITE and TRUNCATE are refused · `8` MEDIA → `(magic, present, generation, size, name[32])` |
+| 6 `CH_CD` | removable disc | `0`-`5` as HDD, but **read-only**: WRITE and TRUNCATE are refused · `8` MEDIA → `(magic, present, generation, size, name[32])` · `9` EJECT → `(ejected, generation)` |
 
 Input comes in **two buffers**, because guest code asks two different questions.
 The FIFOs answer *"what happened, in order"* — a key pressed and released

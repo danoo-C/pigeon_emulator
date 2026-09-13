@@ -28,6 +28,7 @@ carries a PigeonFS image is a question for <pigeon/cd.h>, which sits on
   4    TRUNCATE   --  --           --      refused: 0 bytes
   5    FLUSH      0   --           0       0 bytes -- a no-op that succeeds
   8    MEDIA      0   --           48      magic, present, generation, size, name
+  9    EJECT      0   --           8       ejected (1, or 0 if already empty), generation
 
 THE NUMBERING IS NOT FREE. lib/pigeon/fs.c drives a disk with GET_SIZE=1,
 READ=2, WRITE=3 and FLUSH=5, and its __fs_disk_blocks() refuses only
@@ -38,6 +39,18 @@ to that library. An earlier draft of the design numbered this device's
 own commands 1, 2 and 3; fs_mount would have sent READ and been handed
 the media status. Everything CD-specific therefore starts at 8, above
 every number hdd.py uses.
+
+EJECT is the guest's own hand on the drive. The host's Eject buttons were
+first meant to be the only way a disc came out; the owner of the project
+wanted full control from inside the machine as well. It is sent with
+R/W = 0 because it carries no payload, which keeps the rule below exactly
+as it was: anything in the write direction is refused, EJECT included, and
+ejecting closes a handle without ever touching the file behind it. The
+reply is taken under the same lock as the eject, so the guest learns
+whether there WAS a disc without a check-then-eject the host could race.
+The device knows nothing about guest mounts -- <pigeon/cd.h>'s cd_eject()
+unmounts a mounted disc first; a program that fires the raw command gets
+the same hazard a host eject has.
 
 3 and 4 exist only to be refused. A device that silently ignored an
 unknown command would leave fs.c unable to tell a refusal from a device
@@ -67,6 +80,8 @@ CMD_TRUNCATE = 4
 CMD_FLUSH = 5
 # CD-specific, above everything hdd.py uses.
 CMD_MEDIA = 8
+CMD_EJECT = 9
+EJECT_BYTES = 8
 
 #: "PGCD" in byte order, the same convention as fs.c's FS__MAGIC.
 #:
@@ -222,16 +237,27 @@ class CD:
     def eject(self):
         """Take the disc out. Empty already is a no-op, generation included."""
         with self._lock:
-            if self._f is None:
-                return self._status_locked()
-            self._f.close()
-            self._f = None
-            self._path = None
-            self._name = ""
-            self._size = 0
-            self._bump()
-        log.info("CD: ejected")
-        return self.status()
+            ejected = self._eject_locked()
+            status = self._status_locked()
+        if ejected:
+            log.info("CD: ejected")
+        return status
+
+    def _eject_locked(self):
+        """Call with the lock held. True if there was a disc to take out.
+
+        Shared by the host's eject() and the guest's EJECT, so the two
+        cannot drift: an empty drive is left alone and its generation does
+        not move, whoever asked."""
+        if self._f is None:
+            return False
+        self._f.close()
+        self._f = None
+        self._path = None
+        self._name = ""
+        self._size = 0
+        self._bump()
+        return True
 
     def close(self):
         self.eject()
@@ -460,6 +486,14 @@ class CD:
 
         if cmd == CMD_MEDIA:
             return self._media()
+
+        if cmd == CMD_EJECT:
+            with self._lock:
+                ejected = self._eject_locked()
+                generation = self._generation
+            if ejected:
+                log.info("CD: ejected by the guest")
+            return struct.pack("<II", 1 if ejected else 0, generation)
 
         if cmd in (CMD_WRITE, CMD_TRUNCATE):
             return b""

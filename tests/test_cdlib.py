@@ -232,6 +232,7 @@ def test_channels_that_are_not_drives(label, channel, refused):
             if (cd_has_fs({channel}) != 0) return -2;
             if (cd_generation({channel}) != 0u) return -3;
             if (cd_read({channel}, 0u, buf, 8u) != CD_ENODEV) return -4;
+            if (cd_eject({channel}) != CD_ENODEV) return -5;
             return cd_info({channel}, &info);"""), formatted(d), disc=disc,
             before=watch, after=lambda m: statuses.append(timer_zero_status(m))),
             CD["CD_ENODEV"])
@@ -373,6 +374,112 @@ def test_strerror_names_both_kinds_of_error():
             if (strcmp(cd_strerror(FS_ENOSPC), fs_strerror(FS_ENOSPC)) != 0) return -4;
             if (strcmp(cd_strerror(FS_EROFS), "read-only disk") != 0) return -5;
             return 0;"""), blank(d)), 0)
+
+
+
+# --- ejecting from inside the machine ----------------------------------------------
+
+def test_the_guest_ejects_a_disc():
+    with disks() as d:
+        disc = raw_disc(d, data=b"x" * 64)
+        seen = []
+        expect(run_machine(program("""
+            r = cd_eject(CH_CD);
+            if (r != CD_OK) return r;
+            if (cd_present(CH_CD) != 0) return -1;
+            if (cd_generation(CH_CD) != 2u) return -2;
+            return cd_eject(CH_CD);             /* again: nothing left to take out */"""),
+            blank(d), disc=disc, after=lambda m: seen.append(m.cd.status())),
+            CD["CD_ENODISC"])
+        assert seen[0]["present"] is False, "the host still sees a disc in the drive"
+        assert disc.read_bytes() == b"x" * 64, "ejecting touched the file"
+
+
+def test_a_mounted_disc_is_unmounted_before_it_goes():
+    """Otherwise <pigeon/fs.h> keeps a volume whose blocks are cached from a
+    disc no longer in the drive. The current directory was on the disc, so
+    it moves to the other volume's root, which is what fs_unmount() does."""
+    with disks() as d:
+        image = disc_image(d, files=(("/hello.txt", b"hi\n"),))
+        disk = formatted(d)
+        expect(run_fs(program("""
+            fs_stat_t st;
+            char cwd[32];
+            TRY(fs_mount(CH_HDD));
+            TRY(fs_mount(CH_CD));
+            TRY(fs_chdir("6:/"));
+            TRY(fs_stat("hello.txt", &st));
+            r = cd_eject(CH_CD);
+            if (r != CD_OK) return r;
+            if (fs_stat("6:/hello.txt", &st) != FS_ENODEV) return -1;
+            TRY(fs_getcwd(cwd, 32u));
+            if (strcmp(cwd, "2:/") != 0) return -2;
+            return fs_save("left.txt", "ok", 2u);"""), disk, disc=image), 2)
+        with host(disk) as img:
+            assert img.read_file("/left.txt") == b"ok"
+        clean(disk)
+
+
+def test_a_disc_with_files_open_on_it_stays_in():
+    with disks() as d:
+        image = disc_image(d, files=(("/hello.txt", b"hi\n"),))
+        expect(run_fs(program("""
+            int fd;
+            TRY(fs_mount(CH_CD));
+            fd = fs_open("6:/hello.txt", FS_READ);
+            if (fd < 0) return fd;
+            if (cd_eject(CH_CD) != FS_EBUSY) return -1;
+            if (cd_present(CH_CD) != 1) return -2;
+            TRY(fs_close(fd));
+            return cd_eject(CH_CD);"""), blank(d), disc=image), 0)
+
+
+def test_an_eject_aimed_at_the_hard_disk_unmounts_nothing():
+    """cd_eject() unmounts before it ejects, so it has to learn the channel
+    is a drive FIRST -- or cd_eject(CH_HDD) would quietly unmount the hard
+    disk, and the disk's all-zero answer to command 9 would pass for
+    "the drive was empty"."""
+    with disks() as d:
+        disk = formatted(d)
+        expect(run_fs(program("""
+            TRY(fs_mount(CH_HDD));
+            if (cd_eject(CH_HDD) != CD_ENODEV) return -1;
+            return fs_save("2:/still.txt", "here", 4u);"""), disk), 4)
+        with host(disk) as img:
+            assert img.read_file("/still.txt") == b"here"
+        clean(disk)
+
+
+def test_eject_on_an_empty_drive_still_clears_a_stale_volume():
+    """The front ends can eject a disc that a program has mounted. The
+    program's way back is cd_eject() on the now-empty drive: nothing comes
+    out, but the stale volume goes."""
+    with disks() as d:
+        image = disc_image(d, files=(("/hello.txt", b"hi\n"),))
+        reads = []
+
+        def eject_after_mount(machine):
+            channel = machine.io_controller.channels[CH_CD]
+            original = channel.callback
+
+            def watching(read_write, command, length, address, data):
+                reply = original(read_write, command, length, address, data)
+                if command == 2:
+                    reads.append(address)
+                    if len(reads) == 1:              # the superblock, read by fs_mount
+                        machine.cd.eject()
+                return reply
+
+            channel.callback = watching
+
+        expect(run_machine(program("""
+            fs_stat_t st;
+            TRY(fs_mount(CH_CD));                       /* the host ejects during this */
+            r = cd_eject(CH_CD);
+            if (r != CD_ENODISC) return r == 0 ? -1 : r;
+            if (fs_stat("6:/hello.txt", &st) != FS_ENODEV) return -2;
+            return 0;"""), blank(d), disc=image, before=eject_after_mount), 0)
+        assert reads, "fs_mount never read the disc"
 
 
 if __name__ == "__main__":

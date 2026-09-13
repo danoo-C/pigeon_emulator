@@ -9,7 +9,7 @@ Seven headers, compiled by `pigeon-cc` and covered by execution tests in
 | `<pigeon/mem.h>` | `memcpy` `memmove` `memset` `memcmp`, `malloc` `calloc` `free`, `heap_used` |
 | `<pigeon/string.h>` | `strlen` `strcmp` `strlcpy` `strlcat` `strchr` …, numbers as text (`utoa` `itoa` `strtou` `atoi`), `isdigit` and friends |
 | `<pigeon/fs.h>` | files and directories on the HDD channels: `fs_open`/`read`/`write`/`seek`, `fs_mkdir`/`readdir`/`rename`, `fs_load`/`fs_save`, a current directory |
-| `<pigeon/cd.h>` | the CD drive: `cd_info`, `cd_read`, `cd_has_fs`/`cd_label` for a disc that carries a filesystem, and `cd_save` to copy a disc onto the current volume |
+| `<pigeon/cd.h>` | the CD drive: `cd_info`, `cd_read`, `cd_has_fs`/`cd_label` for a disc that carries a filesystem, `cd_save` to copy a disc onto the current volume, and `cd_eject` |
 | `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped |
 | `<pigeon/input.h>` | mouse position/buttons/edges, keyboard characters, key edges, held-key state |
 | `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
@@ -195,4 +195,7 @@ mistaken for an `FS_*` code, and `cd_strerror` names both kinds.
 `if (cd_present(CH_CD))` is safe; `cd_info` says why an answer is 0.
 **A disc can be swapped while you are reading it**: compare `cd_generation`
 before and after. `cd_save` does, removes the mixed copy, and returns
-`CD_ECHANGED`. The design is in [docs/cd-drive.md](../docs/cd-drive.md).
+`CD_ECHANGED`. **`cd_eject` takes the disc out from inside the machine**,
+unmounting it first if it was mounted, and refuses with `FS_EBUSY` while
+files on it are still open. The design is in
+[docs/cd-drive.md](../docs/cd-drive.md).

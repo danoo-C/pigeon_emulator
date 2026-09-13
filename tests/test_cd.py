@@ -36,8 +36,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import cases, run_module                                 # noqa: E402
 from emulator.devices.cd import (                                     # noqa: E402
-    CD, CMD_FLUSH, CMD_GET_SIZE, CMD_MEDIA, CMD_NOP, CMD_READ,
-    CMD_TRUNCATE, CMD_WRITE, MEDIA_BYTES, MEDIA_MAGIC, NAME_MAX, WINDOW)
+    CD, CMD_EJECT, CMD_FLUSH, CMD_GET_SIZE, CMD_MEDIA, CMD_NOP, CMD_READ,
+    CMD_TRUNCATE, CMD_WRITE, EJECT_BYTES, MEDIA_BYTES, MEDIA_MAGIC, NAME_MAX, WINDOW)
 from emulator.devices.hdd import HDD                                  # noqa: E402
 from emulator.io_controller import (                                  # noqa: E402
     ERR_NO_SUCH_CHANNEL, IOChannel, IOController)
@@ -227,7 +227,7 @@ def test_generation_is_visible_to_the_guest_through_media():
 
 # --- read-only ---------------------------------------------------------------------
 
-@cases(CMD_WRITE, CMD_TRUNCATE, CMD_NOP, CMD_READ, CMD_GET_SIZE, CMD_MEDIA, 99)
+@cases(CMD_WRITE, CMD_TRUNCATE, CMD_NOP, CMD_READ, CMD_GET_SIZE, CMD_MEDIA, CMD_EJECT, 99)
 def test_nothing_the_bus_can_express_as_a_write_is_accepted(command):
     """Read-only is the absence of a write path, not a flag. Every command
     in the WRITE direction is refused before it is even decoded."""
@@ -237,6 +237,7 @@ def test_nothing_the_bus_can_express_as_a_write_is_accepted(command):
         d.cd.insert(path)
         assert write(d.cd, command, b"\xFF" * 64, address=0) == b""
         assert path.read_bytes() == original, "the host file was modified"
+        assert d.cd.status()["present"], "a write-direction command took the disc out"
 
 
 def test_write_and_truncate_are_refused_even_in_the_read_direction():
@@ -495,6 +496,76 @@ def test_the_drive_is_on_the_bus_of_every_machine():
             assert media(machine.cd)[:2] == (MEDIA_MAGIC, 0), "should boot with no disc"
         finally:
             machine.close()
+
+# --- EJECT: the guest's own hand on the drive --------------------------------
+
+def test_the_guest_can_eject_a_disc():
+    with drive() as d:
+        path = d.disc("demo.bin", pattern(64))
+        d.cd.insert(path)
+        handle = d.cd._f
+
+        ejected, generation = struct.unpack("<II", read(d.cd, CMD_EJECT, EJECT_BYTES))
+        assert (ejected, generation) == (1, 2), (ejected, generation)
+        assert handle.closed, "the host file handle was left open"
+        assert d.cd.status()["present"] is False
+        assert read(d.cd, CMD_READ, 64, 0) == b""
+        assert media(d.cd)[1:3] == (0, 2)
+        assert path.read_bytes() == pattern(64), "ejecting touched the file"
+
+
+def test_a_guest_eject_of_an_empty_drive_says_so_and_moves_nothing():
+    """The same rule as the host's eject(), because it is the same code:
+    nothing came out, so the generation must not move."""
+    with drive() as d:
+        d.disc("a.bin", b"x")
+        d.cd.insert(d.dir / "a.bin")
+        d.cd.eject()
+        before = d.cd.status()["generation"]
+        assert struct.unpack("<II", read(d.cd, CMD_EJECT, EJECT_BYTES)) == (0, before)
+        assert d.cd.status()["generation"] == before
+
+
+def test_eject_is_not_a_disk_command():
+    """9 sits above everything hdd.py uses, and a disk answers it the way it
+    answers any unknown command -- so a guest aiming EJECT at the HDD
+    channel gets zeros and its disk stays exactly where it was."""
+    from emulator.devices import hdd as hdd_module
+
+    disk_numbers = {getattr(hdd_module, n) for n in dir(hdd_module) if n.startswith("CMD_")}
+    assert CMD_EJECT not in disk_numbers, f"EJECT ({CMD_EJECT}) collides with a disk command"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        image = Path(tmp) / "hdd.img"
+        image.write_bytes(pattern(4096))
+        disk = HDD(str(image))
+        try:
+            reply = disk.callback(0, CMD_EJECT, EJECT_BYTES, 0, bytearray(EJECT_BYTES))
+        finally:
+            disk.close()
+        assert reply == b"\x00" * EJECT_BYTES
+        assert image.read_bytes() == pattern(4096)
+
+
+def test_a_guest_eject_through_the_real_bus():
+    ram = RAM(RAM_SIZE)
+    controller = IOController(ram)
+    with drive() as d:
+        d.disc("demo.bin", b"y" * 16)
+        d.cd.insert(d.dir / "demo.bin")
+        controller.register_channel(CH_CD, IOChannel(d.cd.callback, name="CD"))
+
+        ram.write_word(IO_START + IOHeader.IO_R_W, 0)
+        ram.write_word(IO_START + IOHeader.COMMAND, CMD_EJECT)
+        ram.write_word(IO_START + IOHeader.LENGTH, EJECT_BYTES)
+        ram.write_word(IO_START + IOHeader.ADDRESS, 0)
+        ram.write_word(IO_START + IOHeader.IO_CHANNEL, CH_CD)
+        controller.update()
+
+        base = IO_START + IOHeader.USABLE_AFTER
+        assert ram.read_word(IO_START + IOHeader.RETURN_DATA) == EJECT_BYTES
+        assert (ram.read_word(base), ram.read_word(base + 4)) == (1, 2)
+        assert d.cd.status()["present"] is False
 
 
 # --- uploads -----------------------------------------------------------------
