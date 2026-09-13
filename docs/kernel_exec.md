@@ -65,7 +65,9 @@ up and returns to the shell, which prints the next prompt.
    }
    ```
 
-   The loop is there because the shell can exit (Q2).
+   The loop restarts the shell if it exits, which is only one answer to Q2.
+   The other is to print a message and stop, which is what the prototype's
+   kernel does (kernel.md §16, P4).
 
 ---
 
@@ -245,7 +247,7 @@ write the header, the image and the offsets. The BIOS path keeps running raw
 ## 8. What each piece is
 
 **The kernel** (`kernel.c`, built at its fixed address)
-- `main`: mount, fill the table, start the console, loop on the shell (§2)
+- `main`: mount, fill the table, start the console, start the shell (§2)
 - `exec`: header, placement, load, patch, call, clean up (§3, steps 6–14)
 - a record for each running program: parent, memory, open files, arguments
 - the console: text grid, scrolling, line input

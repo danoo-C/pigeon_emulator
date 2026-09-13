@@ -1,9 +1,10 @@
 """P5 (docs/kernel.md §16): P4's kernel, but programs come from a real PigeonFS disk.
 
-The kernel includes fs.c, mounts CH_HDD, and exec loads /bin/<name>.bin with
-fs_load straight into the program's place in memory (header just below it),
-then patches it. An `ls` program lists /bin through a kernel call. The disk
-image is built with tools/pfs.py."""
+The kernel includes fs.c, mounts CH_HDD, and exec loads the path it is given
+with fs_load straight into the program's place in memory (header just below
+it), then patches it. The shell, not the kernel, turns a name like `ls` into
+/bin/ls.bin. An `ls` program lists /bin through a kernel call. The disk image
+is built with tools/pfs.py."""
 import atexit
 import shutil
 import subprocess
@@ -21,8 +22,7 @@ _src = (HERE / "p4_kernel.py").read_text()
 exec(_src[:_src.index("kimg, ksym = build_fixed")])     # KERNEL, KASM, SYS_H, APPS, EXPECTED
 
 NEW_EXEC = r'''
-int k_exec(char *name, int argc, char **argv) {
-    char path[48];
+int k_exec(char *path, int argc, char **argv) {
     unsigned *h;
     unsigned size;
     unsigned nrel;
@@ -37,9 +37,6 @@ int k_exec(char *name, int argc, char **argv) {
     if (depth + 1 >= MAXDEPTH) return -5;
     if (depth == 0) base = POOL;
     else base = (((*(unsigned *)procs[depth].heap_ptr_at) + 7u) & 0xFFFFFFF8u) + 32u;
-    strlcpy(path, "/bin/", 48u);
-    strlcat(path, name, 48u);
-    strlcat(path, ".bin", 48u);
     got = fs_load(path, (void *)(base - 32u), TOP - base);
     if (got == FS_ENOENT) return -1;
     if (got < 0) return got;
@@ -98,7 +95,8 @@ K9 = K9.replace("    t[3] = (unsigned)&w_exit;", "    t[3] = (unsigned)&w_exit;\
 K9 = K9.replace('    k_puts("kernel up\\n");',
                 '    if (fs_mount(CH_HDD) < 0) {\n        k_puts("no disk\\n");\n        return -1;\n    }\n'
                 '    k_puts("kernel up\\n");', 1)
-assert "w_dirent" in K9 and "fs_mount" in K9
+K9 = K9.replace('k_exec("sh", 1, shell_argv)', 'k_exec("/bin/sh.bin", 1, shell_argv)', 1)
+assert "w_dirent" in K9 and "fs_mount" in K9 and "/bin/sh.bin" in K9
 KASM9 = KASM + "\nw_dirent:\n    DI\n    CALL k_dirent\n    EI\n    RET\n"
 
 DIRENT = r'''
@@ -130,6 +128,27 @@ assert old in APPS9["sh"]
 APPS9["sh"] = APPS9["sh"].replace(
     old, '    a[0] = "ls"; a[1] = "/bin"; a[2] = (char *)0;\n'
          '    report("ls", sys_exec("ls", 2, a));\n' + old, 1)
+
+# The kernel's exec takes a path. The shell finds the program: a name
+# without a '/' becomes /bin/<name>.bin.
+LOOKUP = r'''
+int run_program(char *name, int argc, char **argv) {
+    char path[48];
+    if (strchr(name, '/') != (char *)0) return sys_exec(name, argc, argv);
+    strlcpy(path, "/bin/", 48u);
+    strlcat(path, name, 48u);
+    strlcat(path, ".bin", 48u);
+    return sys_exec(path, argc, argv);
+}
+'''
+assert APPS9["sh"].startswith(SYS_H)
+body = APPS9["sh"][len(SYS_H):]
+APPS9["sh"] = "#include <pigeon/string.h>\n" + SYS_H + LOOKUP + body.replace("sys_exec(", "run_program(")
+
+# A program that runs another without the shell passes the path itself.
+for name in ("hello", "div0"):
+    assert f'sys_exec("{name}"' in APPS9["nested"]
+    APPS9["nested"] = APPS9["nested"].replace(f'sys_exec("{name}"', f'sys_exec("/bin/{name}.bin"')
 
 kimg, ksym = build_fixed(K9, KASM9)
 blobs = {name: build_app(text) for name, text in APPS9.items()}

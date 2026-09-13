@@ -395,7 +395,9 @@ A first set of calls is in kernel_exec.md §8.
 **Files:** new, built at `0x20000`
 
 **At boot:** mount the disk, fill in the system-call and vector tables, set up
-the console, and start `/bin/sh.bin` — again, if it ever exits.
+the console, and start `/bin/sh.bin`. Whether the kernel starts the shell again
+when it exits, or stops, is still open (kernel_exec.md Q2). The prototype's
+kernel stops.
 
 **Running a program** (P4, P5):
 
@@ -412,7 +414,7 @@ the console, and start `/bin/sh.bin` — again, if it ever exits.
 display back at the screen, stop timers it started, empty the input queues,
 and close files it left open.
 
-**Size.** P5's kernel, with `fs.c`, was 123,552 bytes.
+**Size.** P5's kernel, with `fs.c`, was 123,192 bytes.
 
 ---
 
@@ -629,7 +631,7 @@ below.
 | **P2** | A compiled workload — a sort, a sieve, recursion, function pointers; 119,032 instructions — interrupted after every instruction, and every 2, 3, 7 and 101 | The same result every time; 119,006 interrupts at every instruction; stack and `F` restored. **Controls:** `IRET` not restoring the flags never halted, or gave a wrong result at every 7th; a handler using the interrupted `F` never halted |
 | **P3** | A program asking the timer for its status 2,000 times, while a handler does IO | Unprotected: 2,000 wrong when interrupted every 1, 3 or 7 instructions; 923 at 31; 394 at 101; 33 at 1,009. `DI`/`EI` around the program's IO: 0. The handler saving the header: 0 |
 | **P4** | A kernel with the system-call and vector tables and relocation. It runs a shell as a relocated program, which runs: `hello` with arguments and `malloc`; `exit(42)` from 50 calls deep; a divide by zero 20 calls deep; a jump into data; a loop stopped by break; and a program that runs two more | All 17 lines of console output exactly right — with no timer, and with a timer every 997, 13 and 1 instructions (61,827 interrupts). Three levels deep; the parent's heap intact; memory reused; stack and `F` restored at the end |
-| **P5** | P4 with `fs.c` in the kernel, the programs as files in `/bin` on a PigeonFS image made by `pfs.py`, and an `ls` program listing `/bin` through a kernel call | The same output plus a correct listing, with a timer every instruction too. Programs were loaded by 26 `READ_DMA` transfers, with no block reads through the IO window |
+| **P5** | P4 with `fs.c` in the kernel, the programs as files in `/bin` on a PigeonFS image made by `pfs.py`, the shell turning a name into `/bin/<name>.bin` for the kernel's `exec`, which takes a path, and an `ls` program listing `/bin` through a kernel call | The same output plus a correct listing, with a timer every instruction too. Programs were loaded by 28 `READ_DMA` transfers, with no block reads through the IO window |
 | **P6** | Three relocated programs switched by a timer interrupt | §14. **Control:** a print without `DI`/`EI` lost one character of 280 |
 | **P7** | The cost of checking for interrupts, on copies of `Machine.run`'s loop; medians of 5 runs of 3.57 million instructions | CPython, 2.74 million IPS: every instruction −4.1%, in the slow path +1.4%. PyPy, 34.8 million IPS: +1.9% and +0.7%. Only CPython's every-instruction check cost more than the noise |
 
