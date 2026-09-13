@@ -1,7 +1,7 @@
 # The C libraries
 
-Six headers, compiled by `pigeon-cc` and covered by execution tests in
-`tests/test_libs.py` and `tests/test_fs.py`. Every test compiles the C and
+Seven headers, compiled by `pigeon-cc` and covered by execution tests in
+`tests/test_libs.py`, `tests/test_fs.py` and `tests/test_cdlib.py`. Every test compiles the C and
 *runs* it.
 
 | Header | What it gives you |
@@ -9,6 +9,7 @@ Six headers, compiled by `pigeon-cc` and covered by execution tests in
 | `<pigeon/mem.h>` | `memcpy` `memmove` `memset` `memcmp`, `malloc` `calloc` `free`, `heap_used` |
 | `<pigeon/string.h>` | `strlen` `strcmp` `strlcpy` `strlcat` `strchr` …, numbers as text (`utoa` `itoa` `strtou` `atoi`), `isdigit` and friends |
 | `<pigeon/fs.h>` | files and directories on the HDD channels: `fs_open`/`read`/`write`/`seek`, `fs_mkdir`/`readdir`/`rename`, `fs_load`/`fs_save`, a current directory |
+| `<pigeon/cd.h>` | the CD drive: `cd_info`, `cd_read`, `cd_has_fs`/`cd_label` for a disc that carries a filesystem, and `cd_save` to copy a disc onto the current volume |
 | `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped |
 | `<pigeon/input.h>` | mouse position/buttons/edges, keyboard characters, key edges, held-key state |
 | `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
@@ -171,3 +172,27 @@ instructions, so a 100 KB file takes about 0.4 s to load.
 `user/files.c` is the worked example — a file browser that walks
 directories, reads text files and writes notes, and reports every refusal
 through `fs_strerror()`. Run it with `python3 start_emulator.py files --run`.
+
+## cd
+
+The CD drive on channel 6: a removable, read-only disc that the display front
+ends put in and take out while the machine runs. A disc is raw bytes. If it
+happens to carry a PigeonFS image it is also a read-only volume, and
+`fs_mount(CH_CD)` mounts it with the ordinary `<pigeon/fs.h>`.
+
+```c
+cd_info_t disc;
+if (cd_info(CH_CD, &disc) == CD_OK) {
+    fs_mount(CH_HDD);
+    cd_save(CH_CD, NULL);            /* the whole disc, under its own name */
+}
+```
+
+**Including it compiles `fs.c` too** — about 99 KB — because `cd_save` writes
+through the filesystem. **Its errors are -101 and down**, so one can never be
+mistaken for an `FS_*` code, and `cd_strerror` names both kinds.
+**`cd_present` and `cd_has_fs` answer 1 or 0, never an error**, so
+`if (cd_present(CH_CD))` is safe; `cd_info` says why an answer is 0.
+**A disc can be swapped while you are reading it**: compare `cd_generation`
+before and after. `cd_save` does, removes the mixed copy, and returns
+`CD_ECHANGED`. The design is in [docs/cd-drive.md](../docs/cd-drive.md).

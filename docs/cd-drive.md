@@ -1,9 +1,10 @@
 # A CD drive: removable discs the host picks
 
-> **Status: phases 0 to 4 are done** — the device
+> **Status: phases 0 to 5 are done** — the device
 > (`emulator/devices/cd.py`, `tests/test_cd.py`), read-only volumes in
-> `fs.c` (`FS_EROFS`), the HTTP surface with its config, and both front
-> ends. What is left is the guest library, `<pigeon/cd.h>`, and the demo. **Every decision is
+> `fs.c` (`FS_EROFS`), the HTTP surface with its config, both front ends,
+> and the guest library `<pigeon/cd.h>`. What is left is the demo,
+> `user/disc.c`. **Every decision is
 > settled**; the log is in [§15](#15-decision-log).
 >
 > Phase 0 **measured the two claims §3 and §5 rest on**, and both held: a
@@ -441,11 +442,14 @@ it gets `"cd_port": 1236`.
 ## 9. The guest library: `<pigeon/cd.h>`
 
 ```c
-#define CD_OK        0
-#define CD_ENODISC (-1)   /* the drive is empty                */
-#define CD_ENODEV  (-2)   /* no CD drive on this channel       */
-#define CD_EINVAL  (-3)
-#define CD_EIO     (-4)   /* a read came back short mid-disc   */
+#define CD_OK            0
+#define CD_ENODISC    (-101)   /* the drive is empty                     */
+#define CD_ENODEV     (-102)   /* no CD drive on that channel            */
+#define CD_EINVAL     (-103)
+#define CD_EIO        (-104)   /* the disc ended before it should have   */
+#define CD_ENOFS      (-105)   /* the disc carries no PigeonFS           */
+#define CD_ECHANGED   (-106)   /* the disc was swapped during the call   */
+char *cd_strerror(int err);    /* CD_* and FS_* codes both               */
 
 #define CD_NAME_MAX 31
 
@@ -456,15 +460,34 @@ typedef struct {
     char     name[32];
 } cd_info_t;
 
-int      cd_info (unsigned channel, cd_info_t *out);
-int      cd_present(unsigned channel);
+int      cd_info      (unsigned channel, cd_info_t *out);
+int      cd_present   (unsigned channel);        /* 1 or 0, never an error */
+int      cd_has_fs    (unsigned channel);        /* 1 or 0, never an error */
 unsigned cd_generation(unsigned channel);
-int      cd_read (unsigned channel, unsigned offset, void *buf, unsigned n);
-
-int      cd_has_fs(unsigned channel);          /* 1 if the disc carries PigeonFS */
-int      cd_label (unsigned channel, char *out, unsigned size);
-int      cd_save  (unsigned channel, char *path);   /* the whole disc -> a file */
+int      cd_read      (unsigned channel, unsigned offset, void *buf, unsigned n);
+int      cd_label     (unsigned channel, char *out, unsigned size);
+int      cd_save      (unsigned channel, char *path);   /* NULL: the disc's name */
 ```
+
+**Revised while it was built** — each of these changed the API above from
+the one first written here, and each for a reason found in the code:
+
+- **Errors moved to -101 and down.** The draft numbered them -1 to -4, which
+  are exactly `FS_ENOENT` to `FS_ENOTDIR` — and `cd_save()` hands back either
+  kind through the same `int`. `cd_strerror()` names both ranges.
+- **Two codes were added.** `CD_ENOFS`, for a label asked of a raw disc, and
+  `CD_ECHANGED`, for a disc swapped while `cd_save()` was copying it.
+- **`cd_present()` and `cd_has_fs()` never return a negative code.**
+  `if (cd_present(ch))` has to be safe, and in C a negative error is true.
+  Why an answer is 0 — no disc, or no drive — is `cd_info()`'s to say.
+- **`cd_info()` fills `*out` even on `CD_ENODISC`**, so a program can watch
+  the generation while the drive is empty.
+- **`cd_save()` removes a copy that fails partway or whose disc was swapped**,
+  rather than leaving a file that looks complete.
+- **`cd.h` defines `NULL` itself.** Its own example is
+  `cd_save(CH_CD, NULL)`, and that did not compile in a program including
+  only `cd.h`: every unit is preprocessed on its own, so the `NULL` that
+  `cd.c` gets from `<pigeon/string.h>` never reaches the program.
 
 **Every call takes a channel**, the way `fs_mount` does, so a second drive on
 channel 7 needs no new API. `CH_CD` is the one to pass.
@@ -559,6 +582,7 @@ a text file that simply has no filesystem around it.
 | `display/display.py` | three buttons, the overlay list, the tkinter dialog, the status label, a minimum window width |
 | `display/index.html` | three buttons, the file input, the status span |
 | `lib/pigeon/cd.h`, `lib/pigeon/cd.c` | new |
+| `tests/test_cdlib.py` | new: the library, compiled and run on the emulator |
 | `user/disc.c` | new |
 | `tests/test_cd.py` | new |
 | `tests/test_fs.py` | a read-only section |
@@ -607,7 +631,7 @@ a CD device on channel 6:
 | Two volumes | `2:/x` and `6:/x` are different files; a copy from one to the other lands on the writable one |
 | Regression | the existing 141 tests still pass — a writable disk must not have become read-only |
 
-**The guest library**, the way `tests/test_libs.py` does it: compile a C
+**The guest library**, in `tests/test_cdlib.py`, the way `tests/test_libs.py` does it: compile a C
 program with `cd.c`, run it on a `Machine` whose drive holds a temporary file,
 check what `main` returns. The one that matters is the round trip — a known
 pattern on the disc, read back through `cd_read` in pieces that do not divide
@@ -663,7 +687,17 @@ Each one runs and is testable before the next.
    the guest while the picker is open, opening it releases held keys,
    navigation clamps, the bar never overlaps at pixel size 1 or 16, and
    `tkinter` is never imported at module level.
-5. **`<pigeon/cd.h>`** and its tests on the emulator.
+5. **`<pigeon/cd.h>`** and its tests on the emulator. ***Done*** —
+   `lib/pigeon/cd.c` and 22 tests in `tests/test_cdlib.py`, reusing the disc
+   harness phase 1 added to `tests/test_fs.py`. The API that came out of it
+   differs from the one first written in §9 in six places, and §9 now says
+   what changed and why. Eight deliberate breakages were each made to fail
+   the tests. One did not at first: deleting the guard that keeps probes
+   away from HID, the timer and the display broke nothing, because command 8
+   means nothing on any of them yet, so a test judging by the outcome could
+   not see the rule. The test now watches what reaches those devices, and
+   asserts it is nothing. A program calling every function in the library
+   compiles to 109,468 bytes, nearly all of it `fs.c`.
 6. **`user/disc.c`** and the docs.
 
 ---
