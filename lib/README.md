@@ -165,9 +165,11 @@ between two calls loses nothing. **A disk is only formatted on purpose:**
 design, the limits and every error code are in
 [docs/filesystem.md](../docs/filesystem.md).
 
-It's the biggest library here. A program that includes it is about 99 KB,
-and moving one 512-byte block through the IO window costs about 4,350
-instructions, so a 100 KB file takes about 0.4 s to load.
+It's the biggest library here: a program that includes it is about 99 KB.
+Blocks move by DMA, straight between the disk and RAM, at 84 instructions a
+transfer of any length, so a 100 KB file loads in about 30 ms. On a disk
+without DMA, or into a buffer the disk will not reach, it falls back to the IO
+window, where one block costs about 4,350 instructions.
 
 `user/files.c` is the worked example — a file browser that walks
 directories, reads text files and writes notes, and reports every refusal

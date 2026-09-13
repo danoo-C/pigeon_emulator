@@ -995,7 +995,9 @@ def disk_states(disk):
 
         def recording(read_write, command, length, address, data):
             reply = device(read_write, command, length, address, data)
-            if command == 3:                    # HDD WRITE
+            # A write by the window (3) or, since filesystem phase 6, by DMA
+            # (7): either one is a moment the disk on the host has changed.
+            if command in (3, 7):
                 states.append(disk.read_bytes())
             return reply
 

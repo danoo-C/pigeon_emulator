@@ -52,6 +52,16 @@
 #define FS__HDD_WRITE    3u
 #define FS__HDD_FLUSH    5u
 
+/* DMA (docs/filesystem.md section 9): the disk copies straight to or from
+ * RAM, so a block costs one command instead of a memcpy through the IO
+ * window -- and a run of any length is still one command. Sent with R/W 0,
+ * because that is the only direction the controller copies a reply back
+ * in; the device reads [ram_address, byte_count] out of the window itself. */
+#define FS__HDD_READ_DMA  6u
+#define FS__HDD_WRITE_DMA 7u
+#define FS__WINDOW_BLOCKS 8u            /* what one IO window moves        */
+#define FS__DMA_BLOCKS    65536u        /* what one DMA command may: 32 MiB */
+
 /* The CD drive answers 0-5 exactly as a disk does, which is the whole
  * reason a disc mounts through the code above without knowing it is a
  * disc. Command 8 is the one thing a disk cannot answer, and its first
@@ -140,6 +150,10 @@ struct __fs_where {
 };
 
 static struct __fs_slot   __fs_cache[FS__SLOTS];
+
+/* Per channel: 0 not asked yet, 1 no DMA, 2 DMA. A device cannot change
+ * kind while the machine runs, so asking once per channel is enough. */
+static unsigned __fs_dma_state[8];
 static struct __fs_volume __fs_vols[FS__VOLUMES];
 static struct __fs_file   __fs_files[FS__FILES];
 static unsigned __fs_clock;
@@ -187,24 +201,89 @@ static unsigned __fs_io(unsigned channel, unsigned rw, unsigned command,
     return IO_RETLEN;
 }
 
-/* A read past the end of the image comes back short -- the BIOS loader
- * relies on that to find the end of a program -- so the rest is zeroed
- * here. Up to 8 blocks: one IO window. */
-static void __fs_blk_read(unsigned channel, unsigned block, unsigned count,
-                          unsigned char *buf) {
-    unsigned want = count << 9;
-    unsigned got = __fs_io(channel, 0u, FS__HDD_READ, want, block << 9);
-    if (got > want) got = 0u;           /* 0xFFFFFFFF: no device, checked at mount */
-    memcpy(buf, (void *)IO_DATA, got);
-    if (got < want) memset(buf + got, 0, want - got);
+/* Does the disk on this channel take the DMA commands?
+ *
+ * A zero-length READ_DMA at the program's own address. A disk that knows
+ * the command answers one word; one from before it answers LENGTH zero
+ * bytes, as it does any unknown command; the CD drive does the same; an
+ * empty channel answers 0xFFFFFFFF. So one fs.c runs on all of them.
+ * Only reached for a channel __fs_disk_blocks() has already accepted. */
+static unsigned __fs_dma(unsigned channel) {
+    if (channel >= 8u) return 0u;
+    if (__fs_dma_state[channel] == 0u) {
+        IO_DATAW[0] = PROGRAM_LOAD_ADDR;
+        IO_DATAW[1] = 0u;
+        __fs_dma_state[channel] =
+            (__fs_io(channel, 0u, FS__HDD_READ_DMA, 8u, 0u) == 4u) ? 2u : 1u;
+    }
+    return (__fs_dma_state[channel] == 2u) ? 1u : 0u;
 }
 
-/* IO_RW = 1 is what hands the window to the device. With 0 the
- * controller passes it a zeroed buffer, and the disk gets zeros. */
+/* How many contiguous blocks one transfer may carry. */
+static unsigned __fs_run_max(unsigned channel) {
+    return __fs_dma(channel) ? FS__DMA_BLOCKS : FS__WINDOW_BLOCKS;
+}
+
+/* A read past the end of the image comes back short -- the BIOS loader
+ * relies on that to find the end of a program -- and the rest is zeroed:
+ * by the device on the DMA path, here on the window path.
+ *
+ * A DMA read the device refuses falls back to the window. It refuses a
+ * buffer below the program, and fs_load() straight into the framebuffer
+ * is a perfectly good thing for a program to do. The fallback takes any
+ * count, in window-sized pieces, because a run sized for DMA can arrive
+ * here too. */
+static void __fs_blk_read(unsigned channel, unsigned block, unsigned count,
+                          unsigned char *buf) {
+    unsigned want;
+    unsigned got;
+    unsigned run;
+
+    if (__fs_dma(channel)) {
+        IO_DATAW[0] = (unsigned)buf;
+        IO_DATAW[1] = count << 9;
+        if (__fs_io(channel, 0u, FS__HDD_READ_DMA, 8u, block << 9) == 4u
+                && IO_DATAW[0] <= (count << 9)) {
+            return;
+        }
+    }
+    while (count > 0u) {
+        run = (count > FS__WINDOW_BLOCKS) ? FS__WINDOW_BLOCKS : count;
+        want = run << 9;
+        got = __fs_io(channel, 0u, FS__HDD_READ, want, block << 9);
+        if (got > want) got = 0u;       /* 0xFFFFFFFF: no device, checked at mount */
+        memcpy(buf, (void *)IO_DATA, got);
+        if (got < want) memset(buf + got, 0, want - got);
+        buf = buf + want;
+        block = block + run;
+        count = count - run;
+    }
+}
+
+/* On the window path IO_RW = 1 is what hands the window to the device;
+ * with 0 the controller passes it a zeroed buffer, and the disk gets
+ * zeros. A refused DMA write has not touched the disk, so the fallback
+ * writing the whole run again is safe. */
 static void __fs_blk_write(unsigned channel, unsigned block, unsigned count,
                            unsigned char *buf) {
-    memcpy((void *)IO_DATA, buf, count << 9);
-    __fs_io(channel, 1u, FS__HDD_WRITE, count << 9, block << 9);
+    unsigned run;
+
+    if (__fs_dma(channel)) {
+        IO_DATAW[0] = (unsigned)buf;
+        IO_DATAW[1] = count << 9;
+        if (__fs_io(channel, 0u, FS__HDD_WRITE_DMA, 8u, block << 9) == 4u
+                && IO_DATAW[0] == (count << 9)) {
+            return;
+        }
+    }
+    while (count > 0u) {
+        run = (count > FS__WINDOW_BLOCKS) ? FS__WINDOW_BLOCKS : count;
+        memcpy((void *)IO_DATA, buf, run << 9);
+        __fs_io(channel, 1u, FS__HDD_WRITE, run << 9, block << 9);
+        buf = buf + (run << 9);
+        block = block + run;
+        count = count - run;
+    }
 }
 
 /* --- the block cache ----------------------------------------------------
@@ -1111,11 +1190,11 @@ int fs_read(int fd, void *buf, unsigned n) {
         block = __fs_file_block(v, f, index);
         if (block == 0u) return done > 0u ? (int)done : FS_ECORRUPT;
         if (offset == 0u && n - done >= FS__BLOCK) {
-            /* Whole blocks go straight from the window into the caller's
-             * buffer -- one copy, not two -- as many contiguous ones as
-             * fit in the window. */
+            /* Whole blocks go straight into the caller's buffer -- one
+             * copy at most, none with DMA -- as many contiguous ones as
+             * one transfer carries. */
             run = 1u;
-            while (run < 8u && run < ((n - done) >> 9)
+            while (run < __fs_run_max(v->channel) && run < ((n - done) >> 9)
                    && __fs_fat(v, block + run - 1u) == block + run) {
                 run++;
             }
@@ -1174,7 +1253,7 @@ int fs_write(int fd, void *buf, unsigned n) {
              * A new block that is not contiguous ends the run; it is
              * already linked on, and the next pass starts with it. */
             run = 1u;
-            while (run < 8u && run < ((n - done) >> 9)) {
+            while (run < __fs_run_max(v->channel) && run < ((n - done) >> 9)) {
                 if (__fs_write_block(v, f, index + run, &chain) != block + run) break;
                 run++;
             }

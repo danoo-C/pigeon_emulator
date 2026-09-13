@@ -30,7 +30,8 @@ a MemoryError and no PC to blame it on.
 
 This device is the only one that writes to RAM outside the IO data
 window. It can, because it is constructed with the RAM it snapshots; the
-bus itself deliberately has no general DMA path, so every other device
+bus itself still has no general DMA path -- the HDD gained its own pair of
+DMA commands in filesystem phase 6, and does the same -- so every other device
 still just returns bytes.
 """
 import logging

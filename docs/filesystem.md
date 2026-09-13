@@ -1,8 +1,8 @@
 # PigeonFS: a filesystem for the pigeon machine
 
-> **Status: phases 0 to 5 are done**: the string library, the host tool, the
-> disk's new home, the guest library with its tests, and the demo program.
-> What's left is HDD DMA (phase 6). **Every decision is settled** (the log is in
+> **Status: every phase is done**, 0 to 6: the string library, the host tool,
+> the disk's new home, the guest library with its tests, the demo program, and
+> HDD DMA with a new measurement. **Every decision is settled** (the log is in
 > [§14](#14-decision-log)). The numbers in §1 and §7 were **measured** on this
 > emulator: a probe program was compiled, run and counted. Anything that was
 > reasoned but not run is marked *unverified*.
@@ -19,7 +19,7 @@
 | API | POSIX-style file descriptors, with `fs_load` / `fs_save` and line helpers (`fs_gets` / `fs_puts`) on top |
 | Names | 1 to 31 bytes, case-sensitive |
 | Timestamps | None. An `mtime` field is reserved and always zero |
-| Block copy path | The IO window copy now; **HDD DMA commands as a later, separate phase** (§9) |
+| Block copy path | **HDD DMA commands** (§9.1), falling back to the IO window copy on a disk without them or for a buffer the disk will not reach |
 | Prerequisite | A small string library, `<pigeon/string.h>`, is built first (§10) |
 
 ---
@@ -39,7 +39,8 @@ Because it is 32 bits wide, no disk can be bigger than 4 GiB.
 | 1 `CH_USERPROG` | the program's own `.bin`, opened `r+b` | The BIOS reads it until a short chunk comes back, so it loads **the whole file** into RAM. Nothing checks the size |
 | 2 `CH_HDD` | the image named by `"disk"` in `config.json` | The HDD device creates it full of zeros, at 4 MiB, if it is missing |
 
-**Everything passes through the 4 KB window.** The device returns bytes and
+**Everything passes through the 4 KB window** — or did, until phase 6 gave
+the HDD its two DMA commands (§9.1). The device returns bytes and
 the CPU copies them. One command moves at most 4096 bytes. On a write the
 controller takes `LENGTH` bytes starting at the window base, so a `LENGTH` over
 4096 would send part of the framebuffer as payload.
@@ -85,7 +86,8 @@ with a real HDD on channel 2:
 Almost all of that is the compiled `memcpy`, at about 34 instructions per word.
 Programming the IO header costs next to nothing by comparison. That puts a
 ceiling of **~290 KB/s** on disk throughput, and the design is built to copy as
-few blocks as possible.
+few blocks as possible. (That was the window. With DMA one transfer is 84
+instructions at any length — §7.)
 
 ---
 
@@ -612,21 +614,32 @@ reported by GET_SIZE.
 
 ## 7. Performance
 
-These are measured on the finished library: whole guest programs on a 4 MiB
-disk, each starting with a cold cache, with the program's own startup
-subtracted.
+Measured on the finished library, twice: on an HDD with the phase 6 DMA
+commands, which is what every `Machine` has, and on one built without them,
+which is the window path the library falls back to. Whole guest programs on a
+4 MiB disk, each starting with a cold cache; each figure is a program doing the
+operation minus the same program without it. The window column reproduces the
+phase 5 figures to within 3%, so the two columns are comparable.
 
-| Operation | Instructions | ≈ time at 2.5M IPS |
-|---|---|---|
-| `fs_mount` | 6,269 | 2.5 ms |
-| `fs_open("/a/b/c.txt")`, cold cache | 21,687 | 8.7 ms |
-| `fs_load`, 4 KB | 50,565 | 20 ms |
-| `fs_save`, 4 KB, a new file | 84,609 | 34 ms |
-| `fs_load`, 100 KB | 932,437 | 0.37 s |
-| `fs_save`, 100 KB, a new file | 1,094,893 | 0.44 s |
-| `fs_format`, 4 MiB | 1,148,704 | 0.46 s |
+| Operation | Window | DMA | Faster | DMA at 2.5M IPS |
+|---|---|---|---|---|
+| `fs_mount` | 6,559 | 2,250 | 2.9× | 0.9 ms |
+| `fs_open("/a/b/c.txt")`, cold cache | 21,938 | 9,008 | 2.4× | 3.6 ms |
+| `fs_load`, 4 KB | 50,672 | 8,206 | 6.2× | 3.3 ms |
+| `fs_save`, 4 KB, a new file | 79,997 | 20,401 | 3.9× | 8.2 ms |
+| `fs_load`, 100 KB | 958,273 | 76,781 | 12.5× | 31 ms |
+| `fs_save`, 100 KB, a new file | 1,111,861 | 208,575 | 5.3× | 83 ms |
+| `fs_load`, 1 MiB | 9,746,432 | 802,166 | 12.2× | 0.32 s |
+| `fs_format`, 4 MiB | 1,162,321 | 875,004 | 1.3× | 0.35 s |
 
-The disk isn't what is slow; the copy loop is, and phase 6 (§9) removes it.
+**One transfer on its own is now 84 instructions at any length.** A program
+that does nothing but one `READ_DMA` measures 84 for 512 bytes, 84 for 4 KB and
+84 for 1 MiB, against 4,324 for one block through the window and a `memcpy`.
+So the copy is no longer what a large load pays for. What is left — about 390
+instructions a block on the 1 MiB load — is `fs.c`'s own loop, most likely
+walking the FAT a block at a time to find each contiguous run *(reasoned from
+the totals, not profiled)*. `fs_format` barely moves because its cost was never
+the copy *(reasoned)*: it builds and writes the FAT and the root.
 
 The code isn't small either. A program that includes `<pigeon/fs.h>`
 compiles to about 99 KB together with `mem.c` and `string.c`, and the BIOS
@@ -723,9 +736,42 @@ bytes, so `IO_RETLEN` is 8. One that does answers with a single word, so
 `IO_RETLEN` is 4. The library probes once at mount and uses whichever the
 device supports, so one `fs.c` runs on either.
 
-This deliberately changes a stated principle: the README says "the bus itself
-deliberately has no general DMA path". That sentence gets updated in phase 6.
-The block device (§6.1) is the only part of `fs.c` that changes.
+This changed a stated principle, and the sentence stating it turned out to be
+in `emulator/devices/display_io.py`'s docstring, not the README: "the bus itself
+deliberately has no general DMA path". It now says the HDD has its own pair of
+DMA commands. The bus still has no general one.
+
+### 9.1 As built, and measured
+
+Phase 6 followed the plan above, with four differences:
+
+- **Both commands are sent with `R/W = 0`.** `IOController` copies a device's
+  reply back into the window only for `R/W = 0`, so a command sent the other
+  way could never say how many bytes it moved. The device reads
+  `[ram_address, byte_count]` out of RAM itself; it holds the RAM for the
+  transfer anyway. `tests/test_hdd.py` has a test of what `R/W = 1` does
+  instead, which fails the day that stops being true.
+- **The library probes lazily, once per channel, not at mount.** The first block
+  transfer on a channel asks, and the answer is kept in a small table, so
+  `fs_format()` gets it too with no hook of its own. The probe is a zero-length
+  `READ_DMA` at `PROGRAM_LOAD_ADDR`: 4 bytes back means DMA; anything else —
+  8 zero bytes from a disk without it, the same from the CD drive, `0xFFFFFFFF`
+  from an empty channel — means the window.
+- **A refused transfer falls back to the window, per call.** The disk refuses a
+  buffer below `PROGRAM_LOAD_ADDR`, and `fs_load()` straight into the
+  framebuffer is a perfectly good thing to do. The fallback takes any number of
+  blocks, in window-sized pieces, because a run sized for DMA can reach it.
+- **The run cap in `fs_read()` and `fs_write()` changed too**, so the block
+  device was not quite the only part of `fs.c` that did. A run was capped at 8
+  blocks, one window; with DMA the cap is 65,536. Without that, "any length in
+  one command" would still have stopped at 4 KB.
+
+The prediction in the table above was ~40 instructions a transfer. The
+measurement is **84**, constant from 512 bytes to 1 MiB (§7). On a read the
+device zero-fills whatever the disk did not have, so the guest's buffer is
+always fully defined, and it assigns exactly the requested length into RAM:
+a shorter slice assignment would shrink Python's `bytearray` and slide every
+address above the buffer.
 
 ---
 
@@ -819,6 +865,9 @@ int tolower(int c);  int toupper(int c);
 | `user/files.c`, `tests/test_files.py` | the demo program and its tests (phase 5) |
 | `firmware/bios.asm`, `tests/test_loader.py` | the boot progress bar, clamped (phase 5, §11.1) |
 | `emulator/devices/hdd.py`, `README.md` | the DMA commands and the IO bus text (phase 6) |
+| `emulator/machine.py`, `emulator/devices/display_io.py` | both disks get the RAM; the "no general DMA path" sentence (phase 6) |
+| `lib/pigeon/fs.c` | the block device's DMA path and its fallback, the per-channel probe, the run cap (phase 6, §9.1) |
+| `tests/test_hdd.py`, `tests/test_fs_nodma.py`, `tests/test_fs.py` | the commands; the fast path really taken; all of `test_fs.py` again without DMA; the crash test counting DMA writes (phase 6) |
 
 Nothing changes in the IO controller, the memory map or the compiler. No test
 mentions the old disk path. `build/pigeon_hard_drive.bin` has no PGFS
@@ -920,6 +969,17 @@ cannot quietly make the assertions mean something else.
 | Writing | a note lands in the directory you are standing in, with the bytes typed; `esc` in the editor writes nothing; a new directory appears on the disk |
 | Refusals | delete asks first and a key other than `y` cancels; `rmdir` on a non-empty directory reaches the status line as the library's own `FS_ENOTEMPTY` |
 
+**Phase 6 added two more.** `tests/test_hdd.py` tests the commands on the device —
+refusals, the zero-fill, RAM keeping its size, and the four answers the probe
+can get on the real bus — and then that `fs.c` actually *takes* the fast path:
+a program on a DMA disk sends no window transfer at all, a 200-block file comes
+back in one command, and a buffer in the framebuffer falls back and still gets
+every byte right. `tests/test_fs_nodma.py` runs every test in `test_fs.py` a
+second time on disks with no DMA, so the window path cannot rot now that
+nothing else uses it by default. One existing test needed a change: the crash
+test snapshots the disk after every write, and it had only been counting
+command 3 — with DMA it saw no writes at all, and its own sanity check said so.
+
 ---
 
 ## 13. Phases
@@ -954,7 +1014,8 @@ cannot quietly make the assertions mean something else.
    named keys into it too, so a browser needs only one ordered stream where
    `user/demo.c` needed two.
 6. **HDD DMA commands** and the library's fast path (§9), then a new
-   measurement.
+   measurement. *Done* — §9.1 and §7. A 100 KB load went from 958,273
+   instructions to 76,781, and one transfer is 84 instructions at any length.
 
 ---
 

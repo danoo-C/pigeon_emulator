@@ -305,7 +305,7 @@ that fires the command.
 | Channel | Device | Commands |
 |---|---|---|
 | 1 `CH_USERPROG` | boot disk | as HDD |
-| 2 `CH_HDD` | disk | `0` NOP `1` GET_SIZE `2` READ `3` WRITE `4` TRUNCATE `5` FLUSH |
+| 2 `CH_HDD` | disk | `0` NOP `1` GET_SIZE `2` READ `3` WRITE `4` TRUNCATE `5` FLUSH · `6` READ_DMA `7` WRITE_DMA — straight to and from RAM, any length, with `[address, count]` in the window and R/W 0 so the count comes back |
 | 3 `CH_HID` | input | **real-time:** `1` mouse pos (x≪16\|y) `2` button mask `6` one key's state `7` 32-byte held-key bitmap · **FIFO:** `3` pop character `4` pop mouse edge `5` pop key edge |
 | 4 `CH_TIMER` | timers | `1` START `2` STOP `4` RESET `5` STATUS → `(status, remaining_ms)` |
 | 5 `CH_DISPLAY` | framebuffer | `1` INFO → `(w, h, size)` `2` SET_BASE (page flip, ADDRESS = the buffer to scan out) `3` GET_BASE `4` FILL (ADDRESS = destination, colour in the data window) |

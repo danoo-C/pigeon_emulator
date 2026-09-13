@@ -51,14 +51,14 @@ class Machine:
         # used to do (IsADirectoryError, from the "leave blank to skip" prompt).
         self.user_prog: Optional[HDD] = None
         if program_path:
-            self.user_prog = HDD(program_path)
+            self.user_prog = HDD(program_path, ram=self.ram)
             self.io_controller.register_channel(
                 CH_USERPROG, IOChannel(self.user_prog.callback, name="USERPROG"))
         else:
             log.warning("No user program: channel %d is empty, the BIOS will "
                         "boot into whatever is at the load address", CH_USERPROG)
 
-        self.hdd = HDD(disk_path)
+        self.hdd = HDD(disk_path, ram=self.ram)
         self.hid = HID()
         self.timer = Timer()
         # Registered unconditionally, unlike CH_USERPROG: an unregistered
