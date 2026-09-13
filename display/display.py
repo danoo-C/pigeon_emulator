@@ -2,8 +2,10 @@
 """Pygame front-end for the pigeon emulator's DisplayIO FastAPI server.
 
 Polls GET /frame for the current RGBA framebuffer and renders it scaled
-by an adjustable pixel size. Includes buttons to clear the display and
-to increase/decrease the pixel size.
+by an adjustable pixel size. Includes buttons to clear the display, to
+increase/decrease the pixel size, and to work the CD drive
+(docs/cd-drive.md): load a disc from the emulator's own folders, load one
+from anywhere with a native file dialog, and eject.
 
 Requires pygame and requests, which the emulator itself does NOT need:
 
@@ -103,6 +105,27 @@ BUTTON_COLOR = (70, 70, 70)
 BUTTON_HOVER_COLOR = (100, 100, 100)
 BUTTON_TEXT_COLOR = (230, 230, 230)
 DISCONNECTED_COLOR = (200, 80, 80)
+DISABLED_BUTTON_COLOR = (50, 50, 50)
+DISABLED_TEXT_COLOR = (120, 120, 120)
+DIM_TEXT_COLOR = (160, 160, 170)
+
+# The CD drive's picker, drawn over the framebuffer rather than delegated
+# to a toolkit, so "Load from server" needs nothing beyond pygame.
+PICKER_BG = (28, 28, 34)
+PICKER_BORDER = (90, 90, 100)
+PICKER_SELECTED = (55, 85, 125)
+PICKER_ROW_H = 24
+# Other front ends can change what is in the drive, so this client asks.
+CD_POLL_INTERVAL = 2.0
+CD_TIMEOUT = (0.5, 5.0)
+
+
+def _fmt_size(n):
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
 
 # pygame button index -> HID button index (4 and 5 are the legacy scroll
 # wheel, which the HID event byte has no encoding for, so they are dropped)
@@ -114,18 +137,26 @@ class Button:
         self.rect = pygame.Rect(rect)
         self.label = label
         self.callback = callback
+        self.enabled = True
 
     def draw(self, surface, font, mouse_pos):
-        hovered = self.rect.collidepoint(mouse_pos)
-        color = BUTTON_HOVER_COLOR if hovered else BUTTON_COLOR
+        if not self.enabled:
+            color, ink = DISABLED_BUTTON_COLOR, DISABLED_TEXT_COLOR
+        else:
+            hovered = self.rect.collidepoint(mouse_pos)
+            color = BUTTON_HOVER_COLOR if hovered else BUTTON_COLOR
+            ink = BUTTON_TEXT_COLOR
         pygame.draw.rect(surface, color, self.rect, border_radius=4)
-        text = font.render(self.label, True, BUTTON_TEXT_COLOR)
+        text = font.render(self.label, True, ink)
         text_rect = text.get_rect(center=self.rect.center)
         surface.blit(text, text_rect)
 
     def handle_click(self, pos):
+        # A disabled button still OWNS the click -- it must not fall
+        # through to whatever is behind it -- it just does nothing.
         if self.rect.collidepoint(pos):
-            self.callback()
+            if self.enabled:
+                self.callback()
             return True
         return False
 
@@ -145,6 +176,20 @@ class DisplayClient:
         self.disp_w = info["w"]
         self.disp_h = info["h"]
         self.frame_size = info["size"]
+
+        # The CD server's address comes from /info, the same way the
+        # browser page learns it, so a --cd-port on the emulator needs no
+        # matching flag here. An emulator from before the drive sends none,
+        # and the CD buttons are then disabled rather than failing on click.
+        self.cd_url = info.get("cd_url")
+        # Two sessions, because requests.Session is not safe to share
+        # across threads: one for the poll thread, one for button actions.
+        self.cd_poll_session = requests.Session()
+        self.cd_action_session = requests.Session()
+        self._cd_status = None
+        self._cd_lock = threading.Lock()
+        self._picker = None             # the "Load from server" overlay, when open
+        self._eject_button = None
 
         # Wait for HID server too before starting pygame (or fail gracefully if it's not running yet)
         self._hid_available = True
@@ -192,6 +237,9 @@ class DisplayClient:
         # independently of the render loop, same as display fetch thread
         self._hid_thread = threading.Thread(target=self._hid_keep_alive_loop, daemon=True)
         self._hid_thread.start()
+
+        self._cd_thread = threading.Thread(target=self._cd_poll_loop, daemon=True)
+        self._cd_thread.start()
 
     # --- networking (display server) -------------------------------------------
 
@@ -369,16 +417,279 @@ class DisplayClient:
         self._set_status(f"Pixel size: {self.pixel_size}")
 
     def _build_buttons(self):
-        self.buttons = [
-            Button((10, 6, 70, 28), "Clear", self._send_clear),
-            Button((90, 6, 40, 28), "-", lambda: self._change_pixel_size(-1)),
-            Button((135, 6, 40, 28), "+", lambda: self._change_pixel_size(1)),
-        ]
+        """Lay the bar out from the font's own metrics.
+
+        The first three buttons used to sit at typed x positions, with the
+        "px:" label and the status text at 185 and 280. That held while
+        the bar had three short buttons; "Load from server" alone is wider
+        than all three together, so positions are measured now.
+        """
+        x = 10
+        buttons = []
+
+        def add(label, callback, min_w=40):
+            nonlocal x
+            w = max(min_w, self.font.size(label)[0] + 18)
+            button = Button((x, 6, w, 28), label, callback)
+            buttons.append(button)
+            x += w + 6
+            return button
+
+        add("Clear", self._send_clear, min_w=70)
+        add("-", lambda: self._change_pixel_size(-1))
+        add("+", lambda: self._change_pixel_size(1))
+        self._px_x = x + 4
+        x = self._px_x + self.font.size("px: 16")[0] + 16
+
+        load_server = add("Load from server", self._load_from_server)
+        load_pc = add("Load from PC", self._load_from_pc)
+        self._eject_button = add("Eject", self._eject)
+        if not self.cd_url:
+            for button in (load_server, load_pc, self._eject_button):
+                button.enabled = False
+        self._eject_button.enabled = False      # nothing is in the drive yet
+
+        self._info_x = x + 6
+        self.buttons = buttons
+        # Wide enough for every button and a disc label of ordinary length.
+        # At pixel size 1 the framebuffer is 192 px wide and the old 260 px
+        # minimum already cut the bar off after "+".
+        self._bar_min_width = (self._info_x
+                               + self.font.size("disc: a-typical-name.bin (99.9 KB)")[0]
+                               + 12)
 
     def _resize_window(self):
-        width = max(self.disp_w * self.pixel_size, 260)
+        width = max(self.disp_w * self.pixel_size, self._bar_min_width)
         height = self.disp_h * self.pixel_size + BUTTON_BAR_HEIGHT
         self.screen = pygame.display.set_mode((width, height))
+
+    # --- the CD drive ---------------------------------------------------------
+
+    def _cd_call(self, method, path, session=None, **kwargs):
+        """One request to the CD server, unwrapping FastAPI's {detail}.
+
+        The detail is the useful part: a 403 says which config key keeps
+        the file out, and a bare status code would hide exactly that.
+        """
+        if not self.cd_url:
+            raise RuntimeError("no CD drive on this emulator")
+        kwargs.setdefault("timeout", CD_TIMEOUT)
+        session = session or self.cd_action_session
+        resp = session.request(method, f"{self.cd_url}{path}", **kwargs)
+        if not resp.ok:
+            detail = ""
+            try:
+                detail = resp.json().get("detail", "")
+            except ValueError:
+                pass
+            raise RuntimeError(detail or f"{resp.status_code} {resp.reason}")
+        return resp.json()
+
+    def _cd_set(self, status):
+        with self._cd_lock:
+            self._cd_status = status
+
+    def _cd_snapshot(self):
+        with self._cd_lock:
+            return self._cd_status
+
+    def _cd_poll_loop(self):
+        """The browser page can work the same drive, so this client is not
+        the only thing that changes what is in it. Without the poll the two
+        front ends disagree about what is loaded until a button is touched."""
+        while not self._stop_event.is_set():
+            if self.cd_url:
+                try:
+                    self._cd_set(self._cd_call("GET", "/cd/status",
+                                               session=self.cd_poll_session))
+                except Exception:
+                    self._cd_set(None)
+            self._stop_event.wait(CD_POLL_INTERVAL)
+
+    def _disc_label(self):
+        status = self._cd_snapshot()
+        if status is None:
+            return "CD: ..."
+        if not status.get("present"):
+            return "no disc"
+        return f"disc: {status['name']} ({_fmt_size(status['size'])})"
+
+    def _insert_path(self, path):
+        try:
+            status = self._cd_call("POST", "/cd/insert", json={"path": str(path)})
+            self._cd_set(status)
+            self._set_status(f"CD: {status['name']}")
+        except Exception as e:
+            self._set_status(f"CD: {e}", frames=180)
+
+    def _load_from_server(self):
+        try:
+            discs = self._cd_call("GET", "/cd/list")
+        except Exception as e:
+            self._set_status(f"CD: {e}", frames=180)
+            return
+        if not discs:
+            self._set_status("CD: nothing in cd_dirs -- drop a file in cds/", frames=180)
+            return
+        self._open_picker(discs)
+
+    def _load_from_pc(self):
+        """A real folder browser, via tkinter.
+
+        tkinter is NOT a pip package -- on most Linux distributions it is
+        the system package python3-tk -- so it cannot go in
+        requirements-client.txt, and it is imported here, lazily, rather
+        than at the top of the file. Missing, it costs this one button and
+        says why; "Load from server" never touches it and keeps working.
+        """
+        try:
+            import tkinter
+            from tkinter import filedialog
+        except ImportError:
+            self._set_status("Load from PC needs python3-tk (apt install python3-tk)",
+                             frames=240)
+            return
+
+        status = self._cd_snapshot() or {}
+        # Open where the drive actually accepts discs from, rather than
+        # offering paths that will come back 403.
+        start = status.get("root") or str(Path.home())
+        try:
+            root = tkinter.Tk()
+            root.withdraw()
+            try:
+                chosen = filedialog.askopenfilename(title="Load a disc", initialdir=start)
+            finally:
+                root.destroy()
+        except Exception as e:               # e.g. TclError: no display
+            self._set_status(f"File dialog failed: {e}", frames=180)
+            return
+        if chosen:
+            self._insert_path(chosen)
+
+    def _eject(self):
+        try:
+            self._cd_set(self._cd_call("POST", "/cd/eject"))
+            self._set_status("CD: ejected")
+        except Exception as e:
+            self._set_status(f"CD: {e}", frames=180)
+
+    # --- the "Load from server" picker ------------------------------------------
+
+    def _open_picker(self, discs):
+        # Anything held down in the guest is released first. The picker
+        # swallows every key while it is open, so a key pressed before it
+        # opened would never see its release and would stay stuck down in
+        # the guest's bitmap -- the same hazard index.html handles on blur.
+        for code in list(self._key_sent.values()):
+            self._send_key(code, False)
+        self._key_sent.clear()
+        self._picker = {"items": discs, "index": 0, "top": 0, "rows": 1, "rects": [],
+                        "panel": None}
+
+    def _close_picker(self):
+        self._picker = None
+
+    def _picker_choose(self, index):
+        items = self._picker["items"]
+        if 0 <= index < len(items):
+            path = items[index]["path"]
+            self._close_picker()
+            self._insert_path(path)
+
+    def _picker_event(self, event):
+        """Handle an event while the picker is open. True if it was consumed.
+
+        Everything keyboard and mouse is consumed: nothing reaches the
+        guest behind the overlay.
+        """
+        p = self._picker
+        count = len(p["items"])
+        if event.type == pygame.KEYDOWN:
+            k = event.key
+            if k == pygame.K_ESCAPE:
+                self._close_picker()
+            elif k in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self._picker_choose(p["index"])
+            elif k == pygame.K_UP:
+                p["index"] = max(0, p["index"] - 1)
+            elif k == pygame.K_DOWN:
+                p["index"] = min(count - 1, p["index"] + 1)
+            elif k == pygame.K_PAGEUP:
+                p["index"] = max(0, p["index"] - p["rows"])
+            elif k == pygame.K_PAGEDOWN:
+                p["index"] = min(count - 1, p["index"] + p["rows"])
+            elif k == pygame.K_HOME:
+                p["index"] = 0
+            elif k == pygame.K_END:
+                p["index"] = count - 1
+            return True
+        if event.type == pygame.KEYUP:
+            return True
+        if event.type == pygame.MOUSEWHEEL:
+            p["index"] = max(0, min(count - 1, p["index"] - event.y))
+            return True
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if event.button in (4, 5):        # legacy wheel events
+                return True
+            panel = p["panel"]
+            if panel is None or not panel.collidepoint(event.pos):
+                self._close_picker()          # a click outside dismisses it
+                return True
+            for rect, index in p["rects"]:
+                if rect.collidepoint(event.pos):
+                    self._picker_choose(index)
+                    break
+            return True
+        if event.type == pygame.MOUSEBUTTONUP:
+            return True
+        return False
+
+    def _draw_picker(self, mouse_pos):
+        p = self._picker
+        width = self.screen.get_width()
+        height = self.screen.get_height() - BUTTON_BAR_HEIGHT
+        pad = 10
+        panel = pygame.Rect(pad, BUTTON_BAR_HEIGHT + pad, width - 2 * pad, height - 2 * pad)
+        p["panel"] = panel
+        pygame.draw.rect(self.screen, PICKER_BG, panel)
+        pygame.draw.rect(self.screen, PICKER_BORDER, panel, 1)
+
+        title = self.font.render("Load from server   arrows / click, Enter, Esc",
+                                 True, DIM_TEXT_COLOR)
+        self.screen.blit(title, (panel.x + 10, panel.y + 8))
+
+        list_top = panel.y + 32
+        rows = max(1, (panel.bottom - 8 - list_top) // PICKER_ROW_H)
+        p["rows"] = rows
+        # Keep the selection on screen.
+        if p["index"] < p["top"]:
+            p["top"] = p["index"]
+        if p["index"] >= p["top"] + rows:
+            p["top"] = p["index"] - rows + 1
+
+        p["rects"] = []
+        for row in range(rows):
+            index = p["top"] + row
+            if index >= len(p["items"]):
+                break
+            item = p["items"][index]
+            rect = pygame.Rect(panel.x + 6, list_top + row * PICKER_ROW_H,
+                               panel.width - 12, PICKER_ROW_H - 2)
+            p["rects"].append((rect, index))
+            if index == p["index"]:
+                pygame.draw.rect(self.screen, PICKER_SELECTED, rect, border_radius=3)
+            elif rect.collidepoint(mouse_pos):
+                pygame.draw.rect(self.screen, BUTTON_COLOR, rect, border_radius=3)
+            name = self.font.render(item["name"], True, BUTTON_TEXT_COLOR)
+            size = self.font.render(_fmt_size(item["size"]), True, DIM_TEXT_COLOR)
+            self.screen.blit(name, (rect.x + 8, rect.y + 3))
+            self.screen.blit(size, (rect.right - size.get_width() - 8, rect.y + 3))
+
+        if len(p["items"]) > rows:
+            more = self.font.render(f"{p['index'] + 1} / {len(p['items'])}", True,
+                                    DIM_TEXT_COLOR)
+            self.screen.blit(more, (panel.right - more.get_width() - 10, panel.y + 8))
 
     # --- main loop ----------------------------------------------------
 
@@ -396,7 +707,12 @@ class DisplayClient:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
-                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    continue
+                # While the disc picker is open it owns the keyboard and the
+                # mouse, so nothing reaches the guest behind the overlay.
+                if self._picker is not None and self._picker_event(event):
+                    continue
+                if event.type == pygame.MOUSEBUTTONDOWN:
                     # A click on the toolbar belongs to the toolbar. It used
                     # to be forwarded to the guest as well, as a press at a
                     # coordinate clamped to y=0 -- so pressing "Clear" also
@@ -465,12 +781,20 @@ class DisplayClient:
             button.draw(self.screen, self.font, mouse_pos)
 
         size_label = self.font.render(f"px: {self.pixel_size}", True, BUTTON_TEXT_COLOR)
-        self.screen.blit(size_label, (185, 12))
+        self.screen.blit(size_label, (self._px_x, 12))
 
+        disc = self._cd_snapshot()
+        self._eject_button.enabled = bool(self.cd_url and disc and disc.get("present"))
+
+        # A status message borrows the disc label's slot while it lasts:
+        # they say the same kind of thing, and the bar has one place for it.
         if self.status_ttl > 0:
             status_label = self.font.render(self.status_message, True, BUTTON_TEXT_COLOR)
-            self.screen.blit(status_label, (280, 12))
+            self.screen.blit(status_label, (self._info_x, 12))
             self.status_ttl -= 1
+        elif self.cd_url:
+            disc_label = self.font.render(self._disc_label(), True, DIM_TEXT_COLOR)
+            self.screen.blit(disc_label, (self._info_x, 12))
 
         # Show connection status for both servers
         status_x = self.screen.get_width() - 200
@@ -482,6 +806,9 @@ class DisplayClient:
         if not self._is_hid_connected():
             hid_label = self.font.render("HID: Reconnecting...", True, DISCONNECTED_COLOR)
             self.screen.blit(hid_label, (status_x, 12))
+
+        if self._picker is not None:
+            self._draw_picker(mouse_pos)
 
         pygame.display.flip()
 

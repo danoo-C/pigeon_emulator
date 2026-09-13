@@ -1,10 +1,9 @@
 # A CD drive: removable discs the host picks
 
-> **Status: phases 0 to 3 are done** — the device
+> **Status: phases 0 to 4 are done** — the device
 > (`emulator/devices/cd.py`, `tests/test_cd.py`), read-only volumes in
-> `fs.c` (`FS_EROFS`), the HTTP surface with its config, and the browser
-> front end. What is left is the pygame front end, the guest library and
-> the demo. **Every decision is
+> `fs.c` (`FS_EROFS`), the HTTP surface with its config, and both front
+> ends. What is left is the guest library, `<pigeon/cd.h>`, and the demo. **Every decision is
 > settled**; the log is in [§15](#15-decision-log).
 >
 > Phase 0 **measured the two claims §3 and §5 rest on**, and both held: a
@@ -286,7 +285,7 @@ docstring already explains why several uvicorn instances coexist: each on its
 own thread with its own event loop and its own port.
 
 ```
-GET  /cd/status                  -> {present, generation, name, size, path}
+GET  /cd/status                  -> {present, generation, name, size, path, root}
 GET  /cd/list                    -> [{name, path, size}, ...]
 POST /cd/insert   {path: "..."}  -> 200 status | 403 outside root | 404 missing
 POST /cd/upload   (multipart)    -> saves under cd_upload_dir, then inserts
@@ -351,15 +350,21 @@ tkinter` raises `ModuleNotFoundError` in this `.venv`; on Linux it is a system
 package (`python3-tk`), not a pip one, so it cannot go in
 `requirements-client.txt`. It is accepted as an **optional** dependency:
 import it lazily inside the click handler, and if it is missing, put
-"Load from PC needs python3-tk" in the status label and leave the button
-disabled. Losing that one button must not take the client with it, and
+"Load from PC needs python3-tk" in the status label **when it is clicked**.
+The button is not disabled up front: finding out would mean importing
+tkinter at startup, which is exactly the import this is avoiding, and a
+button that explains itself on click is clearer than one that is grey for no
+visible reason. Losing that one button must not take the client with it, and
 *Load from server* keeps working because it never touches tkinter.
 
-**The button bar already overflows** and this makes it worse: the existing
-three buttons occupy 175 px, and at `pixel_size = 1` the window is 192 px
-wide. Three more need roughly 320 px *(unverified — estimated from the label
-widths at the current `SysFont(None, 22)`)*. The bar needs a minimum window
-width, or to wrap onto a second row.
+**The bar is laid out from the font, not from typed positions.** The first
+three buttons ended at 175 px, with the `px:` label at 185 and the status
+text at 280, and the window's minimum width was 260 px — which at
+`pixel_size = 1`, a 192 px framebuffer, already cut the bar off after `+`.
+Measured with `SysFont(None, 22)`: the three CD buttons span **324 px** (this
+section had estimated 320), *Eject* ends at 564 px, and the minimum window
+width is now **830 px** — every button plus a disc label of ordinary length.
+No second row was needed.
 
 ### 7.2 The browser
 
@@ -647,7 +652,17 @@ Each one runs and is testable before the next.
    path the page calls must be one `cd.py` serves, and every `cd-` element
    it looks up must be one the markup declares.
 4. **The pygame front end**: the overlay list, then the tkinter dialog with
-   its graceful absence, then the button-bar width.
+   its graceful absence, then the button-bar width. ***Done***. The real
+   client was driven headlessly (`SDL_VIDEODRIVER=dummy`) against live
+   servers — 22 checks: the picker lists, navigates by key and by click, and
+   inserts; Esc and a click outside cancel; eject tracks the drive; a 403
+   reaches the bar as the server's own words; and with tkinter absent, as it
+   is on this machine, *Load from PC* names `python3-tk` and nothing else
+   breaks. What is committed is the part with the client's own decisions in
+   it, built with `object.__new__` so no server is needed: nothing reaches
+   the guest while the picker is open, opening it releases held keys,
+   navigation clamps, the bar never overlaps at pixel size 1 or 16, and
+   `tkinter` is never imported at module level.
 5. **`<pigeon/cd.h>`** and its tests on the emulator.
 6. **`user/disc.c`** and the docs.
 

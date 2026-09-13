@@ -22,6 +22,8 @@ real HDD and through the real bus rather than asserted about.
 
     python3 tests/test_cd.py      (or: python3 -m pytest tests/)
 """
+import ast
+import os
 import re
 import struct
 import sys
@@ -40,7 +42,7 @@ from emulator.devices.hdd import HDD                                  # noqa: E4
 from emulator.io_controller import (                                  # noqa: E402
     ERR_NO_SUCH_CHANNEL, IOChannel, IOController)
 from emulator.memory_map import (                                     # noqa: E402
-    CH_CD, IO_START, IOHeader, RAM_SIZE)
+    CH_CD, DISPLAY_H, DISPLAY_W, IO_START, IOHeader, RAM_SIZE)
 from emulator.ram import RAM                                          # noqa: E402
 
 # The same bytes tests/test_pfs.py's pattern() makes, so a disc is never
@@ -110,7 +112,8 @@ def test_an_empty_drive_says_so_without_pretending_to_be_absent():
 def test_an_empty_drive_reports_no_disc_in_its_status():
     with drive() as d:
         assert d.cd.status() == {"present": False, "generation": 0,
-                                 "name": "", "size": 0, "path": None}
+                                 "name": "", "size": 0, "path": None,
+                                 "root": str(d.dir)}
 
 
 # --- inserting and reading ----------------------------------------------------
@@ -500,6 +503,18 @@ def test_the_drive_is_on_the_bus_of_every_machine():
 # -- so this is the only way the browser front end can put a disc in. The
 # routes around it are three lines each; everything worth testing is here.
 
+def test_status_says_where_discs_may_come_from():
+    """A front end's file dialog opens at cd_root. Without this it would
+    guess, and offer the user paths that come back 403."""
+    with drive() as d:
+        assert d.cd.status()["root"] == str(d.dir)
+    cd = CD(root=None, dirs=[])
+    try:
+        assert cd.status()["root"] is None, "null cd_root should say so, not lie"
+    finally:
+        cd.close()
+
+
 def test_an_upload_is_written_down_and_inserted():
     with drive() as d:
         status = d.cd.save_upload("note.txt", b"uploaded bytes")
@@ -656,6 +671,226 @@ def test_the_page_is_told_where_the_drive_is():
 
     machine = (REPO_ROOT / "emulator" / "machine.py").read_text()
     assert "self.display_io.cd_url" in machine, "start_servers no longer sets cd_url"
+
+
+# --- the pygame front end ----------------------------------------------------
+#
+# DisplayClient blocks in __init__ until the display server answers, so
+# these build one with object.__new__ and give it only what the code under
+# test touches: the picker and the bar layout, which is where the client's
+# own decisions live. Talking to the server is covered by the endpoint
+# tests above; what is left is what the client does with a keypress.
+#
+# pygame is an optional client dependency (requirements-client.txt), so
+# each of these returns early without it -- the same bargain
+# tests/test_input.py makes with _pygame_client().
+
+DISCS = [{"name": f"d{i}.bin", "path": f"/x/d{i}.bin", "size": i} for i in range(5)]
+
+
+def _client_module():
+    from test_input import _pygame_client
+    return _pygame_client()
+
+
+def _bare_client(module):
+    c = object.__new__(module.DisplayClient)
+    c._picker = None
+    c._key_sent = {}
+    c.sent = []
+    c._send_key = lambda code, pressed: c.sent.append((code, pressed))
+    c.inserted = []
+    c._insert_path = lambda path: c.inserted.append(path)
+    return c
+
+
+def _key(pygame, key):
+    return pygame.event.Event(pygame.KEYDOWN, key=key, unicode="")
+
+
+def test_nothing_reaches_the_guest_while_the_picker_is_open():
+    module = _client_module()
+    if module is None:
+        return
+    import pygame
+    c = _bare_client(module)
+    c._open_picker(DISCS)
+    for key in (pygame.K_a, pygame.K_SPACE, pygame.K_DOWN, pygame.K_F1, pygame.K_BACKSPACE):
+        assert c._picker_event(_key(pygame, key)), f"key {key} was not consumed"
+        assert c._picker_event(pygame.event.Event(pygame.KEYUP, key=key))
+    assert c._picker_event(pygame.event.Event(pygame.MOUSEBUTTONUP, button=1, pos=(5, 5)))
+    assert c.sent == [], f"keys reached the guest behind the overlay: {c.sent}"
+
+
+def test_opening_the_picker_releases_every_held_key():
+    """The picker swallows every release while it is open, so a key held
+    as it opened would stay down in the guest's bitmap forever -- the same
+    hazard index.html handles on blur."""
+    module = _client_module()
+    if module is None:
+        return
+    import pygame
+    c = _bare_client(module)
+    c._key_sent = {pygame.K_a: 0x61, pygame.K_LEFT: 0x80}
+    c._open_picker(DISCS)
+    assert sorted(c.sent) == [(0x61, False), (0x80, False)], c.sent
+    assert c._key_sent == {}
+
+
+def test_picker_navigation_stays_in_range():
+    module = _client_module()
+    if module is None:
+        return
+    import pygame
+    c = _bare_client(module)
+    c._open_picker(DISCS)
+    c._picker["rows"] = 2
+
+    def at(key):
+        c._picker_event(_key(pygame, key))
+        return c._picker["index"]
+
+    assert at(pygame.K_UP) == 0, "moved above the first row"
+    assert at(pygame.K_END) == 4
+    assert at(pygame.K_DOWN) == 4, "moved past the last row"
+    assert at(pygame.K_PAGEUP) == 2
+    assert at(pygame.K_HOME) == 0
+    assert at(pygame.K_PAGEDOWN) == 2
+    assert at(pygame.K_PAGEDOWN) == 4 and at(pygame.K_PAGEDOWN) == 4
+
+
+def test_enter_inserts_the_selection_and_escape_inserts_nothing():
+    module = _client_module()
+    if module is None:
+        return
+    import pygame
+    c = _bare_client(module)
+    c._open_picker(DISCS)
+    c._picker_event(_key(pygame, pygame.K_DOWN))
+    c._picker_event(_key(pygame, pygame.K_RETURN))
+    assert c._picker is None and c.inserted == ["/x/d1.bin"], c.inserted
+
+    c._open_picker(DISCS)
+    c._picker_event(_key(pygame, pygame.K_ESCAPE))
+    assert c._picker is None and c.inserted == ["/x/d1.bin"], "Esc inserted something"
+
+
+def test_a_click_picks_a_row_and_a_click_outside_picks_nothing():
+    module = _client_module()
+    if module is None:
+        return
+    import pygame
+    c = _bare_client(module)
+
+    def opened():
+        c._open_picker(DISCS)
+        # What _draw_picker would have laid out on the previous frame.
+        c._picker["panel"] = pygame.Rect(10, 50, 300, 200)
+        c._picker["rects"] = [(pygame.Rect(16, 82 + 24 * i, 280, 22), i) for i in range(3)]
+
+    opened()
+    row = c._picker["rects"][2][0]
+    c._picker_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=row.center))
+    assert c.inserted == ["/x/d2.bin"], c.inserted
+
+    opened()
+    c._picker_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(1, 1)))
+    assert c._picker is None and c.inserted == ["/x/d2.bin"], "an outside click inserted"
+
+
+def test_the_bar_lays_out_without_overlap_at_every_pixel_size():
+    """The first three buttons used to sit at typed x positions. That held
+    for three short labels; "Load from server" alone is wider than all three,
+    and at pixel size 1 the old 260 px minimum already cut the bar off."""
+    module = _client_module()
+    if module is None:
+        return
+    import pygame
+    previous = os.environ.get("SDL_VIDEODRIVER")
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+    pygame.init()
+    try:
+        c = object.__new__(module.DisplayClient)
+        c.font = pygame.font.SysFont(None, 22)
+        c.cd_url = "http://127.0.0.1:1"
+        c.disp_w, c.disp_h = DISPLAY_W, DISPLAY_H
+        c._build_buttons()
+
+        assert [b.label for b in c.buttons] == [
+            "Clear", "-", "+", "Load from server", "Load from PC", "Eject"]
+        for left, right in zip(c.buttons, c.buttons[1:]):
+            assert right.rect.left > left.rect.right, f"{left.label} overlaps {right.label}"
+        assert c._px_x > c.buttons[2].rect.right, "the px label sits on the + button"
+        assert c._info_x > c.buttons[-1].rect.right, "the disc label sits on Eject"
+
+        for px in (module.MIN_PIXEL_SIZE, module.MAX_PIXEL_SIZE):
+            c.pixel_size = px
+            c._resize_window()
+            assert c.screen.get_width() >= c.buttons[-1].rect.right, (
+                f"at pixel size {px} the window is {c.screen.get_width()} px and "
+                f"the bar needs {c.buttons[-1].rect.right}")
+    finally:
+        pygame.quit()
+        if previous is None:
+            os.environ.pop("SDL_VIDEODRIVER", None)
+        else:
+            os.environ["SDL_VIDEODRIVER"] = previous
+
+
+def test_the_cd_buttons_are_disabled_when_there_is_no_drive():
+    module = _client_module()
+    if module is None:
+        return
+    import pygame
+    previous = os.environ.get("SDL_VIDEODRIVER")
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+    pygame.init()
+    try:
+        c = object.__new__(module.DisplayClient)
+        c.font = pygame.font.SysFont(None, 22)
+        c.cd_url = None
+        c._build_buttons()
+        assert not any(b.enabled for b in c.buttons[3:]), "CD buttons live with no drive"
+        assert all(b.enabled for b in c.buttons[:3]), "the other buttons went dead too"
+
+        # A disabled button still owns its click, so it cannot fall through.
+        eject = c.buttons[5]
+        called = []
+        eject.callback = lambda: called.append(1)
+        assert eject.handle_click(eject.rect.center) is True
+        assert called == []
+    finally:
+        pygame.quit()
+        if previous is None:
+            os.environ.pop("SDL_VIDEODRIVER", None)
+        else:
+            os.environ["SDL_VIDEODRIVER"] = previous
+
+
+def test_tkinter_is_never_imported_at_module_level():
+    """python3-tk is a system package, not a pip one, and it is not installed
+    on the machine this was written on. A top-level import would take the
+    whole client down with it instead of costing one button."""
+    tree = ast.parse((REPO_ROOT / "display" / "display.py").read_text())
+
+    def top_level_imports(nodes):
+        for node in nodes:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue                       # runs only when called
+            if isinstance(node, ast.Import):
+                yield from (a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                yield node.module or ""
+            for field in ("body", "orelse", "finalbody", "handlers"):
+                yield from top_level_imports(getattr(node, field, []) or [])
+
+    at_import = [n for n in top_level_imports(tree.body) if n.split(".")[0] == "tkinter"]
+    assert at_import == [], f"tkinter is imported at module level: {at_import}"
+
+    loader = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_load_from_pc")
+    inside = [a.name for n in ast.walk(loader) if isinstance(n, ast.Import) for a in n.names]
+    assert "tkinter" in inside, "Load from PC no longer uses tkinter -- update this test"
 
 
 if __name__ == "__main__":

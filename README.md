@@ -95,6 +95,14 @@ working display. On WSL2 that means WSLg — check `echo $DISPLAY` prints
 something like `:0`. Harmless ALSA warnings on startup are pygame looking for a
 sound card it doesn't need.
 
+Both front-ends have a **CD drive** row: *Load from server* picks a file from
+the emulator's `cds/` and `build/` folders, *Load from PC* reaches any file —
+the browser uploads it, the pygame client opens a native file dialog — and
+*Eject* empties the drive ([docs/cd-drive.md](docs/cd-drive.md)). The pygame
+dialog needs tkinter, which is a system package rather than a pip one
+(`sudo apt install python3-tk`); without it that one button says so and
+everything else works.
+
 ### Running it
 
 Without `--run` you get a menu (run / single-step debugger / dump RAM / CPU
@@ -128,7 +136,7 @@ partial or missing file is fine.
 
 | Key | Meaning |
 |---|---|
-| `host`, `display_port`, `hid_port`, `cd_port` | where the three HTTP servers listen. Each is its own uvicorn instance and needs its own port. **The pygame client reads these too**, so changing a port here moves both ends. |
+| `host`, `display_port`, `hid_port`, `cd_port` | where the three HTTP servers listen. Each is its own uvicorn instance and needs its own port. **The pygame client reads the first three too**, so changing one here moves both ends; it learns `cd_port` from the emulator's `/info`, the same way the browser page does. |
 | `program_dirs` | folders the launcher scans. Add your own; they're all listed together. |
 | `build_dir` | where assembled output and RAM dumps go |
 | `disk` | the disk on IO channel 2. It lives outside `build/` so that what programs save survives a clean build, and it is created blank, at 4 MiB, if missing. `tools/pfs.py` formats it and shows what's on it ([docs/filesystem.md](docs/filesystem.md)) |

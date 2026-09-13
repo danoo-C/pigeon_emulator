@@ -260,6 +260,10 @@ class CD:
             "name": self._name,
             "size": self._size,
             "path": str(self._path) if self._path is not None else None,
+            # So a front end's file dialog can open where discs are
+            # actually accepted from, instead of guessing and offering
+            # the user paths that will come back 403.
+            "root": str(self.root) if self.root is not None else None,
         }
 
     def status(self):
