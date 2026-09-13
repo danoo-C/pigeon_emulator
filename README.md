@@ -96,7 +96,9 @@ something like `:0`. Harmless ALSA warnings on startup are pygame looking for a
 sound card it doesn't need.
 
 Both front-ends have a **CD drive** row: *Load from server* picks a file from
-the emulator's `cds/` and `build/` folders, *Load from PC* reaches any file —
+the emulator's `cds/` and `build/` folders, or from a folder inside them (a
+disc built with `cc.py --project` is `build/<name>.img`, next to its
+`build/<name>/` of parts), *Load from PC* reaches any file —
 the browser uploads it, the pygame client opens a native file dialog — and
 *Eject* empties the drive ([docs/cd-drive.md](docs/cd-drive.md)). The pygame
 dialog needs tkinter, which is a system package rather than a pip one

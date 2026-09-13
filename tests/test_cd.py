@@ -444,17 +444,78 @@ def test_a_failed_insert_leaves_the_disc_that_is_in_alone():
 
 # --- the listing ----------------------------------------------------------------------
 
-def test_the_listing_shows_files_with_their_sizes_and_skips_the_rest():
+def test_the_listing_shows_folders_then_files_with_their_sizes_and_skips_the_rest():
     with drive() as d:
         d.disc("b.bin", b"x" * 10)
         d.disc("a.img", b"y" * 20)
         d.disc(".hidden", b"z")
         (d.dir / "subdir").mkdir()
+        (d.dir / ".git").mkdir()
 
         listed = d.cd.list_discs()
-        assert [e["name"] for e in listed] == ["a.img", "b.bin"], listed
-        assert [e["size"] for e in listed] == [20, 10]
+        assert [e["name"] for e in listed] == ["subdir", "a.img", "b.bin"], listed
+        assert [e["folder"] for e in listed] == [True, False, False]
+        assert [e["size"] for e in listed[1:]] == [20, 10]
         assert all(Path(e["path"]).is_absolute() for e in listed)
+
+
+def test_a_folder_lists_one_level_led_by_the_way_back_up():
+    """A folder in build/ -- a project's build/<name>/ among them -- opens
+    in the picker instead of being invisible."""
+    with drive() as d:
+        project = d.dir / "pigeonos"
+        (project / "bin").mkdir(parents=True)
+        (project / "bin" / "deep.bin").write_bytes(b"d")
+        (project / "boot.bin").write_bytes(b"bb")
+
+        top = d.cd.list_discs()
+        assert [(e["name"], e["folder"]) for e in top] == [("pigeonos", True)], top
+
+        inside = d.cd.list_discs(top[0]["path"])
+        assert [e["name"] for e in inside] == ["..", "bin", "boot.bin"], inside
+        assert inside[0]["path"] is None, "'..' out of a cd_dirs folder is not the top"
+        assert inside[2]["size"] == 2 and not inside[2]["folder"]
+
+        deeper = d.cd.list_discs(inside[1]["path"])
+        assert [e["name"] for e in deeper] == ["..", "deep.bin"], deeper
+        assert deeper[0]["path"] == str(project.resolve())
+        assert d.cd.list_discs(d.dir)[0]["path"] is None
+
+        d.cd.insert(deeper[1]["path"])
+        assert d.cd.status()["name"] == "deep.bin"
+
+
+def test_browsing_reaches_no_further_than_cd_dirs():
+    """cd_root is None here, so insert would open anything -- which is
+    exactly why the listing has to hold its own line."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        shown, hidden = root / "shown", root / "hidden"
+        shown.mkdir()
+        hidden.mkdir()
+        (hidden / "secret.bin").write_bytes(b"s")
+        (shown / "disc.bin").write_bytes(b"x")
+        (shown / "out").symlink_to(hidden)
+        cd = CD(root=None, dirs=[shown])
+        try:
+            assert [e["name"] for e in cd.list_discs()] == ["disc.bin"], \
+                "a link out of cd_dirs was listed"
+            for outside in (root, hidden, shown / "out", shown / "..", "/"):
+                try:
+                    cd.list_discs(outside)
+                except PermissionError:
+                    pass
+                else:
+                    raise AssertionError(f"{outside} was browsed")
+            for not_a_folder in (shown / "disc.bin", shown / "nope"):
+                try:
+                    cd.list_discs(not_a_folder)
+                except NotADirectoryError:
+                    pass
+                else:
+                    raise AssertionError(f"{not_a_folder} was browsed as a folder")
+        finally:
+            cd.close()
 
 
 def test_a_missing_listing_directory_is_not_an_error():
@@ -844,6 +905,36 @@ def test_enter_inserts_the_selection_and_escape_inserts_nothing():
     c._open_picker(DISCS)
     c._picker_event(_key(pygame, pygame.K_ESCAPE))
     assert c._picker is None and c.inserted == ["/x/d1.bin"], "Esc inserted something"
+
+
+def test_a_folder_row_opens_the_folder_in_the_picker():
+    module = _client_module()
+    if module is None:
+        return
+    import pygame
+    c = _bare_client(module)
+    top = [{"name": "os", "path": "/x/os", "size": 0, "folder": True}] + DISCS
+    inside = [{"name": "..", "path": None, "size": 0, "folder": True},
+              {"name": "os.img", "path": "/x/os/os.img", "size": 9, "folder": False}]
+    asked = []
+
+    def cd_call(method, path, **kwargs):
+        asked.append((method, path, kwargs.get("params")))
+        return inside if kwargs.get("params") else top
+
+    c._cd_call = cd_call
+    c._open_picker(top)
+    c._picker_event(_key(pygame, pygame.K_RETURN))
+    assert asked == [("GET", "/cd/list", {"folder": "/x/os"})], asked
+    assert c._picker["items"] == inside and c._picker["folder"] == "/x/os"
+    assert c.inserted == [], "opening a folder inserted something"
+
+    c._picker_event(_key(pygame, pygame.K_RETURN))            # ".."
+    assert asked[-1] == ("GET", "/cd/list", {}) and c._picker["folder"] is None, asked
+
+    c._picker_event(_key(pygame, pygame.K_DOWN))
+    c._picker_event(_key(pygame, pygame.K_RETURN))
+    assert c._picker is None and c.inserted == ["/x/d0.bin"], c.inserted
 
 
 def test_a_click_picks_a_row_and_a_click_outside_picks_nothing():

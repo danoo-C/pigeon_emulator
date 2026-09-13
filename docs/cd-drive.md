@@ -313,7 +313,7 @@ own thread with its own event loop and its own port.
 
 ```
 GET  /cd/status                  -> {present, generation, name, size, path, root}
-GET  /cd/list                    -> [{name, path, size}, ...]
+GET  /cd/list[?folder=PATH]      -> [{name, path, size, folder}, ...] | 403 outside cd_dirs
 POST /cd/insert   {path: "..."}  -> 200 status | 403 outside root | 404 missing
 POST /cd/upload   (multipart)    -> saves under cd_upload_dir, then inserts
 POST /cd/eject                   -> 200 status
@@ -328,12 +328,20 @@ documents for HID, where `http://127.0.0.1` does not match
 `Machine.start_servers`. Add `cd_url` the same way, so `config.json` stays the
 single source of truth for ports and `index.html` keeps hardcoding nothing.
 
-**`/cd/list`** walks each directory in `cd_dirs`, **non-recursively**, listing
-regular non-hidden files with their sizes, sorted by name. Non-recursive keeps
-it predictable: the way to expose more is to add a directory to `cd_dirs`, not
-to discover that the emulator crawled your home folder. Sizes are shown
-because the default `cd_dirs` includes `build/`, which holds a 128 MB
-`ram.bin` — you want to see that before you click it.
+**`/cd/list`** lists **one folder, one level**: the non-hidden folders, then
+the regular files with their sizes, each sorted by name. With no `folder` it
+is the top — what is directly in every `cd_dirs` directory, merged. With one,
+it is that folder, led by `..` to go back up; a folder's `path` is what to ask
+for next, and `..` back to the top — where a top-level folder was opened from,
+not its one directory on its own — has path `null`. So a project's
+`build/<name>/` can be opened, where a flat listing hid it.
+
+A folder is only opened if it is **inside `cd_dirs`** (403 otherwise), and a
+link out of them is not listed. Browsing therefore reaches no further than the
+top can already see, and the emulator never crawls anything — the way to
+expose more is still to add a directory to `cd_dirs`. Sizes are shown because
+the default `cd_dirs` includes `build/`, which holds a 128 MB `ram.bin` — you
+want to see that before you click it.
 
 **What `insert` will open.** Any path under `cd_root`, which **defaults to the
 repo root**. So the whole project — `build/`, `disks/`, `cds/`, `user/` — is
@@ -365,9 +373,10 @@ with *Clear*, *-* and *+*, so this is three more entries:
 ```
 
 - **Load from server** draws an **overlay list inside the pygame window** —
-  the filenames from `/cd/list`, arrow keys and click to choose, Esc to
-  cancel. Drawn rather than delegated so this path depends on nothing but
-  pygame.
+  the folders and filenames from `/cd/list`, arrow keys and click to choose,
+  Esc to cancel. Choosing a folder (shown with a trailing `/`) lists it in the
+  same overlay, and `..` goes back up. Drawn rather than delegated so this
+  path depends on nothing but pygame.
 - **Load from PC** opens a real folder browser with `tkinter.filedialog`,
   rooted at `cd_root`, and POSTs the chosen path to `/cd/insert`.
 - **Eject** POSTs `/cd/eject`, and is greyed out when the drive is empty.
@@ -405,8 +414,9 @@ No second row was needed.
 ```
 
 - **Load from server** fetches `/cd/list` and reveals a `<select>`; picking
-  a row inserts it and hides the list again. An empty listing says so
-  rather than showing an empty box.
+  a file inserts it and hides the list again, picking a folder or `..`
+  refills the list with that folder. An empty listing says so rather than
+  showing an empty box.
 - **Load from PC** is a hidden `<input type="file">`. A browser cannot hand
   over a path: `input.files[0]` is bytes with a name and nothing else. So this
   button **uploads**, and the server writes the bytes down before inserting

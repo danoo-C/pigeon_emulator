@@ -17,6 +17,7 @@ import io
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -278,9 +279,14 @@ def test_cc_py_builds_a_project_on_the_command_line():
         t = Path(t)
         path, disc = project_dir(t / "src"), t / "disc.img"
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        # Its programs are built under the config's build_dir, which is the
+        # real build/ -- where they would sit in the disc picker for good.
+        config = mock.Mock(build_dir=t / "build")
+        with contextlib.redirect_stdout(out), \
+                mock.patch("emulator.config.load_config", return_value=config):
             assert cc.main(["--project", str(path), "-o", str(disc)]) == 0
         assert disc.is_file() and "boots /install.bin" in out.getvalue(), out.getvalue()
+        assert (t / "build" / "testos").is_dir(), "built somewhere other than build_dir"
 
         bad = write(t / "src", "bad.txt", "[project]\nname = X\n")
         err = io.StringIO()

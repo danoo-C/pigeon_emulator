@@ -296,18 +296,47 @@ class CD:
         with self._lock:
             return self._status_locked()
 
-    def list_discs(self):
-        """What /cd/list will show: the files in `dirs`, non-recursively.
+    def _inside_dirs(self, path: Path) -> bool:
+        return any(path.is_relative_to(d.resolve()) for d in self.dirs)
 
-        Non-recursive keeps it predictable -- the way to expose more is to
-        add a directory, not to discover that the emulator crawled your
-        home folder. Sizes are included because the default dirs include
-        build/, which holds a 128 MB ram.bin you want to recognise before
-        you click it.
+    def list_discs(self, folder=None):
+        """What /cd/list will show: one folder, one level, folders first.
+
+        With no folder it is the top: what is directly in `dirs`, merged.
+        With one, it is what is in that folder, led by ".." to go back up.
+        A folder's "path" is what to ask for next, and ".." back to the
+        top -- where a top-level folder was opened from, rather than its
+        one directory on its own -- has path None.
+
+        One level per request keeps it predictable -- the emulator never
+        crawls anything, and a folder has to be inside `dirs` to be
+        opened, so browsing reaches no further than the top can already
+        see. Sizes are included because the default dirs include build/,
+        which holds a 128 MB ram.bin you want to recognise before you
+        click it.
         """
         found = []
-        seen = set()
-        for directory in self.dirs:
+        if folder is None:
+            where = self.dirs
+        else:
+            here = Path(folder).expanduser()
+            if not here.is_absolute():
+                here = REPO_ROOT / here
+            here = here.resolve()
+            if not self._inside_dirs(here):
+                raise PermissionError(
+                    f"{here} is not inside cd_dirs; add it to cd_dirs in "
+                    f"config.json to browse it")
+            if not here.is_dir():
+                raise NotADirectoryError(f"{here}: not a folder")
+            tops = [d.resolve() for d in self.dirs]
+            top = here in tops or here.parent in tops
+            found.append({"name": "..", "path": None if top else str(here.parent),
+                          "size": 0, "folder": True})
+            where = [here]
+
+        folders, files, seen = [], [], set()
+        for directory in where:
             try:
                 entries = sorted(directory.iterdir())
             except OSError:
@@ -316,18 +345,24 @@ class CD:
                 if entry.name.startswith("."):
                     continue
                 try:
-                    if not entry.is_file():
-                        continue
                     resolved = entry.resolve()
-                    size = entry.stat().st_size
+                    if resolved in seen:
+                        continue
+                    if entry.is_dir():
+                        # A link out of dirs would only be refused when opened.
+                        if not self._inside_dirs(resolved):
+                            continue
+                        folders.append({"name": entry.name, "path": str(resolved),
+                                        "size": 0, "folder": True})
+                    elif entry.is_file():
+                        files.append({"name": entry.name, "path": str(resolved),
+                                      "size": entry.stat().st_size, "folder": False})
+                    else:
+                        continue
                 except OSError:
                     continue
-                if resolved in seen:
-                    continue
                 seen.add(resolved)
-                found.append({"name": entry.name, "path": str(resolved),
-                              "size": size})
-        return found
+        return found + folders + files
 
     # --- the HTTP surface ---------------------------------------------------
 
@@ -385,8 +420,13 @@ class CD:
                 return self.status()
 
             @app.get("/cd/list")
-            async def cd_list():
-                return self.list_discs()
+            async def cd_list(folder: Optional[str] = None):
+                try:
+                    return self.list_discs(folder)
+                except PermissionError as e:
+                    raise HTTPException(status_code=403, detail=str(e))
+                except OSError as e:
+                    raise HTTPException(status_code=404, detail=str(e))
 
             @app.post("/cd/insert")
             async def cd_insert(body: Insert):

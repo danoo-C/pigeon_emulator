@@ -125,9 +125,12 @@
         return;
       }
 
-      cdServerBtn.addEventListener('click', async () => {
+      // One folder at a time: a folder's row opens it in the same list, and
+      // ".." goes back up. A null folder is the top, every cd_dirs merged.
+      async function cdBrowse(folder){
         try {
-          const discs = await cdCall('/cd/list');
+          const discs = await cdCall('/cd/list' +
+            (folder ? '?folder=' + encodeURIComponent(folder) : ''));
           cdList.innerHTML = '';
           if (!discs.length){
             cdList.hidden = true;
@@ -140,16 +143,25 @@
           cdList.appendChild(first);
           for (const d of discs){
             const o = document.createElement('option');
-            o.value = d.path;
-            o.textContent = d.name + '  (' + fmtSize(d.size) + ')';
+            o.value = d.path || '';
+            if (d.folder){
+              o.dataset.folder = '1';
+              o.textContent = d.name === '..' ? '..' : d.name + '/';
+            } else {
+              o.textContent = d.name + '  (' + fmtSize(d.size) + ')';
+            }
             cdList.appendChild(o);
           }
           cdList.hidden = false;
           cdList.focus();
         } catch (e) { cdSay(e.message, true); }
-      });
+      }
+
+      cdServerBtn.addEventListener('click', () => cdBrowse(null));
 
       cdList.addEventListener('change', async () => {
+        const chosen = cdList.selectedOptions[0];
+        if (chosen && chosen.dataset.folder) return cdBrowse(chosen.value || null);
         if (!cdList.value) return;
         try {
           cdShow(await cdCall('/cd/insert', {

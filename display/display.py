@@ -522,16 +522,18 @@ class DisplayClient:
         except Exception as e:
             self._set_status(f"CD: {e}", frames=180)
 
-    def _load_from_server(self):
+    def _load_from_server(self, folder=None):
+        """The picker at the top of cd_dirs, or in one folder inside them."""
         try:
-            discs = self._cd_call("GET", "/cd/list")
+            params = {} if folder is None else {"folder": folder}
+            discs = self._cd_call("GET", "/cd/list", params=params)
         except Exception as e:
             self._set_status(f"CD: {e}", frames=180)
             return
         if not discs:
             self._set_status("CD: nothing in cd_dirs -- drop a file in cds/", frames=180)
             return
-        self._open_picker(discs)
+        self._open_picker(discs, folder)
 
     def _load_from_pc(self):
         """A real folder browser, via tkinter.
@@ -576,7 +578,7 @@ class DisplayClient:
 
     # --- the "Load from server" picker ------------------------------------------
 
-    def _open_picker(self, discs):
+    def _open_picker(self, discs, folder=None):
         # Anything held down in the guest is released first. The picker
         # swallows every key while it is open, so a key pressed before it
         # opened would never see its release and would stay stuck down in
@@ -584,8 +586,8 @@ class DisplayClient:
         for code in list(self._key_sent.values()):
             self._send_key(code, False)
         self._key_sent.clear()
-        self._picker = {"items": discs, "index": 0, "top": 0, "rows": 1, "rects": [],
-                        "panel": None}
+        self._picker = {"items": discs, "folder": folder, "index": 0, "top": 0,
+                        "rows": 1, "rects": [], "panel": None}
 
     def _close_picker(self):
         self._picker = None
@@ -593,9 +595,12 @@ class DisplayClient:
     def _picker_choose(self, index):
         items = self._picker["items"]
         if 0 <= index < len(items):
-            path = items[index]["path"]
+            item = items[index]
             self._close_picker()
-            self._insert_path(path)
+            if item.get("folder"):
+                self._load_from_server(item["path"])   # ".." to the top is None
+            else:
+                self._insert_path(item["path"])
 
     def _picker_event(self, event):
         """Handle an event while the picker is open. True if it was consumed.
@@ -655,7 +660,8 @@ class DisplayClient:
         pygame.draw.rect(self.screen, PICKER_BG, panel)
         pygame.draw.rect(self.screen, PICKER_BORDER, panel, 1)
 
-        title = self.font.render("Load from server   arrows / click, Enter, Esc",
+        where = "" if p["folder"] is None else f": {Path(p['folder']).name}/"
+        title = self.font.render(f"Load from server{where}   arrows / click, Enter, Esc",
                                  True, DIM_TEXT_COLOR)
         self.screen.blit(title, (panel.x + 10, panel.y + 8))
 
@@ -681,10 +687,13 @@ class DisplayClient:
                 pygame.draw.rect(self.screen, PICKER_SELECTED, rect, border_radius=3)
             elif rect.collidepoint(mouse_pos):
                 pygame.draw.rect(self.screen, BUTTON_COLOR, rect, border_radius=3)
-            name = self.font.render(item["name"], True, BUTTON_TEXT_COLOR)
-            size = self.font.render(_fmt_size(item["size"]), True, DIM_TEXT_COLOR)
+            folder = item.get("folder")
+            label = item["name"] + ("/" if folder and item["name"] != ".." else "")
+            name = self.font.render(label, True, BUTTON_TEXT_COLOR)
             self.screen.blit(name, (rect.x + 8, rect.y + 3))
-            self.screen.blit(size, (rect.right - size.get_width() - 8, rect.y + 3))
+            if not folder:
+                size = self.font.render(_fmt_size(item["size"]), True, DIM_TEXT_COLOR)
+                self.screen.blit(size, (rect.right - size.get_width() - 8, rect.y + 3))
 
         if len(p["items"]) > rows:
             more = self.font.render(f"{p['index'] + 1} / {len(p['items'])}", True,
