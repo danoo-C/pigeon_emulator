@@ -21,8 +21,8 @@ from .devices.hid import HID
 from .devices.timer import Timer
 from .io_controller import IOChannel, IOController
 from .memory_map import (
-    CH_CD, CH_DISPLAY, CH_HDD, CH_HID, CH_TIMER, CH_USERPROG, RAM_SIZE,
-    REGISTER_COUNT,
+    BIOS2_MAX, CH_BIOS2, CH_CD, CH_DISPLAY, CH_HDD, CH_HID, CH_TIMER, CH_USERPROG,
+    RAM_SIZE, REGISTER_COUNT,
 )
 from .ram import RAM
 
@@ -40,7 +40,7 @@ class Machine:
     """A wired-up pigeon computer, ready to run."""
 
     def __init__(self, bios_path="build/bios.bin", program_path=None,
-                 disk_path=None, ram_size=RAM_SIZE, cd=None):
+                 disk_path=None, ram_size=RAM_SIZE, cd=None, bios2_path=None):
         self.ram = RAM(ram_size)
         self.cpu = CPU(self.ram, REGISTER_COUNT)
         self.io_controller = IOController(self.ram)
@@ -54,7 +54,9 @@ class Machine:
             self.user_prog = HDD(program_path, ram=self.ram)
             self.io_controller.register_channel(
                 CH_USERPROG, IOChannel(self.user_prog.callback, name="USERPROG"))
-        else:
+        elif not bios2_path:
+            # With a second stage, an empty channel 1 is ordinary: bios2
+            # decides what boots.
             log.warning("No user program: channel %d is empty, the BIOS will "
                         "boot into whatever is at the load address", CH_USERPROG)
 
@@ -83,6 +85,27 @@ class Machine:
         ):
             self.io_controller.register_channel(
                 channel_id, IOChannel(device.callback, name=name))
+
+        # Channel 7: the firmware device the BIOS loads its second stage
+        # from (docs/os_cd.md). Read-only, never created, and -- like
+        # channel 1 -- registered only when there is something to put on
+        # it. Without it the channel is empty and the BIOS boots channel 1
+        # as it always has, so Machine(bios2_path=None) is the machine from
+        # before the second stage existed.
+        self.bios2: Optional[HDD] = None
+        if bios2_path:
+            try:
+                self.bios2 = HDD(bios2_path, ram=self.ram, readonly=True)
+            except OSError:
+                self.close()
+                raise
+            if self.bios2.size > BIOS2_MAX:
+                size = self.bios2.size
+                self.close()
+                raise ValueError(f"second-stage BIOS too large ({size} bytes), "
+                                 f"max is {BIOS2_MAX}")
+            self.io_controller.register_channel(
+                CH_BIOS2, IOChannel(self.bios2.callback, name="BIOS2"))
 
         self.bios = BIOS.from_file(bios_path)
         self.bios.write_bios(self.ram)
@@ -118,7 +141,7 @@ class Machine:
 
     def close(self):
         """Release the disk file handles."""
-        for disk in (self.user_prog, self.hdd, self.cd):
+        for disk in (self.user_prog, self.hdd, self.cd, self.bios2):
             if disk is not None:
                 disk.close()
 

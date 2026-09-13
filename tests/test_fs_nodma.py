@@ -28,8 +28,8 @@ from _runner import run_module                                        # noqa: E4
 _with_dma = test_fs.machine_for
 
 
-def _without_dma(disk, boot=None, disc=None):
-    machine = _with_dma(disk, boot, disc)
+def _without_dma(disk, boot=None, disc=None, bios2=None):
+    machine = _with_dma(disk, boot, disc, bios2)
     machine.hdd.ram = None
     if machine.user_prog is not None:
         machine.user_prog.ram = None

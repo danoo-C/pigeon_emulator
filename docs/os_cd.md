@@ -1,6 +1,8 @@
 # Installation media: a two-stage BIOS, the boot sector and `cc.py --project`
 
-> **Status: sketch, nothing built.** Power-on runs through four stages:
+> **Status: phase 1 is built** (§9): stage 1 of the BIOS and the firmware
+> device. Everything after it is still a sketch. Power-on runs through four
+> stages:
 >
 > 1. **The BIOS**, 1 KB at address 0, loads **bios2** from a firmware
 >    device on IO channel 7, and jumps to it.
@@ -11,10 +13,10 @@
 > 4. **The installer.** `cc.py --project` writes the disc. What the installer
 >    does comes later (§8).
 >
-> The stage-1 BIOS and the boot sector were drafted and assembled; bios2's
-> size comes from a compiled probe. None of the three was run. Their sizes
-> are in the table below, and facts in §2 were checked in the code on
-> 2026-09-13. Anything reasoned but not run is marked *unverified*.
+> Stage 1 is built and tested. The boot sector was only drafted and
+> assembled, and bios2's size comes from a compiled probe; neither was run.
+> Their sizes are in the table below, and facts in §2 were checked in the
+> code on 2026-09-13. Anything reasoned but not run is marked *unverified*.
 > You left the open questions to me, and the decisions are in
 > [§10](#10-decisions).
 >
@@ -22,7 +24,7 @@
 
 | Piece | Where it runs | What it does | Size |
 |---|---|---|---|
-| **BIOS** (`firmware/bios.asm`) | `0x0` | Loads bios2 from channel 7 by DMA and jumps. Without bios2, runs today's channel-1 loader | 928 of 1,024 bytes, drafted |
+| **BIOS** (`firmware/bios.asm`) | `0x0` | Loads bios2 from channel 7 by DMA and jumps. Without bios2, runs today's channel-1 loader | 944 of 1,024 bytes, built |
 | **bios2** (`firmware/bios2.c`) | `0x07000000` | Screen, countdown, menu; boots channel 1, or a boot sector from the hard disk or the CD | Probe: 28,496 bytes |
 | **Firmware device** | channel 7 | A read-only HDD holding `build/bios2.bin` | — |
 | **Boot sector** (`firmware/boot.asm`) | `0x15898` | Loads the file its boot record names into `0x20000`, and jumps | 320 of 384 bytes, drafted |
@@ -119,9 +121,11 @@ installer, at 0x20000
 - **`fs.c` and `cd.c` refuse channel 7** the way they refuse the display: one
   line each. So no program can mount or format the firmware.
 - **The launcher:**
-  - `bios2_source` and `bios2_binary` in `config.json`, plus `--bios2 PATH`.
-  - bios2 is rebuilt when it or its libraries change, as programs are.
-  - `cc.py` gains `--org ADDR`, which replaces the one `.ORG` line.
+  - `bios2_binary` in `config.json`, and `--bios2 PATH`. The configured
+    file is optional; one named with `--bios2` must exist. *(Phase 1.)*
+  - `bios2_source`, rebuilding bios2 when it or its libraries change, and
+    `cc.py --org ADDR`, which replaces the one `.ORG` line. *(Phase 2,
+    with the first bios2 source.)*
 
 ---
 
@@ -139,6 +143,7 @@ Assembled, not run:
 | Today's BIOS | 688 | 86 |
 | Loads bios2, and nothing else | 248 | 31 |
 | Loads bios2, or falls back to today's loader | 928 | 116 |
+| **As built:** the same, plus a check of the size against `BIOS2_MAX` | 944 | 118 |
 
 **With the fallback, nothing that exists changes.** Every test, and every
 `Machine` built without bios2, boots exactly as today. The progress bar
@@ -318,14 +323,41 @@ What this step has to leave room for:
 
 ## 9. What changes, in phases
 
-1. **The firmware device and stage 1.**
-   - `CH_BIOS2`, `HDD(readonly=True)`, the `Machine` and launcher options,
-     and the guards in `fs.c` and `cd.c`.
-   - Every existing test passes unchanged.
-   - New tests: a tiny bios2 at `0x07000000` runs; with no bios2, today's
-     path runs; writes to channel 7 are refused.
+1. **The firmware device and stage 1.** ***Done.***
+   - **What was built:**
+     - `CH_BIOS2 = 7`, `BIOS2_LOAD_ADDR` and `BIOS2_MAX` (15 MB) in the
+       memory map.
+     - `HDD(readonly=True)`.
+     - `Machine(bios2_path=…)`, which refuses a missing or oversized file.
+     - `bios2_binary` in `config.json`, and `--bios2`.
+     - The guards in `fs.c` and `cd.c`.
+     - The debugger steps only inside the program region.
+   - **Stage 1 is 944 bytes, 118 instructions:** the draft, plus a check of
+     the size against `BIOS2_MAX`, so a bios2 can never be copied into the
+     hardware stack.
+   - **`tests/test_bios2.py`, 25 cases:**
+     - a bios2 of anything from 816 bytes to 1 MB arrives with one `GET_SIZE`
+       and one `READ_DMA`;
+     - it beats a program on channel 1;
+     - with no device or an empty file, channel 1 boots as before;
+     - a size over the limit, a size with the top bit set, a short transfer
+       and a refused one all fall back;
+     - every write to the device is refused;
+     - the launcher's rule, and the debugger's threshold.
+   - **The guard tests in `test_fs.py` and `test_cdlib.py`** now check that
+     nothing at all reaches channel 7. Their "empty channel" cases moved from
+     7 to 8: channel 7 is now refused by number before the probe those cases
+     exist to test.
+   - **Nine deliberate breakages each failed the tests:**
+     - either check in stage 1;
+     - either refusal in the device, or its rule never to create the file;
+     - `Machine`'s size limit;
+     - the debugger's upper bound;
+     - either library guard.
+   - **The full suite passes: 874 tests**, the 844 from before and 30 new.
 2. **bios2, with no screen yet.** It boots channel-1 programs, and
-   `test_loader.py`'s checks pass through it too.
+   `test_loader.py`'s checks pass through it too. This phase also adds
+   `bios2_source`, rebuilding bios2 when it changes, and `cc.py --org`.
 3. **bios2's screen, countdown and menu.** Tests queue keys through HID before
    the machine runs.
 4. **The boot sector, and bios2 booting it.** A test builds an image with

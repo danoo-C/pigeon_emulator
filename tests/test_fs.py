@@ -30,7 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import cases, run_module                           # noqa: E402
 from emulator.machine import Machine                            # noqa: E402
-from emulator.memory_map import CH_HDD, PROGRAM_LOAD_ADDR, STACK_TOP  # noqa: E402
+from emulator.memory_map import (                               # noqa: E402
+    CH_BIOS2, CH_HDD, PROGRAM_LOAD_ADDR, STACK_TOP)
 from pfs import BLOCK, PgfsImage                                # noqa: E402
 from test_libs import build                                     # noqa: E402
 
@@ -87,9 +88,9 @@ def pattern(n):
 _build = functools.lru_cache(maxsize=None)(build)
 
 
-def machine_for(disk, boot=None, disc=None):
+def machine_for(disk, boot=None, disc=None, bios2=None):
     machine = Machine(bios_path=str(BIOS), program_path=str(boot) if boot else None,
-                      disk_path=str(disk))
+                      disk_path=str(disk), bios2_path=str(bios2) if bios2 else None)
     if disc is not None:
         # Temporary images live outside the repo, which is where the
         # drive will only take discs from by default.
@@ -103,11 +104,15 @@ def load(machine, source):
     machine.cpu.pc = PROGRAM_LOAD_ADDR
 
 
-def run_fs(source, disk, boot=None, inspect=None, seconds=120, disc=None):
-    """Run a program to HALT and return main()'s result, signed."""
-    machine = machine_for(disk, boot, disc)
+def run_fs(source, disk, boot=None, inspect=None, seconds=120, disc=None, bios2=None,
+           before=None):
+    """Run a program to HALT and return main()'s result, signed.
+    before(machine) runs once the program is loaded, before it starts."""
+    machine = machine_for(disk, boot, disc, bios2)
     try:
         load(machine, source)
+        if before is not None:
+            before(machine)
         with contextlib.redirect_stdout(io.StringIO()):
             machine.run(deadline=time.time() + seconds)
         assert machine.cpu.halted, f"did not halt within {seconds}s (PC={machine.cpu.pc:#x})"
@@ -234,8 +239,9 @@ def timer_zero_status(machine):
 
 
 @cases(("HID", "CH_HID"), ("the timer", "CH_TIMER"), ("the display", "CH_DISPLAY"),
-       ("an empty channel", "7"), ("channel 0", "0"),
-       ("channel 1 with nothing on it", "CH_USERPROG"))
+       ("an empty channel", "8"), ("channel 0", "0"),
+       ("channel 1 with nothing on it", "CH_USERPROG"),
+       ("the firmware device", "CH_BIOS2"))
 def test_channels_that_are_not_disks(label, channel):
     """GET_SIZE is command 1, which is START on the timer: probing the
     timer channel would start timer 0. The known non-disks are refused
@@ -248,6 +254,35 @@ def test_channels_that_are_not_disks(label, channel):
             return fs_mount({channel});"""), disk,
                inspect=lambda m: statuses.append(timer_zero_status(m))), FS["FS_ENODEV"])
     assert statuses == [0], "timer 0 was started"
+
+
+def test_the_firmware_device_is_refused_before_anything_is_sent():
+    """Channel 7 holds the second-stage BIOS (docs/os_cd.md), on an HDD
+    that refuses every write. It answers GET_SIZE exactly as a disk does,
+    so nothing but the guard would stop fs_format() -- and the device's
+    silent refusals would let it report success. So the assertion is on
+    what reaches the device, which must be nothing, and on the file."""
+    sent = []
+
+    def watch(machine):
+        device = machine.io_controller.channels[CH_BIOS2]
+        original = device.callback
+
+        def recording(read_write, command, length, address, data):
+            sent.append(command)
+            return original(read_write, command, length, address, data)
+
+        device.callback = recording
+
+    with disks() as d:
+        firmware = d / "bios2.bin"
+        firmware.write_bytes(pattern(4 * BLOCK))
+        expect(run_fs(program("""
+            if (fs_format(CH_BIOS2, "", FS_FORMAT_FORCE) != FS_ENODEV) return -100;
+            return fs_mount(CH_BIOS2);"""), formatted(d), bios2=firmware, before=watch),
+               FS["FS_ENODEV"])
+        assert firmware.read_bytes() == pattern(4 * BLOCK), "the firmware file was modified"
+    assert sent == [], f"commands reached the firmware device: {sent}"
 
 
 @cases(("version", 4, 2), ("block size", 8, 1024), ("more blocks than the disk", 12, 4096),

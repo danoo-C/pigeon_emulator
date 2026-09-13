@@ -11,5 +11,6 @@
 
   "bios_source": "firmware/bios.asm",
   "bios_binary": "build/bios.bin",
+  "bios2_binary": "build/bios2.bin",
   "auto_build": true
 }

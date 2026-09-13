@@ -45,6 +45,10 @@ DEFAULTS = {
     "bios_source": "firmware/bios.asm",
     "bios_binary": "build/bios.bin",
     "auto_build": True,
+    # The second-stage BIOS (docs/os_cd.md), served read-only on channel 7.
+    # Optional: while the file is not there the BIOS boots channel 1 as it
+    # always has. Nothing builds one yet.
+    "bios2_binary": "build/bios2.bin",
 
     # --- the CD drive (docs/cd-drive.md) ---
     # Discs may be inserted from anywhere under cd_root. "." is the repo
@@ -83,6 +87,7 @@ class Config:
     disk: Path
     bios_source: Path
     bios_binary: Path
+    bios2_binary: Path
     auto_build: bool
     source_path: Optional[Path] = None   # which config.json this came from
     unknown_keys: List[str] = field(default_factory=list)
@@ -103,7 +108,7 @@ class Config:
         """Apply command-line flags. None means 'not given, keep config'."""
         given = {k: v for k, v in kwargs.items() if v is not None}
         for key in ("program_dirs", "build_dir", "disk", "bios_source", "bios_binary",
-                    "cd_dirs", "cd_upload_dir", "cd_root"):
+                    "bios2_binary", "cd_dirs", "cd_upload_dir", "cd_root"):
             if key in given:
                 given[key] = ([_resolve(p) for p in given[key]]
                               if key in ("program_dirs", "cd_dirs")
@@ -221,6 +226,7 @@ def load_config(path: Optional[Path] = None) -> Config:
         disk=_resolve(settings["disk"]),
         bios_source=_resolve(settings["bios_source"]),
         bios_binary=_resolve(settings["bios_binary"]),
+        bios2_binary=_resolve(settings["bios2_binary"]),
         auto_build=bool(settings["auto_build"]),
         source_path=path if path.exists() else None,
         unknown_keys=unknown,

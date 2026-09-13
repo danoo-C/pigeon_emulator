@@ -549,10 +549,16 @@ static struct __fs_volume *__fs_volume_of(unsigned channel) {
  * the display, and START on the timer. So the channels known not to be
  * disks are refused before anything is sent: a probe would start a
  * timer. Anything else must answer with exactly the 8 bytes a disk does;
- * an empty channel answers 0xFFFFFFFF. */
+ * an empty channel answers 0xFFFFFFFF.
+ *
+ * CH_BIOS2 is refused with them for the opposite reason: it IS a disk,
+ * the read-only one holding the second-stage BIOS (docs/os_cd.md), and
+ * it would pass every probe. Nothing may mount or format the firmware --
+ * and since that device refuses writes without saying so, fs_format()
+ * would report that it had. */
 static unsigned __fs_disk_blocks(unsigned channel) {
     if (channel == 0u || channel == CH_HID || channel == CH_TIMER
-            || channel == CH_DISPLAY) return 0u;
+            || channel == CH_DISPLAY || channel == CH_BIOS2) return 0u;
     if (__fs_io(channel, 0u, FS__HDD_GET_SIZE, 8u, 0u) != 8u) return 0u;
     if (IO_DATAW[1] != 0u || IO_DATAW[0] > 0xFFFFFE00u) {
         return 0x7FFFFFu;               /* all a 32-bit IO_ADDRESS reaches */

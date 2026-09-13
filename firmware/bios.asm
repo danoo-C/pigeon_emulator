@@ -1,6 +1,14 @@
-; BIOS loader for the pigeon emulator.
+; BIOS for the pigeon emulator: stage 1 of two (docs/os_cd.md).
 ;
-; Reads the user program off IO channel 1 and copies it to
+; First it looks for the second stage. The firmware device on channel
+; CH_BIOS2 is a read-only disk holding bios2; when it answers with a size
+; that fits, one READ_DMA copies the whole file to BIOS2_LOAD_ADDR and the
+; BIOS jumps there. bios2 has the room these 1,024 bytes do not: a font,
+; a screen, a boot menu.
+;
+; Without a second stage -- an empty channel, an empty or oversized file,
+; a transfer that comes back short or refused -- it does what it always
+; has. It reads the user program off IO channel 1 and copies it to
 ; PROGRAM_LOAD_ADDR, painting each word into the framebuffer as it goes
 ; (a boot progress bar made of program bytes), then waits two seconds,
 ; clears the screen and jumps to the program.
@@ -40,7 +48,9 @@ DISPLAY_WORDS = DISPLAY_SIZE / 4
 
 IO_POINTER = IO_START
 IO_PROG_CHANEL = CH_USERPROG
+HDD_GET_SIZE = 1
 HDD_READ = 2
+HDD_READ_DMA = 6
 
 ; BIOS scratch, in the heap region. The CPU has six registers and the
 ; copy loop needs five, so the loop counters that must survive a chunk
@@ -49,7 +59,49 @@ HEAP_ADDRESS = HEAP_START
 DSZE     = 0      ; total words copied, read later by the screen clear
 DISK_OFF = 4      ; byte offset of the next chunk on the boot disk
 
+; ------------------------------------------------------------------ bios2
+; A disk answers GET_SIZE with exactly 8 bytes; an empty channel answers
+; 0xFFFFFFFF -- the test fs.c uses. Only the size's low word is read:
+; Machine refuses a file over BIOS2_MAX, so the high word is always 0.
 START:
+    MOV A #IO_POINTER + #IO_R_W
+    MWW A #0
+    MOV A #IO_POINTER + #IO_COMMAND
+    MWW A #HDD_GET_SIZE
+    MOV A #IO_POINTER + #IO_LENGTH
+    MWW A #8
+    MOV A #IO_POINTER
+    MWW A #CH_BIOS2                 ; fire it
+    MOV A #IO_POINTER + #IO_RETURN_DATA
+    MRW B A
+    CMP B #8
+    JNZ LOAD_PROGRAM                ; no firmware device
+    MOV A #IO_POINTER + #IO_USABLE_AFTER
+    MRW C A                         ; C = the size of bios2
+    CMP C #0
+    JZ LOAD_PROGRAM                 ; an empty file
+    CMP C #BIOS2_MAX + 1
+    JGE LOAD_PROGRAM                ; it would run into the hardware stack
+
+    ; [RAM address, byte count] in the window, and R/W 0 so the count of
+    ; bytes moved comes back. LENGTH is still 8: the size of that block.
+    MWW A #BIOS2_LOAD_ADDR          ; A still points at the window
+    ADD A A #4
+    MWW A C
+    MOV A #IO_POINTER + #IO_COMMAND
+    MWW A #HDD_READ_DMA
+    MOV A #IO_POINTER + #IO_ADDRESS
+    MWW A #0                        ; from the start of the file
+    MOV A #IO_POINTER
+    MWW A #CH_BIOS2                 ; fire it
+    MOV A #IO_POINTER + #IO_USABLE_AFTER
+    MRW B A                         ; bytes moved, or 0xFFFFFFFF if refused
+    CMP B C
+    JNZ LOAD_PROGRAM                ; short or refused: don't run half of it
+    JMP #BIOS2_LOAD_ADDR
+
+; -------------------------------------------------------------- program
+LOAD_PROGRAM:
     MOV A #HEAP_ADDRESS + #DSZE
     MWW A #0                        ; words copied so far
     MOV A #HEAP_ADDRESS + #DISK_OFF

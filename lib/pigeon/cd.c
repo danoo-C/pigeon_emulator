@@ -44,13 +44,15 @@ static unsigned __cd_io(unsigned channel, unsigned command, unsigned length,
  * sent, for the reason fs.c's __fs_disk_blocks() gives: the same command
  * number means something else on another device, and a probe must never
  * start a timer. A disk answers command 8 with zeros and an empty channel
- * with 0xFFFFFFFF, so neither can pass for the magic.
+ * with 0xFFFFFFFF, so neither can pass for the magic. CH_BIOS2, the
+ * firmware (docs/os_cd.md), is a disk and would fail the magic too, but
+ * it is refused with the others: nothing is sent to the BIOS at all.
  *
  * On CD_OK and CD_ENODISC the reply is left in the data window, and the
  * caller must copy what it needs before its next IO command of any kind. */
 static int __cd_media(unsigned channel) {
     if (channel == 0u || channel == CH_HID || channel == CH_TIMER
-            || channel == CH_DISPLAY) {
+            || channel == CH_DISPLAY || channel == CH_BIOS2) {
         return CD_ENODEV;
     }
     if (__cd_io(channel, CD__MEDIA, CD__MEDIA_LEN, 0u) != CD__MEDIA_LEN) return CD_ENODEV;

@@ -108,7 +108,8 @@ everything else works.
 Without `--run` you get a menu (run / single-step debugger / dump RAM / CPU
 state). `--help` lists everything; the useful ones are `--verbose` (log every IO
 transaction, disk read and key event), `--headless` (bind no ports) and
-`--disasm-bios`.
+`--disasm-bios`. `--bios2 PATH` puts a second-stage BIOS on IO channel 7
+([docs/os_cd.md](docs/os_cd.md)).
 
 ### config.json
 
@@ -130,6 +131,7 @@ partial or missing file is fine.
 
   "bios_source": "firmware/bios.asm",
   "bios_binary": "build/bios.bin",
+  "bios2_binary": "build/bios2.bin",
   "auto_build": true
 }
 ```
@@ -141,6 +143,7 @@ partial or missing file is fine.
 | `build_dir` | where assembled output and RAM dumps go |
 | `disk` | the disk on IO channel 2. It lives outside `build/` so that what programs save survives a clean build, and it is created blank, at 4 MiB, if missing. `tools/pfs.py` formats it and shows what's on it ([docs/filesystem.md](docs/filesystem.md)) |
 | `bios_source` / `bios_binary` | the BIOS and where it builds to |
+| `bios2_binary` | the second-stage BIOS, served read-only on IO channel 7. Optional: while the file is missing, the BIOS boots channel 1 as it always has. `--bios2 PATH` names one that must exist ([docs/os_cd.md](docs/os_cd.md)) |
 | `auto_build` | reassemble stale sources automatically (`--no-autobuild` to skip) |
 | `cd_root` | discs may be inserted from anywhere under here. `"."` is the repo root, so the whole project is reachable and nothing outside it is; `null` allows the entire filesystem ([docs/cd-drive.md](docs/cd-drive.md)) |
 | `cd_dirs` | folders the "Load from server" picker lists, non-recursively |
@@ -190,7 +193,7 @@ emulator/             the machine (importable, no side effects on import)
   bios.py             loads bios.bin into RAM at 0x0
   devices/            hdd.py  cd.py  timer.py  hid.py  display_io.py
 assembler/            assembler.py + README.md
-firmware/bios.asm     boot ROM source (loads programs in 4 KB chunks)
+firmware/bios.asm     boot ROM source: loads bios2 from channel 7, else a program in 4 KB chunks
 user/                 example programs (.asm and .c alike)
 lib/pigeon/           the C libraries: mem, string, fs, cd, display, input, math
 compiler/             pigeon-cc: C -> assembly
@@ -207,14 +210,19 @@ disks/                the channel-2 disk image (gitignored, survives a clean)
 ### Boot sequence
 
 1. `bios.py` copies `build/bios.bin` into RAM at `0x0`; the CPU starts at PC = 0.
-2. The BIOS programs the IO header and selects **channel 1**, the disk holding
+2. The BIOS asks **channel 7**, the read-only firmware device, for a
+   second-stage BIOS. If it holds one of at most 15 MB, a single `READ_DMA`
+   copies it to `0x07000000` and the BIOS jumps there
+   ([docs/os_cd.md](docs/os_cd.md)). Nothing builds one yet; without it the
+   BIOS carries on as it always has.
+3. The BIOS programs the IO header and selects **channel 1**, the disk holding
    the user program.
-3. The controller DMAs it into the IO data window; the BIOS copies it word by
+4. The controller DMAs it into the IO data window; the BIOS copies it word by
    word to `0x20000`, painting each word into the framebuffer as it goes — a
    boot progress bar made of program bytes. The bar stops at the bottom of
    the screen: unclamped, a program larger than the gap from the framebuffer
    to `0x20000` painted over the program it was loading.
-4. It waits 2 s on **channel 4**, clears the screen, and jumps to `0x20000`.
+5. It waits 2 s on **channel 4**, clears the screen, and jumps to `0x20000`.
 
 ---
 
@@ -231,6 +239,7 @@ silently overlapping.
 | `0x00001418`–`0x00015817` | 81 KB | Display framebuffer (192×108 × 4 B, 16:9) |
 | `0x00020000`–`0x0011FFFF` | 1 MB | User program (fixed load point) |
 | `0x00120000` → | | Heap, grows **up** |
+| `0x07000000`–`0x07EFFFFF` | 15 MB | Second-stage BIOS, when there is one. Only used while booting |
 | ← `0x07FFFFFC` | | Stack, grows **down** |
 
 Heap and stack share one uninterrupted block and grow toward each other, so
@@ -311,6 +320,7 @@ that fires the command.
 | 4 `CH_TIMER` | timers | `1` START `2` STOP `4` RESET `5` STATUS → `(status, remaining_ms)` |
 | 5 `CH_DISPLAY` | framebuffer | `1` INFO → `(w, h, size)` `2` SET_BASE (page flip, ADDRESS = the buffer to scan out) `3` GET_BASE `4` FILL (ADDRESS = destination, colour in the data window) |
 | 6 `CH_CD` | removable disc | `0`-`5` as HDD, but **read-only**: WRITE and TRUNCATE are refused · `8` MEDIA → `(magic, present, generation, size, name[32])` · `9` EJECT → `(ejected, generation)` |
+| 7 `CH_BIOS2` | firmware | the second-stage BIOS ([docs/os_cd.md](docs/os_cd.md)). As HDD, but **read-only**: WRITE, TRUNCATE and anything sent with R/W 1 get 0 bytes, WRITE_DMA gets `0xFFFFFFFF`. Registered only when there is a bios2; `fs.c` and `cd.c` never send it anything |
 
 Input comes in **two buffers**, because guest code asks two different questions.
 The FIFOs answer *"what happened, in order"* — a key pressed and released
@@ -337,6 +347,7 @@ python3 tests/test_config.py      # config.json + program discovery
 python3 tests/test_input.py       # HID: both buffers, keycode translation
 python3 tests/test_directives.py  # data directives + the anti-drift guard
 python3 tests/test_loader.py      # programs larger than one DMA window
+python3 tests/test_bios2.py       # BIOS stage 1 and the channel-7 firmware device
 python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
 python3 tests/test_fs.py          # PigeonFS on the guest, checked against pfs.py
 python3 -m pytest tests/          # all 149, if you have pytest

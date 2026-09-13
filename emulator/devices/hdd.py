@@ -21,6 +21,11 @@ Behavior:
   __fs_blk_read find the end of a program that way, by comparing
   IO_RETURN_DATA against what they asked for.
 - Writes extend the file if necessary.
+- A READ-ONLY HDD, readonly=True, is the firmware device on CH_BIOS2
+  (docs/os_cd.md). Its file is opened "rb" and never created: a missing
+  file is FileNotFoundError, because 4 MiB of zeros is a blank disk and
+  not a BIOS. WRITE, TRUNCATE and anything sent with R/W 1 get 0 bytes,
+  as the CD drive answers them, and WRITE_DMA gets DMA_REFUSED.
 
 Command list:
   CMD_NOP = 0         - No-op, returns `length` zero bytes.
@@ -95,16 +100,22 @@ _WINDOW_BASE = IO_START + IOHeader.USABLE_AFTER
 
 class HDD:
     def __init__(self, path: Optional[str] = None, create_size: int = DEFAULT_SIZE,
-                 ram=None):
+                 ram=None, readonly: bool = False):
         self.path = Path(path) if path is not None else DEFAULT_DISK
         self.create_size = create_size
         # DMA needs the RAM it copies to and from. Without it commands 6 and
         # 7 are unknown here, exactly as on an HDD from before they existed.
         self.ram = ram
+        self.readonly = readonly
         self._f = None
         self._open()
 
     def _open(self):
+        if self.readonly:
+            # Before the mkdir below: a firmware path that does not exist
+            # must not leave a folder behind, let alone a blank image.
+            self._f = open(self.path, "rb")
+            return
         exists = self.path.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # open in r+b if exists, else create and fill to create_size
@@ -190,6 +201,11 @@ class HDD:
         cmd = int(command)
         length = int(length) if length is not None else 0
 
+        # Read-only is refusal before decoding, the rule cd.py follows:
+        # anything the bus can express as a write never reaches the file.
+        if self.readonly and (read_write == 1 or cmd in (CMD_WRITE, CMD_TRUNCATE)):
+            return b""
+
         if cmd == CMD_NOP:
             return b"\x00" * length
 
@@ -213,11 +229,14 @@ class HDD:
             return b""
 
         if self.ram is not None and cmd in (CMD_READ_DMA, CMD_WRITE_DMA):
+            if cmd == CMD_WRITE_DMA and self.readonly:
+                return struct.pack("<I", DMA_REFUSED)
             return self._dma(cmd, addr)
 
         if cmd == CMD_FLUSH:
-            self._f.flush()
-            os.fsync(self._f.fileno())
+            if not self.readonly:           # nothing was ever written to flush
+                self._f.flush()
+                os.fsync(self._f.fileno())
             return b""
 
         # unknown command -> return zeros for reads, ignore for writes

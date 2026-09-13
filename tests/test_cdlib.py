@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import cases, run_module                                 # noqa: E402
 from emulator.memory_map import (                                     # noqa: E402
-    CH_CD, CH_DISPLAY, CH_HID, CH_TIMER, STACK_TOP)
+    CH_BIOS2, CH_CD, CH_DISPLAY, CH_HID, CH_TIMER, STACK_TOP)
 from test_fs import (                                                 # noqa: E402
     FS, MiB, PRELUDE, blank, clean, disc_image, disks, formatted, host, load,
     machine_for, pattern, run_fs, timer_zero_status)
@@ -66,12 +66,12 @@ def raw_disc(d, name="demo.bin", data=b""):
     return path
 
 
-def run_machine(source, disk, disc=None, before=None, after=None, seconds=120):
+def run_machine(source, disk, disc=None, before=None, after=None, seconds=120, bios2=None):
     """run_fs with a hand on the machine: before(machine) runs after the
     program is loaded and before it starts, for a test that has to change
     what is in the drive, or wrap a callback, first; after(machine) runs
     once it has halted."""
-    machine = machine_for(disk, disc=disc)
+    machine = machine_for(disk, disc=disc, bios2=bios2)
     try:
         load(machine, source)
         if before is not None:
@@ -193,9 +193,10 @@ def test_an_empty_drive_says_so_everywhere():
             before=lambda m: m.cd.eject()), CD["CD_ENODISC"])
 
 
-@cases(("an empty channel", "7", None), ("a disk", "CH_HDD", None),
+@cases(("an empty channel", "8", None), ("a disk", "CH_HDD", None),
        ("the timer", "CH_TIMER", CH_TIMER), ("HID", "CH_HID", CH_HID),
-       ("the display", "CH_DISPLAY", CH_DISPLAY), ("channel 0", "0", None))
+       ("the display", "CH_DISPLAY", CH_DISPLAY), ("channel 0", "0", None),
+       ("the firmware device", "CH_BIOS2", CH_BIOS2))
 def test_channels_that_are_not_drives(label, channel, refused):
     """A disk answers command 8 with zeros and an empty channel with
     0xFFFFFFFF, so neither passes for a drive -- and the probe has to be
@@ -207,7 +208,11 @@ def test_channels_that_are_not_drives(label, channel, refused):
     alone cannot see the rule -- with the guard deleted, every one of them
     still answers "not a drive", and an earlier version of this test passed
     that way. So for those three it is asserted as nothing reaching the
-    device at all."""
+    device at all.
+
+    The firmware device on channel 7 (docs/os_cd.md) is refused and
+    watched the same way. It is a disk, so a disk's zeros would already
+    fail the magic; the rule is that nothing is sent to the BIOS at all."""
     sent = []
     statuses = []
 
@@ -225,6 +230,7 @@ def test_channels_that_are_not_drives(label, channel, refused):
 
     with disks() as d:
         disc = raw_disc(d, data=b"x" * 64)
+        firmware = raw_disc(d, "bios2.bin", bytes(64))
         expect(run_machine(program(f"""
             cd_info_t info;
             unsigned char buf[8];
@@ -233,7 +239,7 @@ def test_channels_that_are_not_drives(label, channel, refused):
             if (cd_generation({channel}) != 0u) return -3;
             if (cd_read({channel}, 0u, buf, 8u) != CD_ENODEV) return -4;
             if (cd_eject({channel}) != CD_ENODEV) return -5;
-            return cd_info({channel}, &info);"""), formatted(d), disc=disc,
+            return cd_info({channel}, &info);"""), formatted(d), disc=disc, bios2=firmware,
             before=watch, after=lambda m: statuses.append(timer_zero_status(m))),
             CD["CD_ENODEV"])
     assert statuses == [0], f"{label}: timer 0 was started"

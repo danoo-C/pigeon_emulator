@@ -18,6 +18,7 @@ and silently drew into the IO region instead of the screen.
     0x00020000 - 0x0011FFFF   program (static)  (1 MB, fixed load point)
     0x00120000 - ...          HEAP -- grows UP toward higher addresses
                                   ... free space ...
+    0x07000000 - 0x07EFFFFF   second-stage BIOS, when there is one (15 MB max)
                               STACK -- grows DOWN toward lower addresses
     ...                - 0x07FFFFFC   (stack starts here, at the very top)
 
@@ -42,6 +43,17 @@ REGISTER_COUNT = 6   # A-F
 # --- BIOS ---
 BIOS_START = 0x00000000
 BIOS_MAX   = 0x00000400   # 1 KB reserved
+
+# --- Second-stage BIOS (docs/os_cd.md) ---
+# 1 KB has no room for a font, so the BIOS above loads a second stage off
+# the read-only firmware device on CH_BIOS2 and jumps to it. It runs here,
+# high up: one READ_DMA reaches it (the HDD refuses DMA below
+# PROGRAM_LOAD_ADDR), and nothing it loads lands on it -- a program goes
+# to PROGRAM_LOAD_ADDR, with its frame stack and heap at HEAP_START. It
+# ends before the last megabyte, which the hardware stack grows down into;
+# lib/pigeon/mem.c stops the heap at 0x07F00000 for the same reason.
+BIOS2_LOAD_ADDR = 0x07000000
+BIOS2_MAX       = 0x07F00000 - BIOS2_LOAD_ADDR   # 15 MB
 
 # --- IO controller (channel-based, DMA-capable bus: HDD, sound, keyboard, ...) ---
 # Header (byte offsets from IO_START), all little-endian 4-byte fields:
@@ -92,7 +104,8 @@ CH_HID      = 3   # mouse + keyboard
 CH_TIMER    = 4   # wall-clock countdown timers
 CH_DISPLAY  = 5   # framebuffer: scanout base, block fill
 CH_CD       = 6   # removable read-only disc, swapped from the host
-# 7 is free. <pigeon/cd.h> takes a channel, so a second drive is a
+CH_BIOS2    = 7   # read-only firmware: the second-stage BIOS (docs/os_cd.md)
+# 8 is free. <pigeon/cd.h> takes a channel, so a second drive is a
 # one-line change here and nowhere else.
 
 
