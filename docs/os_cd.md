@@ -1,10 +1,10 @@
 # Installation media: a two-stage BIOS, the boot sector and `cc.py --project`
 
-> **Status: phases 1 to 5 are built** (§9): stage 1 of the BIOS, the
-> firmware device, bios2 with its screen and menu, the boot sector, and
-> `cc.py --project` with the launcher's `--cd`. The installer is a
-> placeholder; what it does is still to come (§8). Power-on runs through
-> four stages:
+> **Status: phases 1 to 6 are built** (§9): stage 1 of the BIOS, the
+> firmware device, bios2 with its screen and menu, the boot sector,
+> `cc.py --project` with the launcher's `--cd`, and the installer. The
+> example disc installs the graphing calculator onto a blank hard disk,
+> which then boots it. Power-on runs through four stages:
 >
 > 1. **The BIOS**, 1 KB at address 0, loads **bios2** from a firmware
 >    device on IO channel 7, and jumps to it.
@@ -12,12 +12,12 @@
 >    countdown and the boot menu. It boots a program on channel 1, or copies
 >    the hard disk's or the CD's boot sector into memory and jumps to it.
 > 3. **The disc's boot sector** loads the installer and runs it.
-> 4. **The installer.** `cc.py --project` writes the disc. What the installer
->    does comes later (§8).
+> 4. **The installer** puts the disc on the hard disk and restarts (§8).
+>    `cc.py --project` writes the disc.
 >
-> The first three stages are built and tested, and the fourth is a
-> placeholder that lists the disc; their sizes are in the table below. Facts in §2 were checked in the code on 2026-09-13. Anything
-> reasoned but not run is marked *unverified*.
+> All four are built and tested; their sizes are in the table below. Facts
+> in §2 were checked in the code on 2026-09-13. Anything reasoned but not
+> run is marked *unverified*.
 > You left the open questions to me, and the decisions are in
 > [§10](#10-decisions).
 >
@@ -29,8 +29,8 @@
 | **bios2** (`firmware/bios2.c`) | `0x07000000` | Screen, countdown, menu; boots channel 1, or a boot sector from the hard disk or the CD | 46,068 bytes, built, with the display, input, mem and string libraries |
 | **Firmware device** | channel 7 | A read-only HDD holding `build/bios2.bin` | — |
 | **Boot sector** (`firmware/boot.asm`) | `0x15898` | Loads the file its boot record names into `0x20000`, and jumps; returns to bios2 if it can't | 376 of 384 bytes, built |
-| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | built; the example disc is 341.5 KiB |
-| **Installer** (`user/os/installer.c`) | `0x20000` | For now, lists what is on the disc. Later: writes the hard disk's boot sector, and mirrors the disc onto it | 120,236 bytes, a placeholder |
+| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | built; the example disc is 473.0 KiB |
+| **Installer** (`user/os/installer.c`) | `0x20000` | Formats the hard disk, copies the disc onto it, makes it boot `/boot.bin`, and restarts | 139,120 bytes, built |
 
 ---
 
@@ -303,10 +303,12 @@ label   = PIGEONOS              # the disc's volume label, 15 bytes at most
 
 [boot]
 installer  = installer.c        # the disc's boot sector loads and runs this
+system     = ../graph.c         # optional: what the installed hard disk boots
 bootsector = boot.asm           # optional: firmware/boot.asm when left out
 
-[files]                         # what the installer will mirror onto the hard disk
+[files]                         # what the installer puts on the hard disk
 /bin/files.bin   = ../files.c   # a .c or .asm is built; anything else is copied
+/bin/cube.bin    = ../cube.c
 /docs/readme.txt = readme.txt
 ```
 
@@ -324,8 +326,10 @@ writes `build/pigeonos.img`:
 4. **Make the image** with `PgfsImage.mkfs`, sized for every file and
    directory plus a little room, with the label.
 5. **Write `/install.bin` first.** Then `/pigeon.txt`: the title the
-   installer shows, then the `[project]` keys. Then the files in order,
-   making directories as needed.
+   installer shows, then the `[project]` keys. Then `/boot.bin`, the
+   `system`, if the project names one; one over 1 MB is refused, since the
+   boot sector couldn't load it. Then the files in order, making
+   directories as needed.
 6. **Make the image boot `/install.bin`** with `PgfsImage.make_bootable`,
    which refuses a file that isn't contiguous. The first file on a fresh
    image is.
@@ -337,43 +341,65 @@ As run on the example:
 
 ```
 PigeonOS 0.1, from user/os/pigeon_compiler_init.txt
-  /install.bin               120,236 B   user/os/installer.c
+  /install.bin               139,120 B   user/os/installer.c
   /pigeon.txt                     60 B
+  /boot.bin                  114,580 B   user/os/../graph.c
   /bin/files.bin             174,088 B   user/os/../files.c
   /bin/cube.bin               40,048 B   user/os/../cube.c
-  /docs/readme.txt               198 B   user/os/readme.txt
-build/pigeonos.img: 341.5 KiB, label PIGEONOS, boots /install.bin
+  /docs/readme.txt               254 B   user/os/readme.txt
+build/pigeonos.img: 473.0 KiB, label PIGEONOS, boots /install.bin
 ```
 
 **The launcher's `--cd PATH`, or `"cd"` in `config.json`**, puts a disc in
 the drive before power-on. Otherwise a disc can't be in the drive when
 bios2 looks.
 
-**The installer is a placeholder** (`user/os/installer.c`):
-- it mounts the channel it was booted from, which bios2 left at
-  `BOOT_CHANNEL`, and shows the title from `/pigeon.txt`;
-- it lists the files it would copy, and halts with their number in `A`;
-- through the launcher, `--cd build/pigeonos.img` with no program booted
-  the example disc into it, and it halted. `tests/test_project.py` boots the
-  same disc and reads 4 in `A`, for `/pigeon.txt`, `/bin/files.bin`,
-  `/bin/cube.bin` and `/docs/readme.txt`.
-
 ---
 
-## 8. Later: the installer
+## 8. The installer
 
-What this step has to leave room for:
+`user/os/installer.c`, built onto the disc as `/install.bin`. Booted from
+the disc, it puts the disc on the hard disk:
 
-- **Same block 0 layout on the hard disk.** The installer can copy the boot
-  sector out of the disc's own block 0.
-- **Format first, then write block 0.** Unmount the disk before writing
-  block 0 directly, or `fs.c` may write its cached copy back over it
-  *(unverified)*.
-- **The hard disk's record points at the system file**, which has to stay
-  contiguous. Anything that rewrites that file has to rewrite the record too
-  (kernel.md §5).
-- **`pfs.py` keeps bytes 52–63 and 128–511** when it updates the superblock,
-  so it is safe on an installed hard disk. Done in phase 4.
+1. **It mounts the disc**, from the channel bios2 left at `BOOT_CHANNEL`.
+   It shows the title from `/pigeon.txt`, the hard disk's size, how many
+   files it will copy, and whether the disk will boot. Everything on the
+   hard disk is erased, so it asks: Enter installs, and Esc cancels with
+   nothing written.
+2. **It formats the hard disk** with the disc's volume label.
+3. **It copies `/boot.bin` first**, so its blocks are one run on the fresh
+   disk. Then it copies every other file but `/install.bin`, showing each.
+4. **It makes the hard disk boot `/boot.bin`:**
+   - it unmounts the disk first, so `fs.c` holds no copy of block 0;
+   - `fs.h` has no call that says where a file's blocks are, so it finds
+     `/boot.bin`'s entry in the root directory's first block, and follows
+     the FAT to check the blocks are one run that ends the chain;
+   - it writes the boot record, and the disc's own boot sector, into block 0
+     directly, then reads the block back.
+5. **Enter restarts,** by calling address 0, where the BIOS still is. The
+   hard disk comes before the CD in bios2's order, so the hard disk is what
+   boots.
+
+A failure stops with the reason on screen: no hard disk, a disk too small,
+or a `/boot.bin` that would not boot.
+
+**The project names what the installed disk boots.** `system = ../graph.c`
+in `[boot]` puts the graphing calculator on the disc as `/boot.bin` (§7).
+
+**Run end to end** in `tests/test_install.py`, on a `Machine` with a blank
+4 MiB hard disk and the example disc:
+- **The install:** the installer copied five files.
+- **The disk, read back from the host:**
+  - it held them byte for byte;
+  - its boot record pointed at `/boot.bin`, with the disc's boot sector
+    beside it;
+  - `fsck` was clean.
+- **After the restart:** bios2 counted down to the hard disk, whose boot
+  sector loaded the calculator, and the calculator drew its curve.
+
+**What still holds for an installed disk:** its boot record points at
+`/boot.bin`'s blocks. Anything that rewrites that file has to write the
+record again (`pfs.py boot` does, on the host; kernel.md §5).
 
 ---
 
@@ -595,6 +621,36 @@ What this step has to leave room for:
      - not checking the `"cd"` setting;
      - `--project` accepting sources.
    - **The full suite passes: 953 tests**, the 924 from phase 4 and 29 new.
+6. **The installer, and a system for the hard disk.** ***Done.***
+   - **`user/os/installer.c`,** 139,120 bytes, does §8.
+   - **`[boot] system = ...`** builds a system onto the disc as `/boot.bin`,
+     refusing one over 1 MB, and `/boot.bin` is reserved as `/install.bin`
+     is. The example's system is `user/graph.c`, the graphing calculator,
+     and its disc is now 473.0 KiB.
+   - **Tests:**
+     - **`tests/test_install.py`, 3 cases:**
+       - installing the example disc onto a blank disk, restarting, and the
+         calculator drawing from the hard disk;
+       - Esc leaving a disk byte-identical;
+       - a 256 K disk reported as a failed install.
+     - **`test_project.py`** gains the system cases, and its example test now
+       checks the installer's question.
+   - **Found on the way: pigeon-cc's preprocessor expands macros inside
+     string literals.** With `#define INSTALLER "/install.bin"`, the string
+     `"INSTALLER"` became `""/install.bin""`, and the installer didn't
+     compile. The installer's macros were renamed around it; the
+     preprocessor is unchanged.
+   - **Eight deliberate breakages each failed the tests:**
+     - in the installer: not copying `/boot.bin` first, never writing
+       block 0, taking the boot sector from the hard disk instead of the
+       disc, ignoring Esc, copying itself, and not restarting;
+     - in `cc.py --project`: leaving the system off the disc, and not
+       reserving `/boot.bin`.
+   - **One check only observed:** without the unmount before block 0 is
+     written, all three install tests still pass, so `fs.c` did not write its
+     cached block 0 back in this flow. The unmount stays: it is the order that
+     can't go wrong.
+   - **The full suite passes: 959 tests**, the 953 from phase 5 and 6 new.
 
 | File | Change |
 |---|---|
@@ -605,7 +661,7 @@ What this step has to leave room for:
 | `emulator/machine.py`, `cli.py`, `config.py`, `config.json` | the firmware device, building bios2, `--bios2`, `--cd`, the debugger's threshold |
 | `lib/pigeon/fs.c`, `lib/pigeon/cd.c` | refuse channel 7 |
 | `compiler/cc.py`, `compiler/project.py` | `--org`, `--project` |
-| `user/os/pigeon_compiler_init.txt`, `user/os/installer.c` | new; the installer is a placeholder until §8 |
+| `user/os/pigeon_compiler_init.txt`, `user/os/installer.c` | new: the example project, and its installer (§8) |
 | `README.md` | the boot sequence, the memory map, channel 7 |
 
 ---

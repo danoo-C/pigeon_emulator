@@ -26,10 +26,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _runner import cases, run_module                                 # noqa: E402
 from compiler import cc                                               # noqa: E402
 from compiler.project import (                                        # noqa: E402
-    INSTALLER_PATH, METADATA_PATH, ProjectError, build_disc, read_project)
+    INSTALLER_PATH, METADATA_PATH, SYSTEM_PATH, ProjectError, build_disc, read_project)
 from emulator.cli import disc_drive                                   # noqa: E402
 from emulator.config import load_config                               # noqa: E402
-from emulator.memory_map import BOOT_CODE                             # noqa: E402
+from emulator.memory_map import BOOT_CODE, PROGRAM_MAX_SIZE           # noqa: E402
 from emulator.programs import Program                                 # noqa: E402
 from pfs import PgfsImage, boot_sector                                # noqa: E402
 from test_bios2 import ENTER, power_on                                # noqa: E402
@@ -123,6 +123,8 @@ def test_a_label_left_out_comes_from_the_name():
        ("a name over 31 bytes", BASE + "[files]\n/" + "x" * 32 + " = notes.txt\n",
         6, "at most 31"),
        ("the installer's own path", BASE + "[files]\n/install.bin = notes.txt\n",
+        6, "the disc's own"),
+       ("the system's own path", BASE + "[files]\n/boot.bin = notes.txt\n",
         6, "the disc's own"),
        ("the same path twice", BASE + "[files]\n/a.txt = notes.txt\n/./a.txt = notes.txt\n",
         7, "already on line 6"),
@@ -233,22 +235,42 @@ def test_the_disc_boots_its_installer():
             assert p.a == ANSWER, f"A={p.a:#x}, want {ANSWER:#x}"
 
 
-def test_the_example_project_builds_and_its_installer_lists_the_disc():
-    """user/os/pigeon_compiler_init.txt, as shipped: its placeholder
-    installer mounts the disc it was booted from and lists what it holds."""
+@cases(("a system", "system = tiny.c", None),
+       ("a system too big to boot", "system = big.bin", "loads at most"))
+def test_a_system_goes_on_the_disc_as_boot_bin(label, line, error):
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        source = t / "src"
+        write(source, "tiny.c", "int main(void) { return 5; }\n")
+        (source / "big.bin").write_bytes(bytes(PROGRAM_MAX_SIZE + 1))
+        project = read_project(project_dir(source, GOOD.replace(
+            "installer = installer.c", f"installer = installer.c\n{line}")))
+        try:
+            disc = build_disc(project, t / "disc.img", t / "build", quiet)
+        except ProjectError as e:
+            assert error and error in str(e), f"{label}: {e}"
+            return
+        assert error is None, f"{label}: built a disc"
+        with PgfsImage(disc) as img:
+            assert img.read_file(SYSTEM_PATH) == built(t, source / "tiny.c"), label
+
+
+def test_the_example_project_builds_and_its_installer_asks_first():
+    """user/os/pigeon_compiler_init.txt, as shipped. Its installer shows
+    what it will do and waits; tests/test_install.py goes on and installs."""
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
         disc = build_disc(read_project(EXAMPLE), t / "pigeonos.img", t / "build", quiet)
         with PgfsImage(disc) as img:
             assert img.label == "PIGEONOS" and img.fsck().clean
+            assert img.read_file(SYSTEM_PATH) == built(t, REPO_ROOT / "user" / "graph.c")
         with power_on(t, disc=disc, keys=[ENTER]) as p:
-            assert p.run(steps=20_000_000), p.rows()
-            rows, answer = p.rows(), p.a
-    assert answer == 4, f"the installer found {answer} files: {rows}"
+            assert p.run_until(lambda rows: rows[11] == "ENTER install   ESC cancel",
+                               steps=20_000_000), p.rows()
+            rows = p.rows()
     assert rows[0] == "PigeonOS 0.1" and rows[1] == "INSTALLER", rows
-    assert rows[4:8] == ["  /pigeon.txt", "  /bin/files.bin", "  /bin/cube.bin",
-                         "  /docs/readme.txt"], rows
-    assert rows[11] == "4 files. Nothing installed yet.", rows
+    assert rows[3] == "Hard disk: 4096 K" and rows[4] == "Everything on it is erased.", rows
+    assert rows[6] == "5 files to copy" and rows[7] == "It will boot /boot.bin", rows
 
 
 def test_cc_py_builds_a_project_on_the_command_line():

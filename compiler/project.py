@@ -14,6 +14,7 @@ the hard disk:
 
     [boot]
     installer  = installer.c        # the disc boots this
+    system     = ../graph.c         # optional: what the installed hard disk boots
     bootsector = boot.asm           # optional: firmware/boot.asm otherwise
 
     [files]
@@ -29,6 +30,8 @@ The disc is a PigeonFS image, written in this order:
     /install.bin   the installer, first, so its blocks are contiguous: the
                    boot sector cannot follow the FAT
     /pigeon.txt    the title the installer shows, then the [project] keys
+    /boot.bin      the system, when there is one: the installer copies it to
+                   the hard disk first and makes the disk boot it
     [files]        in the order given, with directories made as needed
 
 and block 0 is made to boot /install.bin. The same project builds the
@@ -46,17 +49,18 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 import pfs                                                            # noqa: E402
-from emulator.memory_map import BOOT_CODE                             # noqa: E402
+from emulator.memory_map import BOOT_CODE, PROGRAM_MAX_SIZE           # noqa: E402
 from pfs import BLOCK, LABEL_MAX, MIN_BLOCKS, PgfsError, PgfsImage    # noqa: E402
 
 INSTALLER_PATH = "/install.bin"
 METADATA_PATH = "/pigeon.txt"
+SYSTEM_PATH = "/boot.bin"
 BUILT = (".c", ".asm")              # anything else goes on the disc as it is
 
 # section -> {key: required}. [files] takes any key: a path on the disc.
 SECTIONS = {
     "project": {"name": True, "version": False, "label": False},
-    "boot": {"installer": True, "bootsector": False},
+    "boot": {"installer": True, "system": False, "bootsector": False},
     "files": None,
 }
 _SECTION = re.compile(r"\[\s*([A-Za-z]\w*)\s*\]")
@@ -86,6 +90,7 @@ class Project:
     installer: Path
     bootsector: Optional[Path]
     files: List[Tuple[str, Path]]           # (path on the disc, file on the host)
+    system: Optional[Path] = None           # what the installed hard disk boots
 
     @property
     def title(self) -> str:
@@ -183,13 +188,15 @@ def read_project(path) -> Project:
                  if "installer" in boot else None)
     bootsector = (host_file(boot["bootsector"], "bootsector", (".asm", ".bin"))
                   if "bootsector" in boot else None)
+    system = (host_file(boot["system"], "system", (".c", ".asm", ".bin"))
+              if "system" in boot else None)
 
     files: List[Tuple[str, Path]] = []
     lines: Dict[str, int] = {}
     for disc_path, entry in sections.get("files", {}).items():
         number = entry[1]
         normal, problem = _disc_path(disc_path)
-        if problem is None and normal in (INSTALLER_PATH, METADATA_PATH):
+        if problem is None and normal in (INSTALLER_PATH, METADATA_PATH, SYSTEM_PATH):
             problem = f"{normal} is the disc's own file; choose another path"
         if problem is None and normal in lines:
             problem = f"{normal} is already on line {lines[normal]}"
@@ -209,7 +216,7 @@ def read_project(path) -> Project:
 
     if mistakes:
         raise ProjectError(path, mistakes)
-    return Project(path, name, version, label, installer, bootsector, files)
+    return Project(path, name, version, label, installer, bootsector, files, system=system)
 
 
 def _disc_path(text: str) -> Tuple[str, Optional[str]]:
@@ -252,6 +259,13 @@ def build_disc(project: Project, output, build_dir,
     contents = [(INSTALLER_PATH, contents_of(project.installer, INSTALLER_PATH),
                  project.installer),
                 (METADATA_PATH, project.metadata(), None)]
+    if project.system is not None:
+        system = contents_of(project.system, SYSTEM_PATH)
+        if len(system) > PROGRAM_MAX_SIZE:
+            raise ProjectError(project.path, [(0, f"the system {project.system} is "
+                                                  f"{len(system):,} bytes; a boot sector "
+                                                  f"loads at most {PROGRAM_MAX_SIZE:,}")])
+        contents.append((SYSTEM_PATH, system, project.system))
     contents += [(disc_path, contents_of(host, disc_path), host)
                  for disc_path, host in project.files]
     sector = _boot_sector(project)

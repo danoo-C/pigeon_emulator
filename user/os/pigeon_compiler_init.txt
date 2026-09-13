@@ -12,6 +12,7 @@ label   = PIGEONOS              # the disc's volume label, 15 bytes at most
 
 [boot]
 installer = installer.c         # the disc's boot sector loads and runs this
+system    = ../graph.c          # what the installed hard disk boots: the graphing calculator
 # bootsector = boot.asm         # optional: firmware/boot.asm when left out
 
 [files]                         # what the installer will put on the hard disk

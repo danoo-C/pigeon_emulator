@@ -27,7 +27,8 @@ for elsewhere must not reach into them. The second-stage BIOS is built this
 way, for `BIOS2_LOAD_ADDR` ([docs/os_cd.md](../docs/os_cd.md)).
 
 `--project FILE` builds an installation disc instead. It reads a project
-file, builds the installer and the files it names, and writes a bootable
+file, builds the installer, the system the installed disk boots, and the
+files it names, and writes a bootable
 PigeonFS image to `-o`, or to `build/<name>.img`
 ([docs/os_cd.md](../docs/os_cd.md) §7). Every mistake in the file is
 reported with its line before anything is built.

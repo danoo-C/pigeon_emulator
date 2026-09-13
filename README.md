@@ -116,8 +116,15 @@ An installation disc is a project file away:
 
 ```bash
 python3 compiler/cc.py --project user/os/pigeon_compiler_init.txt   # -> build/pigeonos.img
-python3 start_emulator.py --cd build/pigeonos.img --run
+python3 start_emulator.py --cd build/pigeonos.img --disk disks/os.img --run
 ```
+
+With no program picked, bios2 boots the disc into its installer. Enter
+formats the hard disk, copies the disc onto it and makes it boot the
+graphing calculator; Enter again restarts, and the hard disk boots the
+calculator. Installing erases the hard disk, hence `--disk disks/os.img`
+rather than the `disks/hdd.img` your programs save to
+([docs/os_cd.md](docs/os_cd.md) §8).
 
 ### config.json
 
