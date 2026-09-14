@@ -2,7 +2,8 @@
 
 > **Status: the short version. Steps 1 to 3 of §7 are built: relocatable
 > programs, the CPU's interrupts and faults, and the kernel with a console
-> and a simple shell.** The detail is in
+> and a simple shell. So is the first half of step 4:** `printf`, colors,
+> the prompt file and the file commands. The detail is in
 > [kernel.md](kernel.md), [kernel_exec.md](kernel_exec.md) and
 > [kernel_changes.md](kernel_changes.md), and every question in them is now
 > decided (§6). Booting from disk is already built ([os_cd.md](os_cd.md)).
@@ -151,7 +152,16 @@ Decided 2026-09-14, left to me. Each is recorded where the question was asked.
 3. ***Done.*** **The kernel:** system calls, `exec`, `exit` and faults,
    installed as the project's `system`. With it, a console and a simple
    shell with `ls`, `cat` and `echo` (kernel.md Q9).
-4. **`printf` and the rest of the shell:** variadic functions, then the
-   prompt from `/etc/shell_header.conf` and colors ([shell.md](shell.md)).
-   Planned in [phase4_plan.md](phase4_plan.md).
-5. *Optional:* multitasking.
+4. ***Half done.*** **`printf` and the rest of the shell**
+   ([phase4_plan.md](phase4_plan.md)). 4a is built: variadic functions and
+   `printf`; colors and cursor codes in the console; the prompt from
+   `/etc/shell_header.conf` ([shell.md](shell.md)); `mkdir`, `rmdir`, `rm`,
+   `mv`, `cp` and `clear`; a sorted `ls` with `-l`; and Ctrl+C only while a
+   program runs. 4b is next: line editing, history and scrollback with the
+   mouse wheel, `more`, and `edit`, a mini nano.
+5. **A boot screen and a startup script,** from `/etc/boot.conf`.
+6. **The serial debug port,** with a panel beside the screen.
+7. **The launcher.**
+
+Phases 5 to 7 are sketched in [phase4_plan.md §11](phase4_plan.md#11-later-phases).
+Multitasking stays optional.

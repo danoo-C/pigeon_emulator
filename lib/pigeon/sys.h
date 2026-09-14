@@ -33,6 +33,10 @@ int closedir(int dh);
 int stat(char *path, sys_stat_t *out);
 int chdir(char *path);
 int getcwd(char *buf, unsigned size);       /* "2:/bin" -> its length      */
+int mkdir(char *path);
+int rmdir(char *path);                      /* it must be empty            */
+int remove(char *path);                     /* a file                      */
+int rename(char *from, char *to);           /* on one disk; to must not exist */
 
 /* --- programs ------------------------------------------------------------ */
 int  exec(char *path, int argc, char **argv);  /* runs it, waits: its status */

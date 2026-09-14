@@ -184,11 +184,67 @@ w_getkey:
     EI
     RET
 
+w_mkdir:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_mkdir
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
+w_rmdir:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_rmdir
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
+w_remove:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_remove
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
+w_rename:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_rename
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
 w_exit:
     DI
     MOV C, #__g_in_kernel
     MWW C, #1
     CALL k_exit         ; never returns
+
+; void kswallow(void): take any interrupt already pending, with break's
+; vector pointing at irq_ignore and interrupts on for exactly one
+; instruction, then put the vector back. A Ctrl+C pressed while the kernel
+; was busy isn't for the program about to run (docs/phase4_plan.md step 10).
+kswallow:
+    MOV C, #__g_vectors
+    ADD C, C, #16       ; vector 4, VEC_BREAK
+    MRW D, C
+    MOV E, #irq_ignore
+    MWW C, E
+    EI
+    NOP
+    DI
+    MWW C, D
+    RET
 
 ; --- faults and Ctrl+C ------------------------------------------------------------
 ; Each ends the program running, through k_fault(vector, pc), on a frame stack

@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 
 from . import ast_nodes as A
 from .lexer import CompileError
-from .typesys import (CHAR, INT, UCHAR, UINT, VOID, ArrayType, FunctionType,
+from .typesys import (CHAR, INT, UCHAR, UINT, VA_SLOTS, VOID, ArrayType, FunctionType,
                     PointerType, StructType, Type, WORD, common_type, decays,
                     is_integer, pointer_to)
 
@@ -92,7 +92,8 @@ class Analyzer:
         # and mutual recursion works.
         for function in program.functions:
             signature = FunctionType(function.returns,
-                                     [p.type for p in function.params], function.name)
+                                     [p.type for p in function.params], function.name,
+                                     function.variadic)
             if self.globals.lookup(function.name):
                 raise function.token.error(f"'{function.name}' is defined twice")
             function.label = _function_label(function.name)
@@ -180,6 +181,11 @@ class Analyzer:
             offset = self._alloc_frame(max(param.type.size, WORD))
             self.scope.declare(Symbol(param.name, param.type, "param", offset=offset),
                                function.token)
+        if function.variadic:
+            # The extra arguments' slots, straight after the named parameters:
+            # a caller writes them there like any argument, va_start finds
+            # them past the last named one, and the locals start after them.
+            self._alloc_frame(VA_SLOTS * WORD)
 
         self._statement(function.body)
 
@@ -405,13 +411,24 @@ class Analyzer:
         if not isinstance(signature, FunctionType):
             raise node.token.error(f"{node.callee.type} is not callable")
 
-        if len(node.args) != len(signature.params):
+        named = len(signature.params)
+        extra = len(node.args) - named
+        if extra < 0 or (extra > 0 and not signature.variadic) or extra > VA_SLOTS:
             name = getattr(node.callee, "name", "this function")
+            if signature.variadic:
+                raise node.token.error(
+                    f"{name} takes {named} argument(s) and up to {VA_SLOTS} more, "
+                    f"got {len(node.args)}")
             raise node.token.error(
-                f"{name} takes {len(signature.params)} argument(s), "
-                f"got {len(node.args)}")
+                f"{name} takes {named} argument(s), got {len(node.args)}")
         for arg, expected in zip(node.args, signature.params):
             self._check_assignable(expected, arg, node.token)
+        for arg in node.args[named:]:
+            passed = decays(arg.type)
+            if not (is_integer(passed) or passed.is_pointer or isinstance(passed, FunctionType)):
+                raise node.token.error(
+                    f"cannot pass {arg.type} as an extra argument: each one is a word, "
+                    f"an integer, a char or a pointer")
         node.type = signature.returns
         return node
 

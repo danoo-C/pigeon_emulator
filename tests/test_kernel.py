@@ -33,7 +33,8 @@ from assembler.assembler import assemble_file                           # noqa: 
 from emulator.devices.keycodes import KEY_LCTRL                         # noqa: E402
 from emulator.machine import Machine                                    # noqa: E402
 from emulator.memory_map import (                                       # noqa: E402
-    BOOT_CHANNEL, CH_CD, CH_HDD, CH_USERPROG, DISPLAY_START, PROGRAM_LOAD_ADDR)
+    BOOT_CHANNEL, CH_CD, CH_HDD, CH_USERPROG, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
+    VEC_BREAK)
 from emulator.programs import Program                                   # noqa: E402
 from pfs import PgfsImage                                               # noqa: E402
 from test_files import text_at                                          # noqa: E402
@@ -139,6 +140,31 @@ int main(void) {
     return fs_save("/docs/own.txt", "mine\n", 5u) != 5;
 }
 ''',
+    "term": r'''#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    char m;
+    if (argc < 2) return 1;
+    m = argv[1][0];
+    if (m == 'c') print("\x1b[31mRRR\x1b[0m\x1b[34mBBB\x1b[0m\n");
+    if (m == 'i') print("\x1b[7mINV\x1b[0m\n");
+    if (m == 'j') print("junk\x1b[2Jtop\n");
+    if (m == 'h') print("\x1b[5;10Hhere\n");
+    if (m == 'k') print("\x1b[7;1Habcdef\x1b[7;3H\x1b[K\n");
+    if (m == 's') { write(STDOUT, "\x1b[3", 3u); print("2mgreen\x1b[0m\n"); }
+    if (m == 'u') print("a\x1b[5qb\x1b[?25lc\n");
+    if (m == 'l') print("\x1b[32mleft on\n");
+    return 0;
+}
+''',
+    "fmt": r'''#include <pigeon/stdio.h>
+int main(void) {
+    printf("%s has %d legs, %x\n", "pigeon", 2, 255);
+    printf("[%5d|%-4s|%03u]\n", -7, "ab", 9u);
+    printf("%s%s%s\n", "0123456789012345678901234567890123456789",
+           "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "!");
+    return 0;
+}
+''',
     "panic": r'''#include <pigeon/sys.h>
 int main(void) {
     unsigned wrapper;
@@ -188,6 +214,9 @@ def make_disk(path, extra=(), shell=True, label="TEST"):
             img.write_file(f"/bin/{name}.bin", shell_program(name))
     img.write_file("/docs/readme.txt", README)
     for where, data in extra:
+        parent = where.rsplit("/", 1)[0]
+        if parent and not img.exists(parent):
+            img.mkdir(parent, parents=True)
         img.write_file(where, data)
     img.close()
     return path
@@ -461,7 +490,7 @@ def test_a_program_with_its_own_fs_c_leaves_the_kernel_seeing_the_disk_as_it_is(
             assert c.ready(), c.rows()
             assert c.command("ls /docs") == ["readme.txt"]
             assert c.command("ownfs") == []
-            assert c.command("ls /docs") == ["readme.txt", "own.txt"]
+            assert c.command("ls /docs") == ["own.txt", "readme.txt"]
             assert c.command("cat /docs/own.txt") == ["mine"]
             assert c.command("keep") == []
         finally:
@@ -481,6 +510,234 @@ def test_ctrl_c_at_the_prompt_throws_the_line_away():
         c.press(KEY_LCTRL, ord("c"))
         assert c.command("echo yes") == ["yes"]
         assert "2:/> echo never^C" in lines(c.rows()), c.rows()
+        assert "shell ended, starting it again" not in lines(c.rows()), c.rows()
+
+
+# --- the console as a terminal: docs/phase4_plan.md step 3 -----------------------
+
+RED, GREEN, BLUE, INK, BG = (255, 0, 0), (0, 255, 0), (0, 0, 255), (216, 216, 216), (0, 0, 0)
+
+
+def cell_colors(fb, row, col):
+    """The colors a cell's pixels hold, as (r, g, b): the framebuffer keeps
+    each pixel's bytes blue, green, red, alpha."""
+    colors = set()
+    for dy in range(ROW_H):
+        for dx in range(6):
+            i = ((row * ROW_H + dy) * DISPLAY_W + col * 6 + dx) * 4
+            colors.add((fb[i + 2], fb[i + 1], fb[i]))
+    return colors
+
+
+def row_of(console, text):
+    return next(r for r, row in enumerate(console.rows()) if row.startswith(text))
+
+
+@contextlib.contextmanager
+def terminal():
+    with booted(extra=[("/bin/term.bin", standin("term"))]) as c:
+        assert c.ready(), c.rows()
+        yield c
+
+
+def test_colors_are_drawn_and_kept_through_a_scroll():
+    with terminal() as c:
+        assert c.command("term c") == ["RRRBBB"]
+        row = row_of(c, "RRRBBB")
+        fb = c.machine.display_io.snapshot()
+        assert cell_colors(fb, row, 0) == {RED, BG} and cell_colors(fb, row, 3) == {BLUE, BG}
+        for i in range(5):
+            c.command(f"echo {i}")
+        moved = row_of(c, "RRRBBB")
+        assert moved < row, "the screen did not scroll"
+        fb = c.machine.display_io.snapshot()
+        assert cell_colors(fb, moved, 0) == {RED, BG} and cell_colors(fb, moved, 3) == {BLUE, BG}
+        assert cell_colors(fb, moved + 1, 0) <= {INK, BG}, "the color outlived ESC [ 0 m"
+
+
+def test_inverse_fills_the_cell_with_the_ink():
+    with terminal() as c:
+        c.type("term i\n")
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+        fb = c.machine.display_io.snapshot()
+        row = next(r for r in range(ROWS) if r > 1 and cell_colors(fb, r, 0) == {INK, BG}
+                   and cell_colors(fb, r, 3) == {BG})
+        lit = sum(1 for dy in range(ROW_H) for dx in range(6)
+                  if (fb[((row * ROW_H + dy) * DISPLAY_W + dx) * 4 + 2]) == 216)
+        assert lit > 30, f"cell 0 of row {row} is not inverse: {lit} lit pixels"
+
+
+def test_clearing_the_screen_puts_the_cursor_home():
+    with terminal() as c:
+        c.type("term j\n")
+        assert c.run_until(lambda rows: rows[0] == "top" and PROMPT.match(last_row(rows))), c.rows()
+        assert c.rows()[1] == "2:/> _" and "junk" not in "".join(c.rows())
+
+
+def test_the_cursor_moves_and_a_line_clears_to_its_end():
+    with terminal() as c:
+        c.command("term h")
+        assert c.rows()[4] == "         here", c.rows()
+        c.command("term k")
+        assert c.rows()[6] == "ab", c.rows()
+
+
+def test_a_sequence_split_across_two_writes_still_works():
+    with terminal() as c:
+        assert c.command("term s") == ["green"]
+        fb = c.machine.display_io.snapshot()
+        assert cell_colors(fb, row_of(c, "green"), 0) == {GREEN, BG}
+
+
+def test_sequences_the_console_doesnt_know_are_dropped():
+    with terminal() as c:
+        assert c.command("term u") == ["abc"]
+
+
+def test_a_color_left_on_by_a_program_is_reset_after_it():
+    with terminal() as c:
+        c.command("term l")
+        fb = c.machine.display_io.snapshot()
+        row = row_of(c, "left on")
+        assert cell_colors(fb, row, 0) == {GREEN, BG}
+        assert cell_colors(fb, row + 1, 0) <= {INK, BG}, "the prompt came out green"
+
+
+# --- printf, the prompt, file commands and ls: docs/phase4_plan.md steps 2, 5-7 --
+
+FILE_COMMANDS = ("mkdir", "rmdir", "rm", "mv", "cp", "clear")
+
+
+def with_commands(extra=()):
+    return [(f"/bin/{name}.bin", shell_program(name)) for name in FILE_COMMANDS] + list(extra)
+
+
+def test_printf_reaches_the_console_through_the_kernel():
+    with booted(extra=[("/bin/fmt.bin", standin("fmt"))]) as c:
+        assert c.ready(), c.rows()
+        assert c.command("fmt") == ["pigeon has 2 legs, ff", "[   -7|ab  |009]",
+                                    "0123456789" * 4 + "ABCDEFGHIJKLMNOPQRSTUVWXYZ!"]
+
+
+@cases(("the directory, then a line break", b"PGS ``CWD``\\n|-> ", ["PGS 2:/", "|-> _"]),
+       ("quotes around it, and a line break at the end", b'"Q> "\n', ["Q> _"]),
+       ("a backslash", b"a\\\\b> ", ["a\\b> _"]),
+       ("a name it doesn't know, as written", b"``NOPE``> ", ["``NOPE``> _"]),
+       ("the last status", b"``STATUS``> ", ["0> _"]))
+def test_the_prompt_comes_from_etc_shell_header_conf(label, text, shown):
+    with booted(extra=[("/etc/shell_header.conf", text)]) as c:
+        assert c.ready(), f"{label}: {c.rows()}"
+        assert lines(c.rows())[1:1 + len(shown)] == shown, f"{label}: {c.rows()}"
+
+
+def test_the_prompt_shows_colors_and_the_status_of_the_last_program():
+    with booted(extra=[("/etc/shell_header.conf", b"``RED``R``RESET````STATUS``> ")]) as c:
+        assert c.ready(), c.rows()
+        assert c.rows()[1] == "R0> _", c.rows()
+        fb = c.machine.display_io.snapshot()
+        assert cell_colors(fb, 1, 0) == {RED, BG} and cell_colors(fb, 1, 1) <= {INK, BG}
+        c.command("cat /docs/nothing")
+        assert last_row(c.rows()) == "R1> _", c.rows()
+
+
+def test_the_second_line_is_the_first_prompt_and_the_first_line_every_one_after():
+    """Each line quoted, with the '\\r' a Windows editor leaves and blank lines
+    at the end; the first line starts with a line break."""
+    text = b'"\\n``CWD``> "\r\n"start> "\n\n'
+    with booted(extra=[("/etc/shell_header.conf", text)]) as c:
+        assert c.ready(), c.rows()
+        assert c.rows()[:2] == ["PigeonOS", "start> _"], c.rows()
+        assert c.command("echo hi") == ["hi"]
+        assert c.rows()[1:5] == ["start> echo hi", "hi", "", "2:/> _"], c.rows()
+        c.command("cd /docs")
+        assert c.rows()[4:7] == ["2:/> cd /docs", "", "2:/docs> _"], c.rows()
+
+
+@cases(("a line over 255 bytes", b"x" * 300, "has a line over 255 bytes"),
+       ("a second line over 255 bytes", b"A> \n" + b"x" * 256, "has a line over 255 bytes"),
+       ("three lines", b"A> \nB> \nC> ", "has more than 2 lines"),
+       ("over 1024 bytes", b"A> \n" * 300, "is over 1024 bytes"))
+def test_a_prompt_file_it_refuses_leaves_the_built_in_prompt(label, text, said):
+    with booted(extra=[("/etc/shell_header.conf", text)]) as c:
+        assert c.ready(), f"{label}: {c.rows()}"
+        assert lines(c.rows())[1:3] == [f"sh: /etc/shell_header.conf {said}",
+                                        "2:/> _"], f"{label}: {c.rows()}"
+
+
+def test_mkdir_cp_mv_rm_and_rmdir_change_the_disk():
+    with tempfile.TemporaryDirectory() as t:
+        disk = make_disk(Path(t) / "hdd.img", with_commands())
+        c = Console(disk)
+        try:
+            assert c.ready(), c.rows()
+            assert c.command("mkdir /docs/new /tmp") == []
+            assert c.command("cp /docs/readme.txt /docs/new") == []
+            assert c.command("cp /docs/readme.txt /docs/copy.txt") == []
+            assert c.command("mv /docs/copy.txt /tmp") == []
+            assert c.command("mv /tmp/copy.txt /tmp/moved.txt") == []
+            assert c.command("ls /docs/new /tmp") == ["/docs/new:", "readme.txt",
+                                                     "/tmp:", "moved.txt"]
+            assert c.command("rm /tmp/moved.txt") == []
+            assert c.command("rmdir /tmp") == []
+        finally:
+            c.close()
+        with PgfsImage(disk) as img:
+            assert img.read_file("/docs/new/readme.txt") == README
+            assert not img.exists("/tmp") and not img.exists("/docs/copy.txt")
+            assert img.fsck().clean
+
+
+@cases(("a directory that isn't empty", "rmdir /docs", ["rmdir: /docs: not empty", "rmdir: exit 1"]),
+       ("a file that isn't there", "rm /docs/nothing", ["rm: /docs/nothing: not found", "rm: exit 1"]),
+       ("copying a directory", "cp /docs /x", ["cp: /docs: is a directory", "cp: exit 1"]),
+       ("moving what isn't there", "mv /nothing /docs", ["mv: /nothing: not found", "mv: exit 1"]))
+def test_file_commands_say_why_they_refuse(label, line, said):
+    with booted(extra=with_commands()) as c:
+        assert c.ready(), c.rows()
+        assert c.command(line) == said, label
+
+
+def test_copying_onto_a_read_only_disc_is_refused():
+    with tempfile.TemporaryDirectory() as t:
+        disk = make_disk(Path(t) / "hdd.img")
+        disc = make_disk(Path(t) / "disc.img", with_commands(), label="DISC")
+        c = Console(disk, boot_channel=CH_CD, disc=disc)
+        try:
+            assert c.ready(), c.rows()
+            assert c.command("cp /docs/readme.txt /docs/again.txt") == [
+                "cp: /docs/again.txt: read-only disk", "cp: exit 1"]
+        finally:
+            c.close()
+
+
+def test_clear_clears_the_screen():
+    with booted(extra=with_commands()) as c:
+        assert c.ready(), c.rows()
+        c.command("echo one")
+        c.type("clear\n")
+        assert c.run_until(lambda rows: rows[0] == "2:/> _" and not any(rows[1:])), c.rows()
+
+
+def test_ls_sorts_by_name_and_l_shows_sizes():
+    extra = [("/docs/zeta.txt", b"z" * 1234), ("/docs/alpha.txt", b""), ("/docs/Mid/x", b"x")]
+    with booted(extra=extra) as c:
+        assert c.ready(), c.rows()
+        assert c.command("ls /docs") == ["Mid/", "alpha.txt", "readme.txt", "zeta.txt"]
+        assert c.command("ls -l /docs") == ["   <dir> Mid/", "       0 alpha.txt",
+                                            f"{len(README):8} readme.txt", "    1234 zeta.txt"]
+        assert c.command("ls -x") == ["ls: unknown option -x", "ls: exit 1"]
+
+
+# --- Ctrl+C only while a program runs: docs/phase4_plan.md step 10 ----------------
+
+def test_a_break_left_pending_while_the_kernel_was_busy_ends_no_program():
+    """A Ctrl+C the machine took while the kernel was busy -- raised here
+    straight into the CPU while the shell waits in read() -- is no program's:
+    the command typed next runs, and the shell carries on."""
+    with booted() as c:
+        assert c.ready(), c.rows()
+        c.machine.cpu.interrupt(VEC_BREAK)
+        assert c.command("echo still running") == ["still running"]
         assert "shell ended, starting it again" not in lines(c.rows()), c.rows()
 
 

@@ -101,6 +101,42 @@ size, which the callee does not know (and which differs per call site). The
 caller does know it — it is a constant of the calling function. So the
 adjustment has to happen on the caller's side.
 
+## Variadic functions
+
+Added for `printf`, in the kernel's phase 4
+([docs/phase4_plan.md](../../docs/phase4_plan.md) step 1). A function declared
+with `...` has eight more slots, straight after its named parameters:
+
+```
+F + 0 … F + 4*(n-1)       the n named parameters
+F + 4*n … F + 4*(n+7)     eight slots for extra arguments
+F + 4*(n+8)               local 0
+```
+
+- **The calling convention doesn't change.** The caller writes argument *i* at
+  `F + S + 4i` whatever it calls, so an extra argument lands in the slot after
+  the last named one.
+- **`frame_size` counts all eight slots,** whether a call fills them or not,
+  so the function's own calls never write over them, and `frame_size` stays a
+  constant.
+- **Every extra argument is one word:** an integer, a `char`, a pointer or a
+  function. A struct is refused at the call, and so is a ninth extra
+  argument.
+- **`...` needs a named parameter before it,** since the extra slots are
+  found by that parameter's address.
+- **A call through a function pointer** to a variadic type works the same.
+
+`<pigeon/stdarg.h>` is macros, with no `.c`:
+
+```c
+typedef unsigned *va_list;
+#define va_start(ap, last) ((ap) = (unsigned *)&(last) + 1)
+#define va_arg(ap, type)   ((type)*(ap)++)
+```
+
+Nothing tells the callee how many arguments came: as in C, a count or a
+format string says. A slot the call didn't fill holds whatever was there.
+
 ## Memory layout
 
 ```

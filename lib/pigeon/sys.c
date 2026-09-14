@@ -20,6 +20,7 @@ typedef int  (*sys_buf_size)(char *, unsigned);
 typedef int  (*sys_exec_fn)(char *, int, char **);
 typedef void (*sys_exit_fn)(int);
 typedef int  (*sys_none)(void);
+typedef int  (*sys_path_path)(char *, char *);
 
 int write(int fd, void *buf, unsigned n) {
     return ((sys_int_ptr_n)SYS_SLOT(SYS_WRITE))(fd, buf, n);
@@ -52,6 +53,14 @@ int chdir(char *path) { return ((sys_path)SYS_SLOT(SYS_CHDIR))(path); }
 int getcwd(char *buf, unsigned size) {
     return ((sys_buf_size)SYS_SLOT(SYS_GETCWD))(buf, size);
 }
+
+int mkdir(char *path) { return ((sys_path)SYS_SLOT(SYS_MKDIR))(path); }
+
+int rmdir(char *path) { return ((sys_path)SYS_SLOT(SYS_RMDIR))(path); }
+
+int remove(char *path) { return ((sys_path)SYS_SLOT(SYS_REMOVE))(path); }
+
+int rename(char *from, char *to) { return ((sys_path_path)SYS_SLOT(SYS_RENAME))(from, to); }
 
 int exec(char *path, int argc, char **argv) {
     return ((sys_exec_fn)SYS_SLOT(SYS_EXEC))(path, argc, argv);

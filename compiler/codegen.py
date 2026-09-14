@@ -231,7 +231,8 @@ class CodeGen:
     def _function(self, function: A.FunctionDef):
         self.function = function
         self.last_line = -1
-        params = ", ".join(f"{p.type} {p.name}" for p in function.params)
+        params = ", ".join([f"{p.type} {p.name}" for p in function.params]
+                           + (["..."] if function.variadic else []))
         self.comment(f"{function.returns} {function.name}({params})"
                      f"  frame_size={function.frame_size}")
         self.label(function.label or function.name)

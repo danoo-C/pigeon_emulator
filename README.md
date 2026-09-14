@@ -124,9 +124,11 @@ python3 start_emulator.py --cd build/pigeonos.img --disk disks/os.img --run
 With no program picked, bios2 boots the disc into its installer. Enter
 formats the hard disk, copies the disc onto it and makes it boot the
 kernel. Enter again restarts: the hard disk boots the kernel, and the
-kernel starts the shell. `ls /bin` lists what it can run, `graph` — the
-graphing calculator — among them, and Esc or Ctrl+C comes back to the
-prompt ([docs/kernel.md](docs/kernel.md)). Installing erases the hard disk,
+kernel starts the shell. `ls /bin` lists what it can run: `mkdir`, `cp`,
+`mv`, `rm` and the other file commands, and `graph` — the graphing
+calculator — among them, where Esc or Ctrl+C comes back to the prompt
+([docs/kernel.md](docs/kernel.md)). The prompt is the file
+`/etc/shell_header.conf` ([docs/shell.md](docs/shell.md)). Installing erases the hard disk,
 hence `--disk disks/os.img` rather than the `disks/hdd.img` your programs
 save to ([docs/os_cd.md](docs/os_cd.md) §8).
 
@@ -219,8 +221,9 @@ firmware/bios2.c      second-stage BIOS, built for 0x07000000: boot screen, coun
 firmware/boot.asm     boot sector: the code in block 0 of a bootable disk
 user/                 example programs (.asm and .c alike)
 user/os/              PigeonOS: the disc's project file, the installer, the kernel
-user/os/bin/          the shell and its programs: sh, ls, cat, echo
-lib/pigeon/           the C libraries: mem, string, fs, cd, display, input, math, sys
+user/os/bin/          the shell and its programs: sh, ls, cat, echo, mkdir, rmdir, rm, mv, cp, clear
+user/os/etc/          the installed system's settings: shell_header.conf, the prompt
+lib/pigeon/           the C libraries: mem, string, stdio, stdarg, fs, cd, display, input, math, sys
 compiler/             pigeon-cc: C -> assembly
 display/              pygame client + browser front-end (talks HTTP only)
 tools/                disasm.py, bench.py, pfs.py (PigeonFS disk images)
@@ -397,6 +400,7 @@ python3 tests/test_project.py     # cc.py --project, and the launcher's --cd
 python3 tests/test_relocatable.py # program files the kernel loads anywhere: cc.py --relocatable
 python3 tests/test_interrupts.py  # interrupts, faults, GETSP/SETSP, the timer's TICK and break
 python3 tests/test_kernel.py      # the kernel and its shell, booted from a test disk
+python3 tests/test_stdio.py       # printf's conversions, checked against Python's %
 python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
 python3 tests/test_fs.py          # PigeonFS on the guest, checked against pfs.py
 python3 -m pytest                 # all of them, in parallel: pip install -r requirements-dev.txt

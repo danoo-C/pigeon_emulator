@@ -49,6 +49,11 @@ IDENTIFIER_RE = re.compile(r'\b[A-Za-z_]\w*\b')
 # the end of the line, where the lexer reports it.
 WORD_RE = re.compile(r'"(?:\\.|[^"\\])*"?|\'(?:\\.|[^\'\\])*\'?|\b[A-Za-z_]\w*\b')
 
+# A macro argument of only words and stars: `char *`, `unsigned int`, `x`.
+# It is a type or a single name, which parentheses could only break --
+# `((char *))p` is not a cast -- so it goes into the body as written.
+TYPE_LIKE_RE = re.compile(r'^\s*[A-Za-z_]\w*(?:\s+[A-Za-z_]\w*)*(?:\s*\*)*\s*$')
+
 MAX_INCLUDE_DEPTH = 32
 
 
@@ -306,7 +311,7 @@ class Preprocessor:
                 out.append(name)
                 i = match.end()
                 continue
-            out.append(_substitute(body, params, args))
+            out.append(_substitute(body, params, args, self.macros))
             i = end
         return "".join(out)
 
@@ -354,17 +359,28 @@ def _split_arguments(text: str, open_paren: int):
     return None, len(text)
 
 
-def _substitute(body: str, params, args) -> str:
+def _substitute(body: str, params, args, macros=()) -> str:
     """Replace each parameter in the body with its argument, parenthesised.
 
     The parentheses matter: `#define SQ(x) ((x)*(x))` is written that way
     by hand for a reason, and adding them here makes `M(a+b)` behave even
     when the macro author forgot. A parameter's name inside a literal in
     the body is text, and stays.
+
+    An argument that is only words and stars goes in as written: a type,
+    as in <pigeon/stdarg.h>'s `va_arg(ap, char *)`, where `((char *))` would
+    be no cast at all, or a single name, which parentheses don't change --
+    unless one of its words is a macro, which may expand to an expression.
     """
     if len(args) != len(params):
         return body
-    mapping = {p: f"({a})" for p, a in zip(params, args)}
+
+    def wrapped(arg):
+        if TYPE_LIKE_RE.match(arg) and not any(w in macros for w in arg.replace("*", " ").split()):
+            return arg
+        return f"({arg})"
+
+    mapping = {p: wrapped(a) for p, a in zip(params, args)}
     return WORD_RE.sub(lambda m: mapping.get(m.group(0), m.group(0)), body)
 
 

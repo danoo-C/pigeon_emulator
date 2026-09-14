@@ -1,7 +1,8 @@
 # Kernel changes: apps that print to the shell
 
-> **Status: decided; the console and the system calls are built** (kernel.md
-> phase 3), **`printf` is not.** This checks [kernel.md](kernel.md)
+> **Status: decided and built:** the console and the system calls in
+> kernel.md's phase 3, and `printf` in phase 4a
+> ([phase4_plan.md](phase4_plan.md) steps 1 and 2). This checks [kernel.md](kernel.md)
 > against one requirement: a command-line app — `ls`, `ld`, anything that
 > prints — starts from the shell, prints into the shell's console, and returns
 > to it. Every fact in §2 was checked on 2026-09-13; the compiler facts were

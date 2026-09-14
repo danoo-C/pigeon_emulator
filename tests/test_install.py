@@ -29,13 +29,14 @@ from emulator.memory_map import BOOT_BLOCK, BOOT_CODE, PROGRAM_LOAD_ADDR  # noqa
 from pfs import PgfsImage                                             # noqa: E402
 from test_bios2 import ENTER, ESC, power_on                           # noqa: E402
 from test_graph import curve_pixels                                   # noqa: E402
-from test_kernel import Console, last_row                             # noqa: E402
+from test_kernel import BG, BLUE, GREEN, INK, RED, Console, cell_colors, last_row  # noqa: E402
 from test_project import EXAMPLE, quiet                               # noqa: E402
 
 MiB = 1 << 20
 PROMPT = "ENTER install   ESC cancel"
-INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt"] + [
-    f"/bin/{name}.bin" for name in ("sh", "ls", "cat", "echo", "graph", "cube", "files")]
+INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt", "/etc/shell_header.conf"] + [
+    f"/bin/{name}.bin" for name in ("sh", "ls", "cat", "echo", "mkdir", "rmdir", "rm", "mv",
+                                    "cp", "clear", "graph", "cube", "files")]
 
 # The example disc, built once for the whole file.
 _BUILD = tempfile.TemporaryDirectory()
@@ -104,16 +105,22 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_she
                 kernel, "the hard disk did not load the kernel"
 
             # the kernel starts the shell; the shell runs the calculator
+            # with the disc's prompt, /etc/shell_header.conf: its second line
+            # first, then its first, which starts with a blank line
             shell = Console.on(p.machine)
             assert shell.ready(), shell.rows()
-            assert shell.rows()[:2] == ["PigeonOS", "2:/> _"], shell.rows()
+            assert shell.rows()[:3] == ["PigeonOS", "|-(PGS)-[2:/]-(0)", "|-> _"], shell.rows()
+            fb = p.machine.display_io.snapshot()
+            for col, ink in ((0, GREEN), (3, BLUE), (9, INK), (15, RED)):
+                assert cell_colors(fb, 1, col) - {BG} == {ink}, (col, cell_colors(fb, 1, col))
             shell.type("graph\n")
             assert shell.run_until(
                 lambda rows: curve_pixels(p.machine.display_io.snapshot()) > 200), \
                 "the calculator did not draw its curve"
             shell.press(ESC)
-            assert shell.run_until(lambda rows: last_row(rows) == "2:/> _"), shell.rows()
-            assert shell.rows()[1] == "2:/> graph", shell.rows()
+            assert shell.run_until(lambda rows: last_row(rows) == "|-> _"), shell.rows()
+            assert shell.rows()[1:6] == ["|-(PGS)-[2:/]-(0)", "|-> graph", "",
+                                         "|-(PGS)-[2:/]-(0)", "|-> _"], shell.rows()
 
 
 def test_esc_cancels_and_leaves_the_hard_disk_as_it_was():

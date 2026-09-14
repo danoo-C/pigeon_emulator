@@ -94,7 +94,12 @@ pointers, arrays, structs, `->`, string literals, function pointers. These are
 the next stage.
 
 **Not supported by design**: floating point (no FP hardware), `goto`, `switch`,
-varargs, `long long`. Each is rejected by name with a reason.
+`long long`. Each is rejected by name with a reason.
+
+**Variadic functions**, since the kernel's phase 4: `int printf(char *format,
+...)` takes up to 8 word-sized arguments after its named ones, and
+`<pigeon/stdarg.h>` walks them. The frame is in
+[design/03-abi.md](design/03-abi.md#variadic-functions).
 
 ## The one thing worth knowing
 

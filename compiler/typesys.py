@@ -122,11 +122,18 @@ def layout_struct(tag: str, members: List[tuple]) -> StructType:
                       tag, tuple(fields))
 
 
+# The extra arguments a variadic function can take. Their slots are reserved
+# in its frame right after the named parameters, so every frame size stays a
+# constant (compiler/design/03-abi.md).
+VA_SLOTS = 8
+
+
 @dataclass
 class FunctionType:
     returns: Type
     params: List[Type] = field(default_factory=list)
     name: str = ""
+    variadic: bool = False          # `...` after the named parameters
 
     size = WORD
     is_signed = False
@@ -134,7 +141,8 @@ class FunctionType:
     is_scalar = True
 
     def __str__(self):
-        return f"{self.returns} (*)({', '.join(str(p) for p in self.params)})"
+        params = [str(p) for p in self.params] + (["..."] if self.variadic else [])
+        return f"{self.returns} (*)({', '.join(params)})"
 
 
 def is_integer(type_: Type) -> bool:

@@ -23,7 +23,11 @@
 #define SYS_EXEC     10
 #define SYS_EXIT     11
 #define SYS_GETKEY   12
-#define SYS_COUNT    13
+#define SYS_MKDIR    13
+#define SYS_RMDIR    14
+#define SYS_REMOVE   15
+#define SYS_RENAME   16
+#define SYS_COUNT    17
 
 /* --- the console: every program starts with these; open() gives 3 up -- */
 #define STDIN  0

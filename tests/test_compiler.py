@@ -298,7 +298,7 @@ def expand(source: str) -> str:
     ("a string a macro expands to", '#define A "B"\n#define B 1\nchar *s = A;',
      'char *s = "B";'),
     ("a parameter's name in the body", '#define SHOW(x) puts("x"), x\nSHOW(y);',
-     'puts("x"), (y);'),
+     'puts("x"), y;'),
     ("an argument", '#define ID(x) x\n#define N 1\nchar *s = ID("N");',
      'char *s = ("N");'),
 )
@@ -312,6 +312,19 @@ def test_a_string_can_hold_a_macro_name():
             'int main(void){ char *s = "GREETING"; char *t = GREETING;'
             ' return s[1]*256 + t[1]; }',
             ord('R') * 256 + ord('i'))
+
+
+def test_a_macro_argument_that_is_a_type_goes_in_as_written():
+    """`(char *)` is a cast and `((char *))` isn't. Words and stars go in as
+    they are; an expression is still parenthesised, and so is a name that is
+    itself a macro, which may expand to one."""
+    out = expand("#define CAST(t, v) ((t)(v))\n"
+                 "#define TWICE(x) x*2\n"
+                 "#define N 1+2\n"
+                 "CAST(char *, a + b) CAST(unsigned int, x) TWICE(N) TWICE(y)")
+    assert "((char *)((a + b)))" in out, out
+    assert "((unsigned int)(x))" in out, out
+    assert "(1+2)*2" in out and "y*2" in out, out
 
 
 def test_volatile_mmio():
@@ -477,6 +490,112 @@ def test_org_refuses_what_is_not_an_address(label, text):
     except ValueError:
         return
     raise AssertionError(f"{label}: --org {text} was accepted")
+
+
+# --- variadic functions --------------------------------------------------------
+
+SUM = ("#include <pigeon/stdarg.h>\n"
+       "int sum(int count, ...) {\n"
+       "    va_list ap; int total = 0;\n"
+       "    va_start(ap, count);\n"
+       "    while (count > 0) { total = total + va_arg(ap, int); count--; }\n"
+       "    va_end(ap);\n"
+       "    return total;\n"
+       "}\n")
+
+
+@cases(("no extra arguments", "sum(0)", 0),
+       ("one", "sum(1, 5)", 5),
+       ("eight, the most", "sum(8, 1, 2, 3, 4, 5, 6, 7, 8)", 36),
+       ("negative ones", "sum(3, -1, -2, 10)", 7))
+def test_a_variadic_function_takes_up_to_eight_extra_arguments(label, call, expected):
+    returns(SUM + f"int main(void) {{ return {call}; }}", expected)
+
+
+def test_extra_arguments_can_be_chars_and_pointers():
+    returns("#include <pigeon/stdarg.h>\n"
+            "int pick(char *kinds, ...) {\n"
+            "    va_list ap; int total = 0;\n"
+            "    va_start(ap, kinds);\n"
+            "    while (*kinds) {\n"
+            "        if (*kinds == 'c') total = total + va_arg(ap, char);\n"
+            "        else if (*kinds == 's') total = total + *va_arg(ap, char *);\n"
+            "        else total = total + va_arg(ap, int);\n"
+            "        kinds++;\n"
+            "    }\n"
+            "    return total;\n"
+            "}\n"
+            "int main(void) { char c = 'A'; return pick(\"csi\", c, \"B\", 1000); }",
+            65 + 66 + 1000)
+
+
+def test_a_va_list_can_be_passed_on():
+    returns("#include <pigeon/stdarg.h>\n"
+            "int vsum(int count, va_list ap) {\n"
+            "    int t = 0;\n"
+            "    while (count > 0) { t = t + va_arg(ap, int); count--; }\n"
+            "    return t;\n"
+            "}\n"
+            "int sum(int count, ...) { va_list ap; int t; va_start(ap, count);"
+            " t = vsum(count, ap); va_end(ap); return t; }\n"
+            "int main(void) { return sum(4, 10, 20, 30, 40); }", 100)
+
+
+def test_a_variadic_function_through_a_pointer():
+    returns(SUM + "int main(void) { int (*f)(int, ...) = sum; return f(3, 1, 2, 3) * 10 + f(1, 9); }",
+            69)
+
+
+def test_extra_arguments_that_call_functions_themselves():
+    """The staging path: a later argument calls something."""
+    returns(SUM + "int id(int x) { return x; }\n"
+            "int main(void) { return sum(3, id(1), sum(2, id(2), 3), id(4)); }", 10)
+
+
+def test_recursion_through_a_variadic_function():
+    returns("#include <pigeon/stdarg.h>\n"
+            "int down(int n, ...) {\n"
+            "    va_list ap; int carried;\n"
+            "    va_start(ap, n);\n"
+            "    carried = va_arg(ap, int);\n"
+            "    if (n == 0) return carried;\n"
+            "    return down(n - 1, carried + n);\n"
+            "}\n"
+            "int main(void) { return down(10, 0); }", 55)
+
+
+def test_neither_locals_nor_calls_overwrite_the_extra_arguments():
+    """The eight slots are reserved: the locals start after them, and so do
+    the frames of the function's own calls."""
+    returns("#include <pigeon/stdarg.h>\n"
+            "int three(int a, int b, int c) { return a + b + c; }\n"
+            "int f(int n, ...) {\n"
+            "    int a; int b; int t = 0; int i; va_list ap;\n"
+            "    a = 7; b = 9;\n"
+            "    t = three(100, 200, 300);\n"
+            "    va_start(ap, n);\n"
+            "    for (i = 0; i < n; i++) t = t + va_arg(ap, int);\n"
+            "    return t + a * 1000 + b * 10000;\n"
+            "}\n"
+            "int main(void) { return f(8, 1, 2, 3, 4, 5, 6, 7, 8); }",
+            600 + 36 + 7000 + 90000)
+
+
+@cases(("nine extra arguments", SUM + "int main(void) { return sum(1, 1, 2, 3, 4, 5, 6, 7, 8, 9); }",
+        "up to 8 more"),
+       ("a struct as an extra argument",
+        SUM + "struct P { int a; int b; };\nint main(void) { struct P p; return sum(1, p); }",
+        "extra argument"),
+       ("too few named arguments", SUM + "int main(void) { return sum(); }", "argument"),
+       ("'...' with nothing before it", "int f(...) { return 0; }\nint main(void) { return 0; }",
+        "needs a named parameter"))
+def test_variadic_calls_the_compiler_refuses(label, source, fragment):
+    try:
+        build(source)
+    except CompileError as e:
+        assert fragment in str(e), f"{label}: expected {fragment!r} in: {e}"
+        return
+    raise AssertionError(f"{label}: should have been refused")
 
 
 # --- hand-written assembly: #asm ----------------------------------------------

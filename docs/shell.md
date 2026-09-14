@@ -1,11 +1,11 @@
 # The shell
 
-> **Status: a simple shell is built,** `user/os/bin/sh.c`, in kernel.md's
-> phase 3: §1's loop, splitting with quotes, the lookup, and `cd`, `exit`
-> and `help`, with the current directory as its prompt. §2's prompt file and
-> the colors are not built yet. The shell is `/bin/sh.bin`, an ordinary
-> program that the kernel starts at boot ([kernel_overview.md](kernel_overview.md)).
-> Decided 2026-09-14.
+> **Status: built,** `user/os/bin/sh.c`. §1's loop, splitting with quotes,
+> the lookup, and `cd`, `exit` and `help` came in kernel.md's phase 3; §2's
+> prompt file and its colors in phase 4a ([phase4_plan.md](phase4_plan.md)
+> step 5). The box characters wait for a later phase. The shell is
+> `/bin/sh.bin`, an ordinary program that the kernel starts at boot
+> ([kernel_overview.md](kernel_overview.md)). Decided 2026-09-14.
 
 ---
 
@@ -41,19 +41,29 @@ for (;;) {
 
 ## 2. The prompt: `/etc/shell_header.conf`
 
-The shell reads this file when it starts, and the whole file is the prompt.
-Your example:
+The shell reads this file when it starts. **The first line is the prompt.**
+**A second line, if there is one, is shown once in its place:** the first
+prompt after the shell starts. The example disc's file:
 
 ```
-|-PGS ``CWD``\n|-> 
+"\n``GREEN``|-(``BLUE``PGS``GREEN``)-[``RESET````CWD````GREEN``]-(``RED````STATUS````GREEN``)\n|-``BLUE``>``RESET`` "
+"``GREEN``|-(``BLUE``PGS``GREEN``)-[``RESET````CWD````GREEN``]-(``RED````STATUS````GREEN``)\n|-``BLUE``>``RESET`` "
 ```
 
-looks like this, after `cd /docs`:
+looks like this, in green, blue and red, after `cd /docs`:
 
 ```
-|-PGS /docs
-|-> ls
+PigeonOS
+|-(PGS)-[2:/]-(0)
+|-> cd /docs
+
+|-(PGS)-[2:/docs]-(0)
+|-> 
 ```
+
+The `\n` at the start of the first line leaves a blank line between one
+command and the next. The second line is the same prompt without it, so
+there's no blank line under `PigeonOS` at boot.
 
 | Write | Means |
 |---|---|
@@ -61,19 +71,32 @@ looks like this, after `cd /docs`:
 | `\\` | a backslash |
 | ``` ``CWD`` ``` | the current directory |
 | ``` ``STATUS`` ``` | the last program's exit status |
-| ``` ``BLUE`` ``` ``` ``RED`` ``` ``` ``GREEN`` ``` ``` ``YELLOW`` ``` ``` ``WHITE`` ``` ``` ``GREY`` ``` | text in that color from here on |
+| ``` ``BLACK`` ``` ``` ``RED`` ``` ``` ``GREEN`` ``` ``` ``YELLOW`` ``` ``` ``BLUE`` ``` ``` ``MAGENTA`` ``` ``` ``CYAN`` ``` ``` ``WHITE`` ``` | text in that color from here on |
+| ``` ``GREY`` ``` | the console's own light grey ink |
 | ``` ``RESET`` ``` | back to the normal color |
 
 - **Everything else is printed as written**, including trailing spaces, so
   `|-> ` keeps the space before your cursor. An unknown ``` ``NAME`` ``` is
   printed as it is, so a typo shows up on screen.
-- **Forgiving about editors:** a line break at the very end of the file is
-  ignored, and quotes around the whole text are removed.
-- **At most 255 bytes.**
-- **A missing or unreadable file** doesn't stop the shell: it uses your
-  example above as its built-in prompt.
-- **The screen is 32×12 characters.** A two-line prompt uses two rows, and a
-  long directory wraps.
+- **Forgiving about editors:** line breaks at the end of the file are
+  ignored, and so is a `\r` before a line break. Quotes around a line are
+  removed. **Quote a line that ends in a space,** as many editors trim
+  trailing spaces.
+- **At most two lines of 255 bytes each,** and 1024 bytes in all. A file
+  with more is reported when the shell starts, and the built-in prompt is
+  used.
+- **Once each time the shell starts,** not once each boot: `exit` starts the
+  shell again, and it shows the second line again. Once a boot needs the
+  kernel to tell the shell it is the first start, as phase 5's `sh -startup`
+  will ([phase4_plan.md §11](phase4_plan.md#11-later-phases)).
+- **A missing or unreadable file** doesn't stop the shell: it uses its
+  built-in prompt, the current directory and `> ` on one line. *Changed while
+  building:* this said your first example, `|-PGS ``CWD``\n|-> `, would be
+  the built-in prompt. The example disc carries a prompt file instead, so the
+  installed system shows it, and a disk with no file gets the one-line
+  prompt phase 3 had.
+- **The screen is 32×12 characters.** A two-line prompt and a blank line use
+  three rows for each command, and a long directory wraps.
 
 ### Looking like Kali
 
@@ -129,5 +152,7 @@ and prints the prompt with `write`, all of which are already planned
 - **Colors.** `disp_text` already takes a color. The console learns the ANSI
   color codes real terminals use — `ESC [ 3n m` and `ESC [ 0 m` — and the shell
   turns ``` ``BLUE`` ``` into one. Any program can then print in color.
+  *Built in phase 4a,* with `ESC [ 7 m` for inverse, `ESC [ 2 J`,
+  `ESC [ r ; c H` and `ESC [ K` too ([kernel.md](kernel.md) §12).
 - **Five box-drawing glyphs**, only if you want Kali's real `┌──` rather than
   `|-`.

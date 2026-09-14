@@ -10,7 +10,9 @@ and legibility of output over speed of output.
 
 Optimisation beyond constant folding. Floating point (there is no FP hardware
 and no plan for soft-float). The full C preprocessor. `long long`, bitfields,
-variadic functions, `setjmp`. A linker — everything is compiled in one unit.
+`setjmp`. A linker — everything is compiled in one unit. (Variadic functions
+were a non-goal too, until `printf` needed them: see
+[03-abi.md](03-abi.md#variadic-functions).)
 
 ## Pipeline
 

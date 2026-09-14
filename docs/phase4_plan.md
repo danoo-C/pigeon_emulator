@@ -1,6 +1,8 @@
 # Phase 4: `printf`, a fuller shell, and tools for working with files
 
-> **Status: final plan, 2026-09-15. Nothing built.** The stage after
+> **Status: final plan, 2026-09-15. 4a is built** (§4): steps 1, 2, 3, 5,
+> 6, 7 and 10, with step 11 for them, as kernel.md §17 records. **4b is
+> next:** steps 4, 8 and 9. The stage after
 > [kernel.md](kernel.md)'s phase 3, which built the kernel, its console, a
 > simple shell, and `ls`, `cat` and `echo`. It follows kernel.md §17's
 > phase 4 and the decisions in [kernel_changes.md](kernel_changes.md) and
@@ -375,7 +377,7 @@ not end that program. Pressing it at the right moment needs care (§7).
 
 | Half | Steps | What you get |
 |---|---|---|
-| **4a** | 1, 2, 3, 5, 6, 7, 10 | `printf`, colors, the prompt file, file commands, a better `ls`, Ctrl+C fixed |
+| **4a**, *built* | 1, 2, 3, 5, 6, 7, 10 | `printf`, colors, the prompt file, file commands, a better `ls`, Ctrl+C fixed |
 | **4b** | 4, 8, 9 | line editing, history, scrollback and the wheel; `more`; `edit` |
 
 Step 11 comes at the end of each half.

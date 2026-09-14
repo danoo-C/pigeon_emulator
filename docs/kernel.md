@@ -449,7 +449,9 @@ kernel, and a crash still ends the emulator.
 - **Kernel C reaches its assembly routines** as `extern int name;` plus a
   cast (§2).
 
-A first set of calls is in kernel_exec.md §8.
+A first set of calls is in kernel_exec.md §8. Phase 4a added `mkdir`,
+`rmdir`, `remove` and `rename`, slots 13 to 16, each passing straight to
+`fs.c` ([phase4_plan.md](phase4_plan.md) step 6).
 
 ---
 
@@ -496,8 +498,16 @@ phase 1, on 2026-09-14.
 - **A console in the kernel**, built in phase 3: a 32×12 grid, scrolling, a
   cursor, and line input with echo and backspace. The prototype's console
   was a text buffer.
-- **Programs print through it** with a system call. `printf` needs variadic
-  functions first (kernel_changes.md §3.1).
+- **Escape codes, built in phase 4a:** `ESC [ 30 m` to `ESC [ 37 m` for an
+  ink, `ESC [ 39 m` for the console's own, `ESC [ 7 m` and `ESC [ 27 m` for
+  inverse on and off, `ESC [ 0 m`, `ESC [ 2 J`, `ESC [ r ; c H` and
+  `ESC [ K` ([phase4_plan.md](phase4_plan.md) step 3). Each cell keeps its
+  look beside its character, so scrolling and redrawing keep the colors.
+  Anything else is dropped rather than printed, and a sequence split across
+  two `write` calls still works. Tidying after a program puts the ink back.
+- **Programs print through it** with a system call, and with `printf` since
+  phase 4a, when the compiler gained variadic functions (kernel_changes.md
+  §3.1).
 - Commands, argument splitting and program lookup are in kernel_exec.md §3.
 
 ---
@@ -965,14 +975,127 @@ form.
        not making a build stale, or codegen dropping it;
      - bios2 leaving `BOOT_CHANNEL` alone for channel 1.
    - **The full suite passes: 1,140 tests.**
-4. **Variadic functions for `printf`, then the rest of the shell:** its
-   prompt file and colors (shell.md §2). The console and a simple shell came
-   with phase 3. Planned in [phase4_plan.md](phase4_plan.md).
-5. ~~**The sector-booting BIOS, stage 1, and `pfs.py install-boot`**~~
-   **Done** as bios2, `firmware/boot.asm`, `pfs.py boot` and `cc.py --project`
-   ([os_cd.md](os_cd.md)). The kernel is installed as the project's `system`.
-6. **The launcher, `config.json`, and the docs.**
-7. **Optional: multitasking** (§14).
+4. **`printf`, a fuller shell, and tools for working with files,** planned in
+   [phase4_plan.md](phase4_plan.md), in two halves. ***4a is done;*** 4b is
+   next: line editing, history and scrollback with the mouse wheel, `more`,
+   and `edit`, a mini nano.
+   - **What 4a built:**
+     - **Variadic functions** (step 1). The parser records `...` on a
+       function and on a function-pointer type, and refuses it with no named
+       parameter before it. The analyzer reserves `VA_SLOTS`, eight words,
+       after the named parameters, and refuses a ninth extra argument or a
+       struct as one. Codegen needed nothing: it already wrote argument *i* at
+       `F + frame + 4i`. The frame is in `compiler/design/03-abi.md`.
+     - **The preprocessor** puts a macro argument of only words and stars,
+       such as `char *`, in as written, unless one of its words is a macro.
+       `va_arg(ap, char *)` needs it: `((char *))` isn't a cast.
+     - **`lib/pigeon/stdarg.h`**, macros only, and **`stdio.h` with
+       `stdio.c`** (step 2): `snprintf` and `vsnprintf` anywhere; `printf`,
+       `vprintf`, `puts` and `putchar` through the kernel, returning -1
+       without one.
+     - **The console as a small terminal** (step 3): the escape codes in §12,
+       a look byte for each of the 384 cells, the parser's state kept between
+       writes, and the ink put back when a program ends.
+     - **The shell's prompt** from `/etc/shell_header.conf` (step 5, shell.md
+       §2), with nine color names, and a second line shown once as the first
+       prompt. Its messages are written with `printf`.
+     - **Four system calls,** `mkdir`, `rmdir`, `remove` and `rename`, in
+       slots 13–16, and **six commands** in `user/os/bin/` (step 6): `mkdir`,
+       `rmdir`, `rm`, `mv`, `cp` and `clear`. `mv` and `cp` into a directory
+       keep the name; `cp` copies 512 bytes at a time and refuses a
+       directory.
+     - **`ls`** (step 7): sorted by name, `-l` with a right-aligned size or
+       `<dir>`, and several directories each under its name. It sorts the
+       first 256 entries; any after them follow unsorted.
+     - **Ctrl+C only while a program runs** (step 10). `exec` turns break on
+       just before `exec_call` and off when the program comes back, then on
+       again while a parent still runs. Line input turns it off while it
+       waits. Turning it on first swallows a break raised while the kernel
+       was busy: `kswallow` points the break vector at a routine that only
+       returns, opens interrupts for one instruction, and puts the vector
+       back.
+     - **The example disc** carries the six commands, and your prompt as
+       `/etc/shell_header.conf`: `|-(PGS)-[2:/]-(0)` over `|-> `, in green,
+       blue and red, with a blank line between commands.
+   - **Decided while building:**
+     - With no prompt file, or one it refuses, the built-in prompt is the
+       current directory and `> `, as in phase 3, not shell.md's example; the
+       example disc carries a prompt file instead. A refused file is also
+       reported.
+     - **Two lines in the prompt file** (your idea, 2026-09-15): the first is
+       the prompt, and the second, when there is one, is shown once in its
+       place when the shell starts, so after `exit` too. Each line is at most
+       255 bytes, and the file 1024. The blank line between commands is a
+       `\n` at the start of the first line, not the shell's doing, so it
+       stays a choice.
+     - `%p` is `0x` and the hex digits; `%s` of a null pointer prints
+       `(null)`; an unknown conversion is printed as written.
+     - `stdarg.h` also has `va_copy`, and `va_end` sets the pointer to 0.
+     - Break stays on while a program reads a line only through line input;
+       restoring it as a program left it comes with 4b's `setbreak`.
+   - **Sizes:** the kernel is 147,924 bytes, up from 141,636; the shell
+     41,988, up from 22,264; `ls` 37,664. A command that uses `printf` is
+     about 26 KB, as `stdio.c` brings `string.c`, while `clear`, with only
+     `print`, is 5,872 bytes. The example disc is 870.0 KiB, up from 670.0.
+   - **Tests, 47 new:**
+     - **`test_compiler.py`, 15:** none, one and eight extra arguments, and
+       negative ones; chars and pointers; a `va_list` passed on; a call
+       through a pointer; extra arguments that call functions themselves;
+       recursion; locals and calls not overwriting the slots; four refusals,
+       for a ninth extra argument, a struct, too few named ones and `...`
+       alone; and a type as a macro argument.
+     - **`test_stdio.py`, 3:** every conversion against Python's `%`;
+       truncation returning the length wanted; and `printf`, `puts` and
+       `putchar` returning -1 with no kernel.
+     - **`test_kernel.py`, 28:** colors and inverse checked in the
+       framebuffer's pixels, and kept through a scroll; clearing, moving the
+       cursor and clearing a line; a sequence split across two writes, and
+       unknown ones dropped; the ink reset after a program; `printf` through
+       the kernel; the prompt file five ways, with colors and the last status
+       after a failure; its second line first and its first line after, with
+       quotes, `\r\n` and blank lines at the end; four files refused; the file commands checked against
+       `pfs.py` with `fsck` clean, four refusals and a copy onto a read-only
+       disc; `clear`; `ls` sorted
+       and `ls -l`; and a break raised while interrupts were off ending no
+       program.
+     - **`test_relocatable.py`, 1:** a program with a variadic function,
+       patched to other addresses.
+     - **`test_install.py`** checks the disc's two-line prompt before and
+       after `graph`, and **`test_project.py`** the new commands.
+   - **Forty deliberate breakages each failed the tests:**
+     - the compiler reserving no slots, allowing a ninth extra argument, a
+       struct as one, or `...` alone; the preprocessor wrapping a type again,
+       or leaving a macro's name bare; `va_start` a word off;
+     - `stdio.c` ignoring `-`, padding zeros with spaces, ignoring the
+       precision, writing `%X` in lower case, returning what it kept, calling
+       through the empty table, or never writing its last piece;
+     - the console ignoring inks or inverse, leaving colors behind on a
+       scroll, `ESC [ K` clearing nothing, `ESC [ H` counting from 0, a `?`
+       ending a sequence, a color left on after a program, or each write
+       starting a fresh sequence;
+     - the shell keeping the quotes, never updating the status, looking for
+       another file, or taking a file of any length;
+     - `rename` swapping its paths, `rmdir` calling through `remove`'s slot,
+       and `mv` into a directory replacing it;
+     - `ls` unsorted, or `-l` without sizes;
+     - a break left pending, not swallowed;
+     - the prompt file's second line shown every time, or never; a third
+       line accepted; a line of any length; a `\r`, or the line breaks at the
+       end, kept; a file over 1024 bytes cut short without a word; and quotes
+       kept on a line.
+   - **The full suite passes: 1,187 tests**, the 1,140 from before and 47
+     new.
+5. **A boot screen and a startup script,** from `/etc/boot.conf`
+   ([phase4_plan.md §11](phase4_plan.md#11-later-phases)).
+6. **The serial debug port,** with a panel beside the screen (the same
+   section).
+7. **The launcher, `config.json`, and the docs.**
+
+Also done, out of order: ~~**the sector-booting BIOS, stage 1, and `pfs.py
+install-boot`**~~, which this list called phase 5 until phase 4 renumbered it,
+as bios2, `firmware/boot.asm`, `pfs.py boot` and `cc.py --project`
+([os_cd.md](os_cd.md)). The kernel is installed as the project's `system`.
+**Multitasking** stays optional (§14).
 
 ---
 

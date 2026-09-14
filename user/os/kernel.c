@@ -49,6 +49,11 @@
 #define CON_CELL_H 9u
 #define CON_INK    0xFFD8D8D8u
 #define CON_BG     BLACK
+#define CON_DEFAULT  8u             /* con_palette's own ink                    */
+#define CON_INVERSE  0x10u          /* a cell's ink as its background           */
+#define CON_ESC_NONE 0u
+#define CON_ESC_SEEN 1u             /* ESC, waiting for '['                     */
+#define CON_ESC_CSI  2u             /* ESC [, reading numbers until a letter    */
 
 typedef int  (*call4_fn)(unsigned, int, char **, unsigned *);
 typedef void (*abort_fn)(int, unsigned *);
@@ -73,6 +78,11 @@ extern int w_getcwd;
 extern int w_exec;
 extern int w_exit;
 extern int w_getkey;
+extern int w_mkdir;
+extern int w_rmdir;
+extern int w_remove;
+extern int w_rename;
+extern int kswallow;
 extern int fault_div;
 extern int fault_opcode;
 extern int fault_fetch;
@@ -97,8 +107,16 @@ int handle_depth[HANDLES];      /* the program an fs handle is open for; 0 none 
 unsigned handle_dir[HANDLES];   /* 1 if that handle is a directory's         */
 
 char con_grid[384];             /* CON_ROWS * CON_COLS characters            */
+char con_look[384];             /* each cell's ink, and CON_INVERSE          */
 unsigned con_row;
 unsigned con_col;               /* CON_COLS: the row is full, wrap before the next */
+unsigned con_attr;              /* the look new characters get               */
+unsigned con_esc;               /* CON_ESC_*: partway through a sequence     */
+unsigned con_arg[4];            /* its numbers, as far as it has got         */
+unsigned con_args;
+
+/* Inks 0 to 7 are the ANSI colors, in ANSI's order; 8 is the console's own. */
+color_t con_palette[9] = {BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, CON_INK};
 
 /* --- devices ------------------------------------------------------------ */
 
@@ -110,31 +128,60 @@ static void k_io(unsigned channel, unsigned command, unsigned length, unsigned a
     IO_CH = channel;            /* this store fires it -- must be last */
 }
 
+/* Ctrl+C as the break, for the program running and only while one runs
+ * (docs/phase4_plan.md step 10). Turning it off drops a break HID raised
+ * and the machine hasn't taken. Turning it on first takes, and ignores, a
+ * break already pending in the CPU: one pressed while the kernel was busy,
+ * which no program asked for. */
+static void k_break(unsigned on) {
+    if (on != 0u) ((void_fn)&kswallow)();
+    k_io(CH_HID, K_HID_SET_BREAK, 0u, on);
+}
+
 /* --- the console ------------------------------------------------------- */
 
-static void con_cell(unsigned row, unsigned col) {
+/* A cell on a background already cleared: its character in its ink, or,
+ * inverse, the ink as the background and the character cut out of it. */
+static void con_draw(unsigned row, unsigned col) {
     unsigned x = col * CON_CELL_W;
     unsigned y = row * CON_CELL_H;
-    disp_rect(x, y, CON_CELL_W, CON_CELL_H, CON_BG);
-    disp_char(x, y, (int)con_grid[row * CON_COLS + col], CON_INK);
+    unsigned look = (unsigned)con_look[row * CON_COLS + col];
+    color_t ink = con_palette[look & 15u];
+    if ((look & CON_INVERSE) != 0u) {
+        disp_rect(x, y, CON_CELL_W, CON_CELL_H, ink);
+        disp_char(x, y, (int)con_grid[row * CON_COLS + col], CON_BG);
+    } else {
+        disp_char(x, y, (int)con_grid[row * CON_COLS + col], ink);
+    }
+}
+
+static void con_cell(unsigned row, unsigned col) {
+    disp_rect(col * CON_CELL_W, row * CON_CELL_H, CON_CELL_W, CON_CELL_H, CON_BG);
+    con_draw(row, col);
 }
 
 static void con_redraw(void) {
     unsigned row;
     unsigned col;
-    char c;
+    unsigned i;
     disp_clear(CON_BG);
     for (row = 0u; row < CON_ROWS; row++) {
         for (col = 0u; col < CON_COLS; col++) {
-            c = con_grid[row * CON_COLS + col];
-            if (c != ' ') disp_char(col * CON_CELL_W, row * CON_CELL_H, (int)c, CON_INK);
+            i = row * CON_COLS + col;
+            if (con_grid[i] != ' ' || ((unsigned)con_look[i] & CON_INVERSE) != 0u)
+                con_draw(row, col);
         }
     }
 }
 
+/* Every cell a space in the console's own ink, and the cursor home. The
+ * look new characters get stays as it was. */
 static void con_clear(void) {
     unsigned i;
-    for (i = 0u; i < CON_ROWS * CON_COLS; i++) con_grid[i] = ' ';
+    for (i = 0u; i < CON_ROWS * CON_COLS; i++) {
+        con_grid[i] = ' ';
+        con_look[i] = (char)CON_DEFAULT;
+    }
     con_row = 0u;
     con_col = 0u;
     con_redraw();
@@ -147,12 +194,89 @@ static void con_newline(void) {
         con_row++;
         return;
     }
-    for (i = 0u; i < (CON_ROWS - 1u) * CON_COLS; i++) con_grid[i] = con_grid[i + CON_COLS];
-    for (i = (CON_ROWS - 1u) * CON_COLS; i < CON_ROWS * CON_COLS; i++) con_grid[i] = ' ';
+    for (i = 0u; i < (CON_ROWS - 1u) * CON_COLS; i++) {
+        con_grid[i] = con_grid[i + CON_COLS];
+        con_look[i] = con_look[i + CON_COLS];
+    }
+    for (i = (CON_ROWS - 1u) * CON_COLS; i < CON_ROWS * CON_COLS; i++) {
+        con_grid[i] = ' ';
+        con_look[i] = (char)CON_DEFAULT;
+    }
     con_redraw();
 }
 
+/* One character of an escape sequence, after the ESC: '[', then numbers
+ * separated by ';', then a letter (docs/phase4_plan.md step 3). The console
+ * knows m, J, H and K. Anything else ends the sequence and is dropped, never
+ * printed, and so are the other parameter bytes, such as the '?' of
+ * ESC [ ? 25 l. The state lives here between calls, so a sequence may come
+ * in two writes. */
+static void con_escape(int c) {
+    unsigned i;
+    unsigned n;
+    if (con_esc == CON_ESC_SEEN) {
+        con_esc = CON_ESC_NONE;
+        if (c == '[') {
+            con_esc = CON_ESC_CSI;
+            con_args = 0u;
+            con_arg[0] = 0u;
+        }
+        return;
+    }
+    if (c >= '0' && c <= '9') {
+        if (con_args == 0u) con_args = 1u;
+        if (con_arg[con_args - 1u] < 1000u)
+            con_arg[con_args - 1u] = con_arg[con_args - 1u] * 10u + (unsigned)(c - '0');
+        return;
+    }
+    if (c == ';') {
+        if (con_args == 0u) con_args = 1u;
+        if (con_args < 4u) {
+            con_arg[con_args] = 0u;
+            con_args++;
+        }
+        return;
+    }
+    if (c >= 0x20 && c <= 0x3F) return;
+    con_esc = CON_ESC_NONE;
+
+    if (c == 'm') {
+        if (con_args == 0u) con_args = 1u;
+        for (i = 0u; i < con_args; i++) {
+            n = con_arg[i];
+            if (n == 0u) con_attr = CON_DEFAULT;
+            else if (n == 7u) con_attr = con_attr | CON_INVERSE;
+            else if (n == 27u) con_attr = con_attr & 15u;
+            else if (n >= 30u && n <= 37u) con_attr = (con_attr & CON_INVERSE) | (n - 30u);
+            else if (n == 39u) con_attr = (con_attr & CON_INVERSE) | CON_DEFAULT;
+        }
+    } else if (c == 'J') {
+        if (con_args > 0u && con_arg[0] == 2u) con_clear();
+    } else if (c == 'H') {
+        n = (con_args > 0u && con_arg[0] > 0u) ? con_arg[0] : 1u;
+        i = (con_args > 1u && con_arg[1] > 0u) ? con_arg[1] : 1u;
+        if (n > CON_ROWS) n = CON_ROWS;
+        if (i > CON_COLS) i = CON_COLS;
+        con_row = n - 1u;
+        con_col = i - 1u;
+    } else if (c == 'K') {
+        for (i = con_col; i < CON_COLS; i++) {
+            con_grid[con_row * CON_COLS + i] = ' ';
+            con_look[con_row * CON_COLS + i] = (char)con_attr;
+            con_cell(con_row, i);
+        }
+    }
+}
+
 static void con_put(int c) {
+    if (con_esc != CON_ESC_NONE) {
+        con_escape(c);
+        return;
+    }
+    if (c == 27) {
+        con_esc = CON_ESC_SEEN;
+        return;
+    }
     if (c == '\n') {
         con_newline();
         return;
@@ -166,6 +290,7 @@ static void con_put(int c) {
     if (c < 32 || c > 126) c = '?';
     if (con_col == CON_COLS) con_newline();
     con_grid[con_row * CON_COLS + con_col] = (char)c;
+    con_look[con_row * CON_COLS + con_col] = (char)con_attr;
     con_cell(con_row, con_col);
     con_col++;
 }
@@ -220,7 +345,7 @@ static int con_read_line(char *buf, unsigned size) {
     unsigned code;
     unsigned ctrl = 0u;
     if (size < 2u) return FS_EINVAL;
-    k_io(CH_HID, K_HID_SET_BREAK, 0u, 0u);
+    k_break(0u);
     con_cursor(1u);
     while (1) {
         event = key_event();
@@ -257,7 +382,7 @@ static int con_read_line(char *buf, unsigned size) {
     con_put('\n');
     buf[n] = '\n';
     while (key_read() >= 0) { }
-    k_io(CH_HID, K_HID_SET_BREAK, 0u, 1u);
+    k_break(1u);                            /* a program is reading this line */
     return (int)(n + 1u);
 }
 
@@ -335,6 +460,14 @@ int k_getcwd(char *buf, unsigned size) { return fs_getcwd(buf, size); }
 
 int k_getkey(void) { return key_read(); }
 
+int k_mkdir(char *path) { return fs_mkdir(path); }
+
+int k_rmdir(char *path) { return fs_rmdir(path); }
+
+int k_remove(char *path) { return fs_remove(path); }
+
+int k_rename(char *from, char *to) { return fs_rename(from, to); }
+
 /* --- running programs ------------------------------------------------------ */
 
 /* Put back what a program may have left behind: files open, timers
@@ -363,6 +496,8 @@ static void k_tidy(void) {
         fs_mount(mounted);
         if (n > 0) fs_chdir(cwd);
     }
+    con_attr = CON_DEFAULT;                 /* no color left on for the shell */
+    con_esc = CON_ESC_NONE;
     con_redraw();
 }
 
@@ -413,9 +548,12 @@ int k_exec(char *path, int argc, char **argv) {
     procs[depth].base = base;
     procs[depth].heap_ptr_at = base + header[6];
     started = 1u;
+    k_break(1u);
     status = ((call4_fn)&exec_call)(base + header[3], argc, argv, &procs[depth].save_sp);
+    k_break(0u);
     k_tidy();
     depth--;
+    if (depth > 0) k_break(1u);             /* its parent runs again */
     return status;
 }
 
@@ -459,6 +597,10 @@ static void k_tables(void) {
     table[SYS_EXEC] = (unsigned)&w_exec;
     table[SYS_EXIT] = (unsigned)&w_exit;
     table[SYS_GETKEY] = (unsigned)&w_getkey;
+    table[SYS_MKDIR] = (unsigned)&w_mkdir;
+    table[SYS_RMDIR] = (unsigned)&w_rmdir;
+    table[SYS_REMOVE] = (unsigned)&w_remove;
+    table[SYS_RENAME] = (unsigned)&w_rename;
     vectors[VEC_DIV_ZERO] = (unsigned)&fault_div;
     vectors[VEC_BAD_OPCODE] = (unsigned)&fault_opcode;
     vectors[VEC_BAD_FETCH] = (unsigned)&fault_fetch;
@@ -475,6 +617,7 @@ int main(void) {
     __heap_limit = PROGRAMS - PROGRAM_FILE_HEADER;  /* the first header lands there */
     in_kernel = 1u;
     k_tables();
+    con_attr = CON_DEFAULT;
     con_clear();
     con_puts("PigeonOS\n");
 
@@ -491,7 +634,6 @@ int main(void) {
         return status;
     }
     mounted = channel;
-    k_io(CH_HID, K_HID_SET_BREAK, 0u, 1u);
 
     shell_argv[0] = "sh";
     shell_argv[1] = (char *)0;

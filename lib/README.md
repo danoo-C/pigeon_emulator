@@ -1,19 +1,22 @@
 # The C libraries
 
-Eight headers, compiled by `pigeon-cc` and covered by execution tests in
-`tests/test_libs.py`, `tests/test_fs.py`, `tests/test_cdlib.py` and `tests/test_kernel.py`. Every test compiles the C and
+Ten headers, compiled by `pigeon-cc` and covered by execution tests in
+`tests/test_libs.py`, `tests/test_fs.py`, `tests/test_cdlib.py`, `tests/test_stdio.py`,
+`tests/test_compiler.py` and `tests/test_kernel.py`. Every test compiles the C and
 *runs* it.
 
 | Header | What it gives you |
 |---|---|
 | `<pigeon/mem.h>` | `memcpy` `memmove` `memset` `memcmp`, `malloc` `calloc` `free`, `heap_used` |
 | `<pigeon/string.h>` | `strlen` `strcmp` `strlcpy` `strlcat` `strchr` …, numbers as text (`utoa` `itoa` `strtou` `atoi`), `isdigit` and friends |
+| `<pigeon/stdio.h>` | `snprintf` `vsnprintf`, and through the kernel `printf` `vprintf` `puts` `putchar` |
+| `<pigeon/stdarg.h>` | `va_list` `va_start` `va_arg` `va_copy` `va_end`, for a function of your own that takes `...` |
 | `<pigeon/fs.h>` | files and directories on the HDD channels: `fs_open`/`read`/`write`/`seek`, `fs_mkdir`/`readdir`/`rename`, `fs_load`/`fs_save`, a current directory |
 | `<pigeon/cd.h>` | the CD drive: `cd_info`, `cd_read`, `cd_has_fs`/`cd_label` for a disc that carries a filesystem, `cd_save` to copy a disc onto the current volume, and `cd_eject` |
 | `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped |
 | `<pigeon/input.h>` | mouse position/buttons/edges, keyboard characters, key edges, held-key state |
 | `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
-| `<pigeon/sys.h>` | for a program the kernel runs: `write` `read` `open` `close`, `opendir` `readdir` `stat`, `chdir` `getcwd`, `exec` `exit` `getkey`, `print`, `sys_strerror` |
+| `<pigeon/sys.h>` | for a program the kernel runs: `write` `read` `open` `close`, `opendir` `readdir` `stat`, `mkdir` `rmdir` `remove` `rename`, `chdir` `getcwd`, `exec` `exit` `getkey`, `print`, `sys_strerror` |
 
 There is no linker: units are compiled together, so pass the library
 sources on the command line.
@@ -44,8 +47,9 @@ about four instructions per byte and the framebuffer is 82,944 bytes.
 ## string
 
 Strings, numbers as text, and character classes. The names are the
-standard C ones, cut down to what this machine needs. There is no printf, so
-to show a number you write it into a buffer first:
+standard C ones, cut down to what this machine needs. `printf` is in
+`<pigeon/stdio.h>`, below; without it, to show a number you write it into a
+buffer first:
 
 ```c
 char line[32];
@@ -232,3 +236,71 @@ Ctrl+C. `sys_strerror` names them all. **The slot numbers and codes are in
 `<pigeon/syscall.h>`,** which has no `.c`, so the kernel includes it without
 the stubs. **Only a program the kernel started can call them:** without a
 kernel the table is empty.
+
+**`mkdir`, `rmdir`, `remove` and `rename` pass straight to `fs.c`,** so they
+refuse what it refuses, with its codes: a directory that isn't empty, a path
+that doesn't exist, or anything on the read-only CD.
+
+**Text written to the console can carry escape codes,** as on a terminal:
+`ESC [ 30 m` to `ESC [ 37 m` for an ink, `ESC [ 7 m` for inverse, `ESC [ 0 m`
+back to normal, `ESC [ 2 J` to clear, `ESC [ r ; c H` to move the cursor, and
+`ESC [ K` to clear to the end of the line ([docs/kernel.md](../docs/kernel.md)
+§12). The kernel puts the ink back to normal after each program.
+
+## stdio
+
+`printf` and its friends, on the compiler's variadic functions
+([compiler/design/03-abi.md](../compiler/design/03-abi.md#variadic-functions)).
+
+```c
+printf("%s: %d files\n", dir, count);
+n = snprintf(line, sizeof(line), "%-12s %5u", name, size);
+```
+
+**`snprintf` and `vsnprintf` work in any program.** `printf`, `vprintf`,
+`puts` and `putchar` write to `STDOUT` through the kernel, so only a program
+the kernel runs prints with them. **Without a kernel they print nothing and
+return -1:** they find `write`'s slot in the system-call table holding 0, and
+never call through it to address 0. A program with no kernel formats with
+`snprintf` and draws the text where it likes, with `disp_text`.
+
+**`snprintf` returns the length it wanted,** as C's does, and always
+terminates what it kept, so a result `>= size` means the text was cut short.
+
+**Conversions:** `%d %i %u %x %X %o %c %s %p %%`, the flags `-` and `0`, a
+width, and for `%s` a precision, as in `%.5s`. An unknown conversion is
+printed as written. There is no floating point. **A call takes at most 8
+arguments after the format,** the compiler's limit; a ninth is a compile
+error.
+
+**`printf` needs no heap:** it formats into 64 bytes on its frame and writes
+them each time they fill.
+
+**Each program carries its own copy,** with `string.c`, since there is no
+shared library: `mkdir.bin`, which uses `printf`, is 26,392 bytes, and
+`clear.bin`, which only calls `print`, is 5,872.
+
+## stdarg
+
+For a function of your own that takes `...`. Macros, with no `.c`:
+
+```c
+int sum(int count, ...) {
+    va_list ap;
+    int total = 0;
+    va_start(ap, count);
+    while (count > 0) {
+        total = total + va_arg(ap, int);
+        count--;
+    }
+    va_end(ap);
+    return total;
+}
+```
+
+**Every extra argument is one word:** an integer, a `char`, a pointer or a
+function. A struct is refused at the call. **Nothing counts them for you:**
+as in C, a count or a format says how many came, and reading past them gives
+whatever the slot held. **A `va_list` is a plain pointer,** so it can be
+passed on, as `printf` passes one to `vprintf`, and `va_copy` is an
+assignment.

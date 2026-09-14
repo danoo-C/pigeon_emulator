@@ -113,7 +113,7 @@ class Parser:
                     body = self._block()
                     program.functions.append(A.FunctionDef(
                         token=start, name=name, returns=type_, params=params,
-                        body=body, is_static=is_static))
+                        body=body, is_static=is_static, variadic=variadic))
                 else:
                     self.expect("op", ";")        # a prototype: record nothing
                 return
@@ -241,8 +241,8 @@ class Parser:
                 stars += 1
             inner_name = self.take().value if self.at("id") else None
             self.expect("op", ")")
-            params, _ = self._parameter_list()
-            signature = FunctionType(type_, [p.type for p in params])
+            params, variadic = self._parameter_list()
+            signature = FunctionType(type_, [p.type for p in params], variadic=variadic)
             result = pointer_to(signature)
             for _ in range(stars - 1):
                 result = pointer_to(result)
@@ -276,7 +276,10 @@ class Parser:
             self.take()
         while not self.at_op(")"):
             if self.at_op("..."):
-                self.take()
+                dots = self.take()
+                if not params:
+                    raise dots.error("'...' needs a named parameter before it, "
+                                     "for va_start to find the extra arguments by")
                 variadic = True
                 break
             base = self._type_specifier()
@@ -285,10 +288,6 @@ class Parser:
             if not self.accept("op", ","):
                 break
         self.expect("op", ")")
-        if variadic:
-            raise self.current.error(
-                "variadic functions are not supported: the frame layout has "
-                "no way to walk an unknown argument count")
         return params, variadic
 
     def _initializer(self) -> A.Node:

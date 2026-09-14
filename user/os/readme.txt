@@ -7,8 +7,14 @@ and the hard disk now boots
 starts the shell.
 
 Try, at the prompt:
-  ls /bin
+  ls -l /bin
+  mkdir /notes
+  cp /docs/readme.txt /notes
+  cat /notes/readme.txt
   graph     (Esc comes back)
   cube      (Esc comes back)
   files     (Esc comes back)
   help
+
+The prompt is the file
+/etc/shell_header.conf.

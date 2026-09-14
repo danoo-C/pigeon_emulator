@@ -435,5 +435,16 @@ def test_cc_py_builds_a_program_file_on_the_command_line():
                     raise AssertionError(f"{argv} was accepted")
 
 
+def test_a_program_with_a_variadic_function_relocates():
+    """Phase 4 step 1: the extra arguments' slots move with the frame stack."""
+    source = ("#include <pigeon/stdarg.h>\n"
+              "int sum(int count, ...) { va_list ap; int t = 0; va_start(ap, count);"
+              " while (count > 0) { t = t + va_arg(ap, int); count--; } return t; }\n"
+              "int main(int argc, char **argv) { return sum(8, 1, 2, 3, 4, 5, 6, 7, argc); }\n")
+    blob, _ = built(source, "variadic")
+    for base in BASES:
+        assert call(blob, base).a == 28 + 2, f"at {base:#x}"
+
+
 if __name__ == "__main__":
     raise SystemExit(run_module(dict(globals()), "relocatable programs"))
