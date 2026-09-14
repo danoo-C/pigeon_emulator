@@ -1,8 +1,14 @@
-"""A small C preprocessor: #include, object-like #define, #if(n)def.
+"""A small C preprocessor: #include, object-like #define, #if(n)def, #asm.
 
 Enough to make headers work: object-like and function-like macros,
 conditional inclusion, and #include. Not the real thing -- no #if
 arithmetic, no token pasting, no stringification, no variadic macros.
+
+#asm "file.asm" is this compiler's own. It names hand-written assembly --
+routines C can't express, such as a kernel's exec_call, which needs GETSP
+-- and the compiler places that text among the compiled functions, where
+it shares their labels (docs/kernel.md §10). The path is relative to the
+file that names it, and a file named twice is placed once.
 
 Line directives are not emitted; instead every produced line carries the
 file and line it came from, so a diagnostic in an included header names
@@ -27,6 +33,7 @@ from typing import Dict, List, Optional, Tuple
 from .lexer import CompileError
 
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s+(?:"([^"]+)"|<([^>]+)>)\s*$')
+ASM_RE = re.compile(r'^\s*#\s*asm\s+"([^"]+)"\s*$')
 # The '(' must follow the name with NO space to make a macro function-like:
 # `#define NULL ((void *)0)` is object-like, its body merely starts with '('.
 DEFINE_RE = re.compile(r'^\s*#\s*define\s+([A-Za-z_]\w*)(\(?)\s*(.*)$')
@@ -50,6 +57,8 @@ class Preprocessor:
         self.include_paths = [Path(p) for p in (include_paths or [])]
         self.macros: Dict[str, str] = dict(defines or {})
         self.pragma_once: set = set()
+        # The files #asm lines named, in the order first named.
+        self.assembly: List[Path] = []
 
     def process_file(self, path) -> Tuple[str, List[Tuple[str, int]]]:
         path = Path(path)
@@ -184,6 +193,18 @@ class Preprocessor:
                     continue
                 self._run(target.read_text(), str(target), target.parent,
                           out, origins, depth + 1)
+                continue
+
+            match = ASM_RE.match(line)
+            if match:
+                target = self._resolve(match.group(1), directory)
+                if target is None:
+                    raise CompileError(f"cannot find assembly {match.group(1)!r}",
+                                       number, 1, filename)
+                if target not in self.assembly:
+                    self.assembly.append(target)
+                out.append("")
+                origins.append((filename, number))
                 continue
 
             match = DEFINE_RE.match(line)

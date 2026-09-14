@@ -395,6 +395,18 @@ def test_a_program_on_channel_1_arrives_in_one_transfer(label, nops):
             f"{label}: channel 1 got {p.sent1}"
 
 
+def test_a_program_on_channel_1_finds_channel_1_in_boot_channel():
+    """docs/kernel.md Q8. The word still holds what booted before -- here the
+    CD, as after the installer restarts -- and a kernel started from
+    channel 1 must not take it for the disk it came from."""
+    program = (encode("MOV", dst=1, src1=NONE_REG, imm=BOOT_CHANNEL)
+               + encode("MRW", dst=0, src1=1) + encode("HALT"))
+    with tempfile.TemporaryDirectory() as t, power_on(t, program=program, keys=[ENTER]) as p:
+        p.machine.ram.write_word(BOOT_CHANNEL, CH_CD)
+        assert p.run(steps=3_000_000), "never booted"
+        assert p.a == CH_USERPROG, f"BOOT_CHANNEL holds {p.a}"
+
+
 def test_the_program_finds_a_blank_screen_empty_queues_and_a_stopped_timer():
     """The menu's keys are the menu's. bios2 read ENTER, but ENTER's two
     edges and an 'x' typed after it are still queued when it hands over,

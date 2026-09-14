@@ -3,12 +3,13 @@
 > **Status: phases 1 to 6 are built** (§9): stage 1 of the BIOS, the
 > firmware device, bios2 with its screen and menu, the boot sector,
 > `cc.py --project` with the launcher's `--cd`, and the installer. The
-> example disc installs the graphing calculator onto a blank hard disk,
-> which then boots it. Power-on runs through four stages:
+> example disc installs the kernel and its shell onto a blank hard disk,
+> which then boots them ([kernel.md](kernel.md) phase 3). Power-on runs
+> through four stages:
 >
 > 1. **The BIOS**, 1 KB at address 0, loads **bios2** from a firmware
 >    device on IO channel 7, and jumps to it.
-> 2. **bios2** is a C program with the font, the screen, the 2-second
+> 2. **bios2** is a C program with the font, the screen, the 5-second
 >    countdown and the boot menu. It boots a program on channel 1, or copies
 >    the hard disk's or the CD's boot sector into memory and jumps to it.
 > 3. **The disc's boot sector** loads the installer and runs it.
@@ -303,12 +304,17 @@ label   = PIGEONOS              # the disc's volume label, 15 bytes at most
 
 [boot]
 installer  = installer.c        # the disc's boot sector loads and runs this
-system     = ../graph.c         # optional: what the installed hard disk boots
+system     = kernel.c           # optional: what the installed hard disk boots
 bootsector = boot.asm           # optional: firmware/boot.asm when left out
 
 [files]                         # what the installer puts on the hard disk
-/bin/files.bin   = ../files.c   # a .c is built as a program file, an .asm as an image; anything else is copied
+/bin/sh.bin      = bin/sh.c     # a .c is built as a program file, an .asm as an image; anything else is copied
+/bin/ls.bin      = bin/ls.c
+/bin/cat.bin     = bin/cat.c
+/bin/echo.bin    = bin/echo.c
+/bin/graph.bin   = ../graph.c
 /bin/cube.bin    = ../cube.c
+/bin/files.bin   = ../files.c
 /docs/readme.txt = readme.txt
 ```
 
@@ -339,17 +345,23 @@ writes `build/pigeonos.img`:
    output first, so a failed build leaves no half-written disc. The same
    project builds the same disc, byte for byte.
 
-As run on the example, since the kernel's phase 1 made `/bin` program files:
+As run on the example, since the kernel's phase 3 made `/boot.bin` the
+kernel and put its shell in `/bin`:
 
 ```
 PigeonOS 0.1, from user/os/pigeon_compiler_init.txt
   /install.bin               139,164 B   user/os/installer.c
   /pigeon.txt                     60 B
-  /boot.bin                  114,624 B   user/os/../graph.c
-  /bin/files.bin             182,004 B   user/os/../files.c
+  /boot.bin                  141,636 B   user/os/kernel.c
+  /bin/sh.bin                 22,264 B   user/os/bin/sh.c
+  /bin/ls.bin                  6,944 B   user/os/bin/ls.c
+  /bin/cat.bin                 6,684 B   user/os/bin/cat.c
+  /bin/echo.bin                5,692 B   user/os/bin/echo.c
+  /bin/graph.bin             120,592 B   user/os/../graph.c
   /bin/cube.bin               41,784 B   user/os/../cube.c
-  /docs/readme.txt               254 B   user/os/readme.txt
-build/pigeonos.img: 482.0 KiB, label PIGEONOS, boots /install.bin
+  /bin/files.bin             182,004 B   user/os/../files.c
+  /docs/readme.txt               276 B   user/os/readme.txt
+build/pigeonos.img: 670.0 KiB, label PIGEONOS, boots /install.bin
 ```
 
 **The launcher's `--cd PATH`, or `"cd"` in `config.json`**, puts a disc in
@@ -385,19 +397,21 @@ the disc, it puts the disc on the hard disk:
 A failure stops with the reason on screen: no hard disk, a disk too small,
 or a `/boot.bin` that would not boot.
 
-**The project names what the installed disk boots.** `system = ../graph.c`
-in `[boot]` puts the graphing calculator on the disc as `/boot.bin` (§7).
+**The project names what the installed disk boots.** `system = kernel.c`
+in `[boot]` puts the kernel on the disc as `/boot.bin` (§7). Until the
+kernel's phase 3 it was the graphing calculator, `../graph.c`.
 
 **Run end to end** in `tests/test_install.py`, on a `Machine` with a blank
 4 MiB hard disk and the example disc:
-- **The install:** the installer copied five files.
+- **The install:** the installer copied ten files.
 - **The disk, read back from the host:**
   - it held them byte for byte;
   - its boot record pointed at `/boot.bin`, with the disc's boot sector
     beside it;
   - `fsck` was clean.
 - **After the restart:** bios2 counted down to the hard disk, whose boot
-  sector loaded the calculator, and the calculator drew its curve.
+  sector loaded the kernel. The kernel started the shell, the shell ran
+  `graph`, the calculator drew its curve, and Esc came back to the prompt.
 
 **What still holds for an installed disk:** its boot record points at
 `/boot.bin`'s blocks. Anything that rewrites that file has to write the

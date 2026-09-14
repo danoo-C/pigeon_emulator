@@ -98,13 +98,18 @@ def compile_to_asm(source: str, filename: str = "<source>", include_paths=None,
                    origin: str = DEFAULT_ORIGIN, relocatable: bool = False) -> str:
     """C text -> pigeon assembly text."""
     origin = _origin_for(origin, relocatable)
-    text, origins = Preprocessor(include_paths or [LIB_DIR], BUILTIN_DEFINES).process(
-        source, filename, Path(filename).parent)
+    pre = Preprocessor(include_paths or [LIB_DIR], BUILTIN_DEFINES)
+    text, origins = pre.process(source, filename, Path(filename).parent)
     try:
         program = analyze(parse(tokenize(text, filename)))
     except CompileError as e:
         raise _remap(e, origins) from None
-    return generate(program, text.splitlines(), origin, relocatable)
+    return generate(program, text.splitlines(), origin, relocatable, _assembly(pre))
+
+
+def _assembly(pre: Preprocessor):
+    """What the #asm lines named, as (path, text), in the order named."""
+    return [(str(path), path.read_text()) for path in pre.assembly]
 
 
 def compile_units(paths, include_paths=None, origin: str = DEFAULT_ORIGIN,
@@ -132,7 +137,7 @@ def compile_units(paths, include_paths=None, origin: str = DEFAULT_ORIGIN,
         program = analyze(parse(tokenize(combined, str(paths[0]))))
     except CompileError as e:
         raise _remap(e, origins) from None
-    return generate(program, combined.splitlines(), origin, relocatable)
+    return generate(program, combined.splitlines(), origin, relocatable, _assembly(pre))
 
 
 def compile_file(path, asm_out=None, bin_out=None, keep_asm=False, extra=(),

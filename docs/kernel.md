@@ -1,8 +1,8 @@
 # A kernel and a shell
 
-> **Status: phases 1 and 2 of §17 are built: relocatable programs, and the
-> CPU's interrupts and faults (§13). The rest is a proposal, but most of it
-> has been run.** A prototype added the proposed CPU instructions to the emulator
+> **Status: phases 1 to 3 of §17 are built: relocatable programs, the CPU's
+> interrupts and faults (§13), and the kernel, with a console and a simple
+> shell (§10–§12). The rest is a proposal, but most of it has been run.** A prototype added the proposed CPU instructions to the emulator
 > at runtime, and ran C kernels and programs compiled by `pigeon-cc` through
 > them (§16). The console (§12) was not prototyped; boot (§4–7) is built
 > instead ([os_cd.md](os_cd.md)). Facts in §2 were checked in the code again
@@ -19,14 +19,14 @@
 |---|---|---|---|
 | Boot | Built: the BIOS loads bios2 from channel 7; bios2 boots a program on channel 1, or a disk's boot sector, which loads `/boot.bin` ([os_cd.md](os_cd.md)) | The kernel is that `/boot.bin` | No; built and tested instead |
 | Programs in memory | A C program is built for `0x20000`, or since phase 1 as a program file that loads anywhere | The kernel stays at `0x20000`; each program is relocated to wherever there's room | Yes; relocation is built |
-| Starting a program | — | The kernel loads `/bin/<name>.bin`, patches it and calls it | Yes, from a PigeonFS disk |
+| Starting a program | Since phase 3, the kernel's `exec` | The kernel loads `/bin/<name>.bin`, patches it and calls it | Yes, from a PigeonFS disk |
 | Ending one | `HALT` stops the machine; since phase 2, `GETSP` and `SETSP` make `exit()` possible | Return from `main`, or `exit()` from anywhere | Yes |
-| Services | Each program bundles its libraries | A system-call table the kernel fills in | Yes |
+| Services | Each program bundles its libraries; since phase 3, one the kernel runs calls it through `<pigeon/sys.h>` | A system-call table the kernel fills in | Yes |
 | Crashes | End the emulator, unless a vector table has a handler for the fault (phase 2) | A fault reaches the kernel, which abandons the program | Yes |
 | Ctrl-C | A break interrupt once HID's `SET_BREAK` is on (phase 2) | The break abandons the program | Yes; the device side is built in phase 2 |
 | Timer | Polled, or ticking with an interrupt since phase 2 | A periodic interrupt | Yes; the device side is built in phase 2 |
 | Multitasking | Impossible | Optional: the timer interrupt switches stacks | Yes, three programs |
-| Console, shell | None | A console in the kernel; the shell is a program | No |
+| Console, shell | Since phase 3, a console in the kernel and a simple shell, `/bin/sh.bin` | A console in the kernel; the shell is a program | No; built instead |
 
 ---
 
@@ -424,6 +424,12 @@ kernel, and a crash still ends the emulator.
 
 **Files:** new `lib/pigeon/sys.h` and `sys.c`; the kernel
 
+> **Built in phase 3:** `lib/pigeon/sys.h` and `sys.c` for programs,
+> `lib/pigeon/syscall.h` for the slot numbers and codes both sides share,
+> and the wrappers in `user/os/kernel.asm`, which also mark the kernel as
+> running (Q12). The table is `SYSCALL_SLOTS` words at `SYSCALL_TABLE`, both
+> in `memory_map.py`.
+
 - **A system call is a call through a table** at a fixed address, `0x15A1C`,
   that the kernel fills in at boot. The prototype used `0x15818`, where bios2
   now leaves the boot sector copy and the boot channel, so the table moved
@@ -451,6 +457,10 @@ A first set of calls is in kernel_exec.md §8.
 
 **Files:** new, built at `0x20000`
 
+> **Built in phase 3** as `user/os/kernel.c` and `kernel.asm` (§17). As
+> built, cleaning up after a program also stops timers 0–15 and mounts the
+> disk again (Q12), and a fault while kernel code runs is a panic.
+
 **At boot:** set its own heap limit (Q7); mount the disk it was booted from —
 the channel bios2 left at `BOOT_CHANNEL` when that is the hard disk or the
 CD, and the hard disk otherwise (Q8); fill in the system-call and vector
@@ -470,7 +480,7 @@ Q2). The prototype's kernel stopped.
 5. record it — address, heap-top pointer, saved stack — and `exec_call` it
 6. take the status: from `main`, from `exit`, or from a fault or break
 
-**Cleaning up after it** *(unverified — not in the prototype)*: point the
+**Cleaning up after it** *(not in the prototype; built in phase 3)*: point the
 display back at the screen, stop timers it started, empty the input queues,
 and close files it left open.
 
@@ -481,10 +491,11 @@ phase 1, on 2026-09-14.
 
 ## 12. The console and the shell
 
-- **The shell is a program** the kernel starts (decided, §18).
-- **A console library in the kernel** *(unverified — the prototype's console
-  was a text buffer)*: a 32×12 grid, scrolling, a cursor, and line input
-  with echo and backspace.
+- **The shell is a program** the kernel starts (decided, §18). A simple one
+  is built in phase 3 (Q9).
+- **A console in the kernel**, built in phase 3: a 32×12 grid, scrolling, a
+  cursor, and line input with echo and backspace. The prototype's console
+  was a text buffer.
 - **Programs print through it** with a system call. `printf` needs variadic
   functions first (kernel_changes.md §3.1).
 - Commands, argument splitting and program lookup are in kernel_exec.md §3.
@@ -707,7 +718,8 @@ switches.
 - **CPU:** built, in `test_interrupts.py`: each new instruction; flags and
   interrupt state restored by `IRET`; faults with and without a vector table;
   `run` and `step` taking interrupts at the same instructions.
-- **The kernel:** load, run and return; `exit` from deep recursion; faults and
+- **The kernel:** built, in `test_kernel.py` and `test_install.py`: load, run
+  and return; `exit` from deep recursion; faults and
   break; system calls; programs running programs; the display and timers reset
   after a program; a file with a bad header refused; the right disk mounted
   after a restart (Q8).
@@ -884,7 +896,78 @@ form.
      new. The prototype's P0 and P2–P6 still run, with the same figures.
 3. **The kernel:** system calls, `exec` from `/bin`, `exit`, faults and break.
    Built at `0x20000`, so the old BIOS path can start it before boot exists.
-4. **Variadic functions for `printf`, then the console and the shell.**
+   ***Done,*** with a console and a simple shell, as you asked (Q9–Q12).
+   - **What was built:**
+     - `user/os/kernel.c`, 141,636 bytes with `fs.c`, and `kernel.asm`, which
+       it names with `#asm`. It mounts the disk it booted from (Q8), fills
+       the system-call and vector tables, and starts `/bin/sh.bin`, again
+       whenever it ends. With no shell, or no filesystem, it says why and
+       halts.
+     - `exec` loads a program file 32 bytes below where it goes, checks the
+       header, the length and every patch offset, patches it, writes its
+       `__heap_limit`, and calls it through `exec_call`. `exit`, a fault or
+       Ctrl+C come back through `exec_abort`. A fault while kernel code runs
+       is a panic.
+     - After a program, the kernel closes its files, stops timers 0–15,
+       empties the input queues, points the display back at the screen,
+       mounts the disk again and redraws the console.
+     - The console: a 32×12 grid with scrolling and a cursor, and line input
+       with echo, backspace and Enter. Ctrl+C there throws the line away.
+     - Thirteen system calls (§10): `write`, `read`, `open`, `close`,
+       `opendir`, `readdir`, `closedir`, `stat`, `chdir`, `getcwd`, `exec`,
+       `exit` and `getkey`, through `lib/pigeon/sys.h` and `sys.c`, with the
+       slot numbers in `syscall.h` and `SYSCALL_TABLE` in `memory_map.py`.
+     - `user/os/bin/`: `sh.c`, the simple shell of shell.md §1, and `ls.c`,
+       `cat.c` and `echo.c`.
+     - `#asm "file.asm"` in the compiler (Q10): placed among the compiled
+       functions, found relative to the file naming it, placed once, and
+       watched when deciding whether a build is stale.
+     - bios2 writes `CH_USERPROG` to `BOOT_CHANNEL` for a program on
+       channel 1 (Q8).
+     - The example disc boots the kernel (Q11). `/bin` holds the shell, `ls`,
+       `cat` and `echo`, and the calculator, the cube and the file browser as
+       program files. The disc is 670.0 KiB.
+   - **`tests/test_kernel.py`, 26 cases,** on a Machine booted from a test
+     disk, typing through HID and reading the console back as text:
+     - the shell started, and a missing shell or filesystem reported;
+     - the disk mounted by the boot channel, four ways;
+     - arguments with quotes; `ls` and `cat` through the kernel; `cd` seen by
+       every program; lookup in `/bin`, then where you are, with `.bin`
+       added;
+     - a program ending by `exit` fifty calls deep, a divide by zero, a bad
+       instruction and a jump past memory, each reported while the shell
+       carries on; Ctrl+C ending a program that never ends; Ctrl+C at the
+       prompt clearing the line;
+     - a program running programs above its intact heap; each program's
+       heap limit; the screen back after a program page-flips; a file left
+       open closed; a program with its own `fs.c` leaving the kernel's view
+       of the disk true, with `fsck` clean;
+     - files that aren't programs refused; `exit` starting the shell again;
+       and a program overwriting a kernel wrapper, causing a panic that
+       halts.
+   - **`test_install.py`** now installs the example disc and restarts, and
+     the shell runs `graph`, which draws its curve and comes back on Esc.
+     **`test_compiler.py`** has five `#asm` cases, and **`test_bios2.py`**
+     the boot-channel case.
+   - **Twenty-five deliberate breakages each failed the tests:**
+     - `exec` writing no heap limit, patching nothing, putting every program
+       where the first goes, or skipping the length check;
+     - tidying that closes no files, leaves the display where the program
+       put it, keeps the stale mount, or doesn't redraw;
+     - Ctrl+C ignored; line input leaving break off, or on, or taking Ctrl+C
+       as a plain `c`;
+     - a fault in kernel code that isn't a panic; the hard disk mounted
+       whatever booted; the shell not started again;
+     - `exec_call` leaving the kernel marked as running; `exec_abort` not
+       restoring `F`; `exec` calling through the exit slot;
+     - the shell not looking in `/bin`, or ignoring quotes;
+     - `#asm` placing a file twice, resolving from the current directory,
+       not making a build stale, or codegen dropping it;
+     - bios2 leaving `BOOT_CHANNEL` alone for channel 1.
+   - **The full suite passes: 1,140 tests.**
+4. **Variadic functions for `printf`, then the rest of the shell:** its
+   prompt file and colors (shell.md §2). The console and a simple shell came
+   with phase 3. Planned in [phase4_plan.md](phase4_plan.md).
 5. ~~**The sector-booting BIOS, stage 1, and `pfs.py install-boot`**~~
    **Done** as bios2, `firmware/boot.asm`, `pfs.py boot` and `cc.py --project`
    ([os_cd.md](os_cd.md)). The kernel is installed as the project's `system`.
@@ -957,4 +1040,41 @@ kernel_changes.md §4, and [kernel_overview.md](kernel_overview.md) sums them up
    (`firmware/bios2.c:322`), so after the installer restarts from the CD, a
    kernel booted from channel 1 would find 6 there and mount the disc.
    Without bios2 the word is 0, because RAM starts zeroed, and the hard disk
-   is mounted.
+   is mounted. *Phase 3 made bios2 write it for channel 1.*
+
+9. ~~**How much of the console and the shell comes with the kernel.**~~
+   **Decided 2026-09-14 (you):** a simple output, and a simple shell program
+   with it, so phase 3 already boots to a prompt. The console also reads a
+   typed line. `printf`, the shell's prompt file and colors stay in phase 4.
+
+10. ~~**How hand-written assembly gets into the kernel's C.**~~ **Decided
+    2026-09-14 (you):** a directive in the C file, `#asm "kernel.asm"`. The
+    compiler places the file among the compiled functions, so the kernel
+    stays one source path for `cc.py`, the launcher and the project file.
+
+11. ~~**What the example disc boots.**~~ **Decided 2026-09-14 (you):** the
+    kernel with the simple shell. The calculator, the cube and the file
+    browser become programs in `/bin`; each comes back to the shell on Esc.
+
+12. ~~**The details phase 3 left open.**~~ **Decided 2026-09-14 (left to
+    me):**
+    - **File descriptors:** 0 reads a line from the console, 1 and 2 write
+      to it, and `open` returns `fs.c`'s handle plus 3. A directory handle is
+      `fs.c`'s own.
+    - **After a program, the kernel mounts its disk again,** keeping the
+      current directory. A program may bundle `fs.c` and write behind the
+      kernel's cache, which would then hide the new file or hand its blocks
+      out again.
+    - **A fault while kernel code runs is a panic**, which prints where and
+      halts. The system-call wrappers mark the kernel as running, and
+      `exec_call` marks it as not, around the program.
+    - **Ctrl+C at the prompt throws the line away.** The console turns break
+      off while it reads a line and takes Ctrl+C as a key, since a break
+      pending until Enter would end the shell instead. Pressed while the
+      kernel is busy anywhere else, a break waits for interrupts to come
+      back on, and so ends the program that runs next *(reasoned, not run)*.
+    - **The kernel's timer vector only returns**, so a program that starts a
+      tick doesn't stop the emulator.
+    - **A program that ends badly is reported by the shell**, as its
+      `sys_strerror` text, and one that returns a non-zero value as
+      `name: exit N`.

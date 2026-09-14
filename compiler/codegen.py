@@ -32,7 +32,7 @@ DIRECT_BINOPS = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV",
 
 class CodeGen:
     def __init__(self, program: A.Program, source_lines=None, origin="PROGRAM_LOAD_ADDR",
-                 relocatable=False):
+                 relocatable=False, assembly=()):
         self.program = program
         self.source_lines = source_lines or []
         # Where the code and data are built to run. The frame stack and the
@@ -42,6 +42,8 @@ class CodeGen:
         # entry(argc, argv), with its frame stack and heap after its image,
         # so it runs wherever it is loaded. compiler/program_file.py builds it.
         self.relocatable = relocatable
+        # (name, text) for each file a #asm line named.
+        self.assembly = list(assembly)
         self.out: List[str] = []
         self.label_count = 0
         self.loops: List[tuple] = []       # (continue_label, break_label)
@@ -90,6 +92,8 @@ class CodeGen:
         self._startup()
         for function in self.program.functions:
             self._function(function)
+        for name, text in self.assembly:
+            self._assembly(name, text)
         self._data()
         return "\n".join(self.out) + "\n"
 
@@ -133,6 +137,15 @@ class CodeGen:
         self.emit(f"CALL {self._main_label()}")
         self.emit("POP F")
         self.emit("RET")
+        self.out.append("")
+
+    def _assembly(self, name, text):
+        """A #asm file, among the compiled code: C reaches a routine in it
+        as `extern int name;`, and the routine reaches a C global as
+        __g_name and a C function by its name."""
+        self.out.append("")
+        self.comment(f"--- assembly from {name} ---")
+        self.out.extend(text.rstrip("\n").splitlines())
         self.out.append("")
 
     def _main_label(self) -> str:
@@ -765,5 +778,5 @@ def _escape_c(data: bytes) -> str:
 
 
 def generate(program: A.Program, source_lines=None, origin="PROGRAM_LOAD_ADDR",
-             relocatable=False) -> str:
-    return CodeGen(program, source_lines, origin, relocatable).generate()
+             relocatable=False, assembly=()) -> str:
+    return CodeGen(program, source_lines, origin, relocatable, assembly).generate()

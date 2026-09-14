@@ -1,7 +1,8 @@
 # Running a program from the shell
 
-> **Status: proposal; relocation (§5, §7, §8's startup code) is built,** as
-> phase 1 of kernel.md §17. What happens, step by step, when you
+> **Status: built, as phases 1 to 3 of kernel.md §17:** relocation, the
+> kernel with `exec` and the system calls of §8, and a simple shell with
+> `ls`, `cat` and `echo`. `printf` is not built yet. What happens, step by step, when you
 > type `ls` at the shell. The kernel boots, starts the shell as its first
 > program, and the shell asks the kernel to run others. §5 was compiled and
 > run on 2026-09-13, and again on 2026-09-14; anything else reasoned but not

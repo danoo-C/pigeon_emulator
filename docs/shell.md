@@ -1,6 +1,9 @@
 # The shell
 
-> **Status: design, nothing built.** The shell is `/bin/sh.bin`, an ordinary
+> **Status: a simple shell is built,** `user/os/bin/sh.c`, in kernel.md's
+> phase 3: §1's loop, splitting with quotes, the lookup, and `cd`, `exit`
+> and `help`, with the current directory as its prompt. §2's prompt file and
+> the colors are not built yet. The shell is `/bin/sh.bin`, an ordinary
 > program that the kernel starts at boot ([kernel_overview.md](kernel_overview.md)).
 > Decided 2026-09-14.
 

@@ -1,6 +1,14 @@
 PigeonOS 0.1
 
-cc.py --project put this file on the disc, from the [files] section of
-user/os/pigeon_compiler_init.txt. The installer copies it to the hard
-disk with everything else on the disc, and makes the disk boot /boot.bin:
-the graphing calculator.
+The installer copied this from
+the disc with everything else,
+and the hard disk now boots
+/boot.bin: the kernel, which
+starts the shell.
+
+Try, at the prompt:
+  ls /bin
+  graph     (Esc comes back)
+  cube      (Esc comes back)
+  files     (Esc comes back)
+  help

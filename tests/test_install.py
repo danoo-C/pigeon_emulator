@@ -3,8 +3,9 @@
 docs/os_cd.md, section 8. The example project's disc is built, put in the
 drive, and booted on a Machine with a blank hard disk. The installer asks,
 formats the disk, copies the disc onto it, makes the disk boot /boot.bin --
-the graphing calculator -- and restarts. Then the hard disk boots, and the
-calculator draws its curve.
+the kernel -- and restarts. Then the hard disk boots, the kernel starts
+the shell, and the shell runs the graphing calculator, which draws its
+curve and comes back on Esc.
 
 Everything is driven the way a person would: keys pushed through HID, the
 screen read back as text.
@@ -28,12 +29,13 @@ from emulator.memory_map import BOOT_BLOCK, BOOT_CODE, PROGRAM_LOAD_ADDR  # noqa
 from pfs import PgfsImage                                             # noqa: E402
 from test_bios2 import ENTER, ESC, power_on                           # noqa: E402
 from test_graph import curve_pixels                                   # noqa: E402
+from test_kernel import Console, last_row                             # noqa: E402
 from test_project import EXAMPLE, quiet                               # noqa: E402
 
 MiB = 1 << 20
 PROMPT = "ENTER install   ESC cancel"
-INSTALLED = [
-    "/boot.bin", "/pigeon.txt", "/bin/files.bin", "/bin/cube.bin", "/docs/readme.txt"]
+INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt"] + [
+    f"/bin/{name}.bin" for name in ("sh", "ls", "cat", "echo", "graph", "cube", "files")]
 
 # The example disc, built once for the whole file.
 _BUILD = tempfile.TemporaryDirectory()
@@ -56,7 +58,7 @@ def run_to(machine, address, steps):
     return machine.cpu.pc == address
 
 
-def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_calculator():
+def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_shell():
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
         disk = t / "hdd.img"
@@ -71,7 +73,7 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_cal
             assert p.run_until(keys_row("ENTER restart"), steps=80_000_000, every=50_000), \
                 p.rows()
             rows = p.rows()
-            assert rows[9] == "Installed 5 files.", rows
+            assert rows[9] == f"Installed {len(INSTALLED)} files.", rows
             assert rows[10] == "The hard disk boots /boot.bin.", rows
 
             # the hard disk, from the host, while the installer waits
@@ -96,13 +98,22 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_cal
             # live in its image, so running changes the bytes.
             assert run_to(p.machine, PROGRAM_LOAD_ADDR, steps=6_000_000), \
                 f"the hard disk never handed over: {p.rows()}"
-            calculator = on_disc["/boot.bin"]
+            kernel = on_disc["/boot.bin"]
             mem = p.machine.ram.mem
-            assert bytes(mem[PROGRAM_LOAD_ADDR:PROGRAM_LOAD_ADDR + len(calculator)]) == \
-                calculator, "the hard disk did not load the calculator"
-            p.run(steps=12_000_000)
-            assert curve_pixels(p.machine.display_io.snapshot()) > 200, \
+            assert bytes(mem[PROGRAM_LOAD_ADDR:PROGRAM_LOAD_ADDR + len(kernel)]) == \
+                kernel, "the hard disk did not load the kernel"
+
+            # the kernel starts the shell; the shell runs the calculator
+            shell = Console.on(p.machine)
+            assert shell.ready(), shell.rows()
+            assert shell.rows()[:2] == ["PigeonOS", "2:/> _"], shell.rows()
+            shell.type("graph\n")
+            assert shell.run_until(
+                lambda rows: curve_pixels(p.machine.display_io.snapshot()) > 200), \
                 "the calculator did not draw its curve"
+            shell.press(ESC)
+            assert shell.run_until(lambda rows: last_row(rows) == "2:/> _"), shell.rows()
+            assert shell.rows()[1] == "2:/> graph", shell.rows()
 
 
 def test_esc_cancels_and_leaves_the_hard_disk_as_it_was():

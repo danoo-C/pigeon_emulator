@@ -38,7 +38,11 @@ def build(source: str) -> bytes:
 
 def run(source: str):
     """Compile, load, execute. Returns the CPU at HALT."""
-    image = build(source)
+    return execute(build(source))
+
+
+def execute(image: bytes):
+    """Load an image at PROGRAM_LOAD_ADDR and run it to HALT."""
     ram = RAM(RAM_SIZE)
     ram.load_bytes(image, PROGRAM_LOAD_ADDR)
     cpu = CPU(ram)
@@ -473,6 +477,95 @@ def test_org_refuses_what_is_not_an_address(label, text):
     except ValueError:
         return
     raise AssertionError(f"{label}: --org {text} was accepted")
+
+
+# --- hand-written assembly: #asm ----------------------------------------------
+
+ADD_TEN = r'''
+extern int add_ten;
+unsigned seen;
+int triple(int x) { return x * 3; }
+int main(void) {
+    seen = 5u;
+    return ((int (*)(void))&add_ten)();
+}
+'''
+
+# Reads a C global, and calls a C function the way C does: its argument
+# at [F], where add_ten's own caller already moved F.
+ADD_TEN_ASM = """
+add_ten:
+    MOV C, #__g_seen
+    MRW A, C
+    ADD A, A, #10
+    MWW F, A
+    CALL triple
+    RET
+"""
+
+
+def in_folder(files, main="main.c"):
+    """Write {name: text} into a folder and compile `main` from there, so
+    #asm paths resolve the way they do on disk. Returns (image, error)."""
+    with tempfile.TemporaryDirectory() as d:
+        for name, text in files.items():
+            path = Path(d) / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        source = Path(d) / main
+        try:
+            text = compile_to_asm(source.read_text(), str(source))
+        except CompileError as e:
+            return None, e
+        asm = Path(d) / "out.asm"
+        asm.write_text(text)
+        return Assembler(str(asm)).assemble(), None
+
+
+def test_asm_routines_and_c_share_labels():
+    image, error = in_folder({"main.c": '#asm "entry.asm"\n' + ADD_TEN,
+                              "entry.asm": ADD_TEN_ASM})
+    assert error is None, error
+    cpu = execute(image)
+    assert cpu.reg.read(0) == (5 + 10) * 3 and cpu.sp == STACK_TOP
+
+
+def test_an_asm_path_is_relative_to_the_file_that_names_it():
+    image, error = in_folder({"main.c": '#include "kernel/k.h"\n' + ADD_TEN,
+                              "kernel/k.h": '#asm "k.asm"\n',
+                              "kernel/k.asm": ADD_TEN_ASM})
+    assert error is None, error
+    assert execute(image).reg.read(0) == 45
+
+
+def test_assembly_named_twice_is_placed_once():
+    """Otherwise its labels would be duplicates, which the assembler refuses."""
+    image, error = in_folder({"main.c": '#asm "entry.asm"\n#include "again.h"\n' + ADD_TEN,
+                              "again.h": '#asm "entry.asm"\n',
+                              "entry.asm": ADD_TEN_ASM})
+    assert error is None, error
+    assert execute(image).reg.read(0) == 45
+
+
+def test_missing_assembly_is_reported_at_its_line():
+    _, error = in_folder({"main.c": '/* the kernel */\n#asm "missing.asm"\n' + ADD_TEN})
+    assert error is not None, "compiled without its assembly"
+    assert str(error).endswith("main.c:2:1: cannot find assembly 'missing.asm'"), str(error)
+
+
+def test_editing_the_assembly_makes_a_build_stale():
+    import os
+    from emulator.programs import Program
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "main.c").write_text('#asm "entry.asm"\n' + ADD_TEN)
+        (d / "entry.asm").write_text(ADD_TEN_ASM)
+        program = Program(name="main", source=d / "main.c", binary=d / "build" / "main.bin")
+        program.ensure_built(quiet=True)
+        assert not program.stale
+        later = (d / "build" / "main.bin").stat().st_mtime + 10
+        os.utime(d / "entry.asm", (later, later))
+        assert program.stale, "an edited #asm file did not make the build stale"
 
 
 if __name__ == "__main__":

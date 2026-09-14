@@ -1,7 +1,8 @@
 # How the OS fits together
 
-> **Status: the short version. Steps 1 and 2 of §7 are built: relocatable
-> programs, and the CPU's interrupts and faults.** The detail is in
+> **Status: the short version. Steps 1 to 3 of §7 are built: relocatable
+> programs, the CPU's interrupts and faults, and the kernel with a console
+> and a simple shell.** The detail is in
 > [kernel.md](kernel.md), [kernel_exec.md](kernel_exec.md) and
 > [kernel_changes.md](kernel_changes.md), and every question in them is now
 > decided (§6). Booting from disk is already built ([os_cd.md](os_cd.md)).
@@ -133,6 +134,10 @@ Decided 2026-09-14, left to me. Each is recorded where the question was asked.
 | Which programs are relocatable | Every `.c` in a project's `[files]`, and `cc.py --relocatable`; the installer and the system stay at `0x20000` | kernel.md Q6 |
 | Heap limits | A `__heap_limit` word in every program. The kernel's stops at `0x00FFFFE0`; `exec` writes each program's | kernel.md Q7 |
 | Which disk the kernel mounts | `BOOT_CHANNEL` when it's the hard disk or the CD, otherwise the hard disk; bios2 writes the word for channel 1 too | kernel.md Q8 |
+| Console and shell with the kernel | A console and a simple shell in phase 3; `printf`, the prompt file and colors in phase 4 | kernel.md Q9 |
+| Assembly in the kernel's C | `#asm "kernel.asm"`, a directive in the C file | kernel.md Q10 |
+| What the example disc boots | The kernel and its shell; the calculator, cube and file browser are programs in `/bin` | kernel.md Q11 |
+| File descriptors, clean-up, panics, Ctrl+C at the prompt | 0–2 the console, `open` from 3; the disk mounted again after each program; a fault in kernel code halts; Ctrl+C clears the typed line | kernel.md Q12 |
 
 ---
 
@@ -143,8 +148,10 @@ Decided 2026-09-14, left to me. Each is recorded where the question was asked.
    program, and `cc.py --relocatable` (kernel.md §17).
 2. ***Done.*** **The CPU:** `GETSP`, `SETSP` and faults; then interrupts, the
    timer and break (kernel.md §13, §17).
-3. **The kernel:** system calls, `exec`, `exit` and faults, installed as the
-   project's `system`.
-4. **`printf`, the console and the shell:** variadic functions, then `sh`,
-   `ls`, `cat` and `echo`.
+3. ***Done.*** **The kernel:** system calls, `exec`, `exit` and faults,
+   installed as the project's `system`. With it, a console and a simple
+   shell with `ls`, `cat` and `echo` (kernel.md Q9).
+4. **`printf` and the rest of the shell:** variadic functions, then the
+   prompt from `/etc/shell_header.conf` and colors ([shell.md](shell.md)).
+   Planned in [phase4_plan.md](phase4_plan.md).
 5. *Optional:* multitasking.

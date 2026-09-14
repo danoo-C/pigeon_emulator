@@ -37,6 +37,14 @@ called as `entry(argc, argv)` and returns `main`'s value instead of halting,
 and the frame stack and heap follow the image wherever it is loaded.
 `--project` builds every `.c` in `[files]` this way.
 
+**`#asm "file.asm"`** pulls hand-written assembly into a C program, for what
+C can't express, such as a kernel's `exec_call`, which needs `GETSP`. The
+compiler places the file among the compiled functions, so the two share
+labels: C reaches a routine as `extern int name;` cast to a function, and the
+routine reaches a C global as `__g_name` and a C function by its name. The
+path is relative to the file that names it, a file named twice is placed
+once, and editing it rebuilds the program.
+
 `--project FILE` builds an installation disc instead. It reads a project
 file, builds the installer, the system the installed disk boots, and the
 files it names, and writes a bootable

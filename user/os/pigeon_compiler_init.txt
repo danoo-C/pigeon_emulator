@@ -12,10 +12,15 @@ label   = PIGEONOS              # the disc's volume label, 15 bytes at most
 
 [boot]
 installer = installer.c         # the disc's boot sector loads and runs this
-system    = ../graph.c          # what the installed hard disk boots: the graphing calculator
+system    = kernel.c            # what the installed hard disk boots: the kernel, which starts /bin/sh.bin
 # bootsector = boot.asm         # optional: firmware/boot.asm when left out
 
 [files]                         # what the installer will put on the hard disk
-/bin/files.bin   = ../files.c   # a .c is built as a program file, an .asm as an image; anything else is copied
+/bin/sh.bin      = bin/sh.c     # a .c is built as a program file, an .asm as an image; anything else is copied
+/bin/ls.bin      = bin/ls.c
+/bin/cat.bin     = bin/cat.c
+/bin/echo.bin    = bin/echo.c
+/bin/graph.bin   = ../graph.c   # the graphing calculator; Esc goes back to the shell
 /bin/cube.bin    = ../cube.c
+/bin/files.bin   = ../files.c
 /docs/readme.txt = readme.txt

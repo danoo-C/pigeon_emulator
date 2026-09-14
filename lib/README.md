@@ -1,7 +1,7 @@
 # The C libraries
 
-Seven headers, compiled by `pigeon-cc` and covered by execution tests in
-`tests/test_libs.py`, `tests/test_fs.py` and `tests/test_cdlib.py`. Every test compiles the C and
+Eight headers, compiled by `pigeon-cc` and covered by execution tests in
+`tests/test_libs.py`, `tests/test_fs.py`, `tests/test_cdlib.py` and `tests/test_kernel.py`. Every test compiles the C and
 *runs* it.
 
 | Header | What it gives you |
@@ -13,6 +13,7 @@ Seven headers, compiled by `pigeon-cc` and covered by execution tests in
 | `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped |
 | `<pigeon/input.h>` | mouse position/buttons/edges, keyboard characters, key edges, held-key state |
 | `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
+| `<pigeon/sys.h>` | for a program the kernel runs: `write` `read` `open` `close`, `opendir` `readdir` `stat`, `chdir` `getcwd`, `exec` `exit` `getkey`, `print`, `sys_strerror` |
 
 There is no linker: units are compiled together, so pass the library
 sources on the command line.
@@ -207,3 +208,27 @@ before and after. `cd_save` does, removes the mixed copy, and returns
 unmounting it first if it was mounted, and refuses with `FS_EBUSY` while
 files on it are still open. The design is in
 [docs/cd-drive.md](../docs/cd-drive.md).
+
+## sys
+
+The system calls, for a program the kernel runs (`user/os/kernel.c`,
+[docs/kernel.md](../docs/kernel.md) §10). Each function calls through the
+kernel's table at `SYSCALL_TABLE`, so a program carries a few lines instead
+of a console and `fs.c` of its own, and every program shares the kernel's
+one screen of text and one current directory.
+
+```c
+char line[256];
+print("name? ");
+read(STDIN, line, 255);             /* a typed line, '\n' included */
+if (exec("/bin/ls.bin", argc, argv) == ENDED_BREAK) print("stopped\n");
+```
+
+**File descriptors 0, 1 and 2 are the console;** `open` gives 3 and up, and
+`read`, `write` and `close` take either. **Errors are below 0:** -1 to -19
+are `fs.h`'s codes passed on, `exec` adds `E_NOTPROG`, `E_NOMEM` and
+`E_DEPTH`, and `ENDED_*` for a program that didn't return: a fault, or
+Ctrl+C. `sys_strerror` names them all. **The slot numbers and codes are in
+`<pigeon/syscall.h>`,** which has no `.c`, so the kernel includes it without
+the stubs. **Only a program the kernel started can call them:** without a
+kernel the table is empty.

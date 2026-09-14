@@ -125,6 +125,15 @@ BOOT_CHANNEL   = BOOT_LOAD_ADDR + BOOT_BLOCK
 if BOOT_CHANNEL + 4 > PROGRAM_LOAD_ADDR:
     raise RuntimeError("A boot sector's copy overlaps the program load address")
 
+# --- System calls (docs/kernel.md §10) ---
+# The kernel fills SYSCALL_SLOTS words here, just past the boot channel, with
+# the addresses of its calls. Programs call through them with
+# lib/pigeon/sys.c; which slot is which is in lib/pigeon/syscall.h.
+SYSCALL_TABLE = BOOT_CHANNEL + 4
+SYSCALL_SLOTS = 32
+if SYSCALL_TABLE + 4 * SYSCALL_SLOTS > PROGRAM_LOAD_ADDR:
+    raise RuntimeError("The system-call table overlaps the program load address")
+
 # --- Program files (docs/kernel.md §8) ---
 # A C program the kernel can load at any address, as compiler/program_file.py
 # writes it: a header of PROGRAM_FILE_HEADER bytes -- eight words, the magic

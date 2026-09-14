@@ -55,7 +55,8 @@ class Program:
         """The binary exists but a source has been edited since.
 
         For a C program the libraries count too: editing display.c must
-        rebuild every program that uses it.
+        rebuild every program that uses it. So does the assembly its #asm
+        lines name.
         """
         if self.source is None or not self.built:
             return False
@@ -63,8 +64,8 @@ class Program:
         if self.source.stat().st_mtime > built_at:
             return True
         if self.language == "c":
-            return any(lib.stat().st_mtime > built_at
-                       for lib in libraries_for(self.source))
+            return any(dependency.stat().st_mtime > built_at
+                       for dependency in libraries_for(self.source) + assembly_for(self.source))
         return False
 
     @property
@@ -193,6 +194,25 @@ def libraries_for(source: Path) -> List[Path]:
                 found.append(implementation)
                 pending.append(implementation)
     return sorted(found)
+
+
+ASM_RE = re.compile(r'^\s*#\s*asm\s+"([^"]+)"', re.MULTILINE)
+
+
+def assembly_for(source: Path) -> List[Path]:
+    """The assembly a C program and its libraries name with #asm, each
+    relative to the file naming it (compiler/preprocess.py)."""
+    found: List[Path] = []
+    for unit in [Path(source), *libraries_for(source)]:
+        try:
+            text = unit.read_text()
+        except OSError:
+            continue
+        for name in ASM_RE.findall(text):
+            path = (unit.parent / name).resolve()
+            if path.is_file() and path not in found:
+                found.append(path)
+    return found
 
 
 def from_path(config: Config, path: Path) -> Program:

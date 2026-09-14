@@ -22,8 +22,10 @@
  * without a key.
  *
  * Handing over. A program is copied to PROGRAM_LOAD_ADDR with one
- * READ_DMA. A disk's block 0 is copied to BOOT_LOAD_ADDR, the channel is
- * written to BOOT_CHANNEL, and the boot sector's code at BOOT_ENTRY runs.
+ * READ_DMA. A disk's block 0 is copied to BOOT_LOAD_ADDR, and the boot
+ * sector's code at BOOT_ENTRY runs. Either way the channel booted is
+ * written to BOOT_CHANNEL, so a kernel knows which disk it came from
+ * (docs/kernel.md Q8), even when an earlier boot left another there.
  * First, either way, the timer stops, the screen is cleared to 0 and the
  * input queues are emptied, so the program sees none of the keys the menu
  * read. A boot that fails comes back to the menu and says why.
@@ -307,6 +309,7 @@ void boot(int index) {
             say(d->name, ": load failed");
             return;
         }
+        *(unsigned *)BOOT_CHANNEL = CH_USERPROG;
         hand_over(PROGRAM_LOAD_ADDR);
         /* A program ends in HALT; one that returns instead lands here. */
         draw_frame();
