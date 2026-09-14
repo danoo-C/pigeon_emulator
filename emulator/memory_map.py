@@ -41,6 +41,21 @@ RAM_SIZE = 0x08000000  # 128 MB total address space
 # does not have (which used to assemble fine and fail at runtime).
 REGISTER_COUNT = 6   # A-F
 
+# Interrupts and faults (docs/kernel.md §13). SETIV points the CPU at a
+# table of VECTOR_COUNT words, one handler address per vector, 0 for none.
+# To deliver one, the CPU pushes the flags word, then the address to return
+# to -- for a fault, the faulting instruction's own -- turns interrupts off
+# and jumps to the handler. IRET undoes all four.
+VEC_DIV_ZERO   = 0   # fault: DIV by zero
+VEC_BAD_OPCODE = 1   # fault: an opcode with no instruction
+VEC_BAD_FETCH  = 2   # fault: fetching an instruction past the end of memory
+VEC_TIMER      = 3   # interrupt: a timer ticking (devices/timer.py, TICK)
+VEC_BREAK      = 4   # interrupt: Ctrl+C, once break is on (devices/hid.py)
+VECTOR_COUNT   = 5
+FLAG_ZERO = 1        # the flags word: bit 0 the zero flag,
+FLAG_LESS = 2        # bit 1 the less flag,
+FLAG_IE   = 4        # bit 2 whether interrupts were on
+
 # --- BIOS ---
 BIOS_START = 0x00000000
 BIOS_MAX   = 0x00000400   # 1 KB reserved

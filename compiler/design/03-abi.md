@@ -7,8 +7,10 @@
 ## Why this is unusual
 
 The stack pointer cannot be read ([01-overview.md](01-overview.md) §2). Nothing
-in the ISA moves `SP` into a register, so no SP-relative address can be formed,
-so the ordinary C stack frame is impossible.
+in the ISA moved `SP` into a register, so no SP-relative address could be
+formed, so the ordinary C stack frame was impossible. `GETSP` came later, for
+the kernel ([docs/kernel.md](../../docs/kernel.md) §13), and the frame stack
+stays.
 
 Two stacks, with different jobs:
 

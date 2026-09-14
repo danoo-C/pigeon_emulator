@@ -295,16 +295,15 @@ byte:  0        1      2       3       4  5  6  7
 An unused operand slot holds `0xFF` (`NONE_REG`). Most instructions accept
 *either* a register *or* an immediate in their last slot.
 
-| Op | | Op | | Op | | Op | |
-|---|---|---|---|---|---|---|---|
-| 0 | `NOP` | 8 | `XOR` | 16 | `JZ` | 24 | `POP` |
-| 1 | `MOV` | 9 | `NOT` | 17 | `JNZ` | 25 | `CALL` |
-| 2 | `ADD` | 10 | `JMP` | 18 | `JL` | 26 | `RET` |
-| 3 | `SUB` | 11 | `MR` | 19 | `JG` | 27 | `SHL` |
-| 4 | `MUL` | 12 | `MW` | 20 | `JLE` | 28 | `SHR` |
-| 5 | `DIV` | 13 | `MRW` | 21 | `JGE` | | |
-| 6 | `OR` | 14 | `MWW` | 22 | `HALT` | | |
-| 7 | `AND` | 15 | `CMP` | 23 | `PUSH` | | |
+| Op | | Op | | Op | | Op | | Op | |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | `NOP` | 7 | `AND` | 14 | `MWW` | 21 | `JGE` | 28 | `SHR` |
+| 1 | `MOV` | 8 | `XOR` | 15 | `CMP` | 22 | `HALT` | 29 | `GETSP` |
+| 2 | `ADD` | 9 | `NOT` | 16 | `JZ` | 23 | `PUSH` | 30 | `SETSP` |
+| 3 | `SUB` | 10 | `JMP` | 17 | `JNZ` | 24 | `POP` | 31 | `EI` |
+| 4 | `MUL` | 11 | `MR` | 18 | `JL` | 25 | `CALL` | 32 | `DI` |
+| 5 | `DIV` | 12 | `MW` | 19 | `JG` | 26 | `RET` | 33 | `IRET` |
+| 6 | `OR` | 13 | `MRW` | 20 | `JLE` | 27 | `SHL` | 34 | `SETIV` |
 
 - `MR`/`MW` move **one byte**; `MRW`/`MWW` a **32-bit word**.
 - `MW`/`MWW` take their *address* from a register: `MWW D, A` writes A to the
@@ -313,6 +312,15 @@ An unused operand slot holds `0xFF` (`NONE_REG`). Most instructions accept
   a borrow, not a sign). Pair it with a `J**`.
 - Registers are unsigned 32-bit and wrap; `SUB` below zero yields a large value.
 - `CALL` pushes the return address, `RET` pops it. Keep the stack balanced.
+- `GETSP r` reads the stack pointer, and `SETSP r` or `SETSP #n` sets it.
+- **Interrupts and faults** ([docs/kernel.md](docs/kernel.md) §13): `SETIV` sets
+  the address of a vector table, one handler address for each `VEC_*` number.
+  To deliver one, the CPU pushes a flags word (`FLAG_ZERO`, `FLAG_LESS`,
+  `FLAG_IE`), then the address to return to, turns interrupts off and jumps to
+  the handler. `IRET` undoes all of that. `EI` and `DI` turn interrupts on and
+  off; faults — `DIV` by zero, an unknown opcode, a fetch past the end of
+  memory — come either way. A fault with no handler stops the emulator, as it
+  always did.
 
 Adding an instruction is one decorated function in `instruction_set.py`:
 
@@ -349,8 +357,8 @@ that fires the command.
 |---|---|---|
 | 1 `CH_USERPROG` | boot disk | as HDD |
 | 2 `CH_HDD` | disk | `0` NOP `1` GET_SIZE `2` READ `3` WRITE `4` TRUNCATE `5` FLUSH · `6` READ_DMA `7` WRITE_DMA — straight to and from RAM, any length, with `[address, count]` in the window and R/W 0 so the count comes back |
-| 3 `CH_HID` | input | **real-time:** `1` mouse pos (x≪16\|y) `2` button mask `6` one key's state `7` 32-byte held-key bitmap · **FIFO:** `3` pop character `4` pop mouse edge `5` pop key edge |
-| 4 `CH_TIMER` | timers | `1` START `2` STOP `4` RESET `5` STATUS → `(status, remaining_ms)` |
+| 3 `CH_HID` | input | **real-time:** `1` mouse pos (x≪16\|y) `2` button mask `6` one key's state `7` 32-byte held-key bitmap · **FIFO:** `3` pop character `4` pop mouse edge `5` pop key edge · **break:** `8` SET_BREAK, ADDRESS 1 on or 0 off: Ctrl+C raises `VEC_BREAK` instead of arriving as a key |
+| 4 `CH_TIMER` | timers | `1` START `2` STOP `4` RESET `5` STATUS → `(status, remaining_ms)` · `6` TICK: raise `VEC_TIMER` every LENGTH ms until STOP |
 | 5 `CH_DISPLAY` | framebuffer | `1` INFO → `(w, h, size)` `2` SET_BASE (page flip, ADDRESS = the buffer to scan out) `3` GET_BASE `4` FILL (ADDRESS = destination, colour in the data window) |
 | 6 `CH_CD` | removable disc | `0`-`5` as HDD, but **read-only**: WRITE and TRUNCATE are refused · `8` MEDIA → `(magic, present, generation, size, name[32])` · `9` EJECT → `(ejected, generation)` |
 | 7 `CH_BIOS2` | firmware | the second-stage BIOS ([docs/os_cd.md](docs/os_cd.md)). As HDD, but **read-only**: WRITE, TRUNCATE and anything sent with R/W 1 get 0 bytes, WRITE_DMA gets `0xFFFFFFFF`. Registered only when there is a bios2; `fs.c` and `cd.c` never send it anything |
@@ -384,6 +392,7 @@ python3 tests/test_bios2.py       # the two-stage BIOS: stage 1, channel 7, bios
 python3 tests/test_boot.py        # the boot sector, and pfs.py boot
 python3 tests/test_project.py     # cc.py --project, and the launcher's --cd
 python3 tests/test_relocatable.py # program files the kernel loads anywhere: cc.py --relocatable
+python3 tests/test_interrupts.py  # interrupts, faults, GETSP/SETSP, the timer's TICK and break
 python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
 python3 tests/test_fs.py          # PigeonFS on the guest, checked against pfs.py
 python3 -m pytest                 # all of them, in parallel: pip install -r requirements-dev.txt

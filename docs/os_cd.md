@@ -63,7 +63,7 @@ installer, at 0x20000
 - **The BIOS region is 1 KB**, 128 instructions, and `bios.py` refuses more
   (`emulator/bios.py:20`). Today's BIOS is 688 bytes, 86 instructions.
 - **The CPU starts with PC at 0 and SP at `STACK_TOP`**
-  (`emulator/cpu.py:24`).
+  (`emulator/cpu.py:36`).
 - **Every C program is built for `PROGRAM_LOAD_ADDR`**, with its frame stack
   and heap at `HEAP_START` (`compiler/codegen.py:80`, `:164`). The kernel
   prototype builds C for another address by replacing that one line

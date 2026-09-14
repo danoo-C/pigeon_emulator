@@ -17,10 +17,10 @@
 
 ## 1. The one idea: everything is a function call
 
-Nothing switches between programs behind their backs. The CPU has no
-interrupts today, and in the first version the ones kernel.md §13 adds only
-end a program or tick the timer. That makes the whole system simpler than it
-sounds:
+Nothing switches between programs behind their backs. The CPU has had
+interrupts since kernel.md's phase 2 (§13), but in the first version they
+only end a program or tick the timer. That makes the whole system simpler
+than it sounds:
 
 - **The kernel runs a program** by calling a function that happens to live in
   a file it just loaded.

@@ -58,6 +58,10 @@ with the hardware stack for temporaries — see [04-codegen.md](04-codegen.md).
 
 ### 2. The stack pointer cannot be read
 
+> Since the kernel's phase 2, `GETSP` and `SETSP` read and set it
+> ([docs/kernel.md](../../docs/kernel.md) §13). The design below predates them,
+> and the compiler doesn't use them.
+
 `PUSH`, `POP`, `CALL` and `RET` move `cpu.sp`, and **nothing else can observe
 it**. There is no `MOV A, SP`. A compiler therefore cannot form an SP-relative
 address, which rules out the ordinary C stack frame.

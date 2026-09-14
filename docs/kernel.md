@@ -1,7 +1,8 @@
 # A kernel and a shell
 
-> **Status: phase 1 of §17, relocatable programs, is built. The rest is a
-> proposal, but most of it has been run.** A prototype added the proposed CPU instructions to the emulator
+> **Status: phases 1 and 2 of §17 are built: relocatable programs, and the
+> CPU's interrupts and faults (§13). The rest is a proposal, but most of it
+> has been run.** A prototype added the proposed CPU instructions to the emulator
 > at runtime, and ran C kernels and programs compiled by `pigeon-cc` through
 > them (§16). The console (§12) was not prototyped; boot (§4–7) is built
 > instead ([os_cd.md](os_cd.md)). Facts in §2 were checked in the code again
@@ -19,11 +20,11 @@
 | Boot | Built: the BIOS loads bios2 from channel 7; bios2 boots a program on channel 1, or a disk's boot sector, which loads `/boot.bin` ([os_cd.md](os_cd.md)) | The kernel is that `/boot.bin` | No; built and tested instead |
 | Programs in memory | A C program is built for `0x20000`, or since phase 1 as a program file that loads anywhere | The kernel stays at `0x20000`; each program is relocated to wherever there's room | Yes; relocation is built |
 | Starting a program | — | The kernel loads `/bin/<name>.bin`, patches it and calls it | Yes, from a PigeonFS disk |
-| Ending one | `HALT` stops the machine | Return from `main`, or `exit()` from anywhere | Yes |
+| Ending one | `HALT` stops the machine; since phase 2, `GETSP` and `SETSP` make `exit()` possible | Return from `main`, or `exit()` from anywhere | Yes |
 | Services | Each program bundles its libraries | A system-call table the kernel fills in | Yes |
-| Crashes | End the emulator | A fault reaches the kernel, which abandons the program | Yes |
-| Ctrl-C | Impossible | A break interrupt | Yes; the device side was simulated |
-| Timer | Polled | A periodic interrupt | Yes; the device side was simulated |
+| Crashes | End the emulator, unless a vector table has a handler for the fault (phase 2) | A fault reaches the kernel, which abandons the program | Yes |
+| Ctrl-C | A break interrupt once HID's `SET_BREAK` is on (phase 2) | The break abandons the program | Yes; the device side is built in phase 2 |
+| Timer | Polled, or ticking with an interrupt since phase 2 | A periodic interrupt | Yes; the device side is built in phase 2 |
 | Multitasking | Impossible | Optional: the timer interrupt switches stacks | Yes, three programs |
 | Console, shell | None | A console in the kernel; the shell is a program | No |
 
@@ -36,7 +37,8 @@
   emulator, and nothing can stop a program that never returns.
 - **With six new instructions (§13):** `exit()` from anywhere, crashes that
   return to the shell, Ctrl-C, a timer tick — and preemptive multitasking, if
-  the kernel wants it (§14). All of these ran in the prototype.
+  the kernel wants it (§14). All of these ran in the prototype. Phase 2 built
+  the instructions, faults and interrupts; the kernel that uses them is next.
 - **Still not possible:** memory protection. Any program can overwrite the
   kernel or another program.
 
@@ -47,26 +49,31 @@
 Checked in the code, not assumed:
 
 **The CPU**
-- There are 29 instructions and six registers, `A` to `F`
+- There were 29 instructions and six registers, `A` to `F`
   (`emulator/instruction_set.py`, `REGISTER_COUNT` in `emulator/memory_map.py`).
-- There are no interrupts, traps or privilege levels. Nothing in `cpu.py`,
-  `machine.py` or `io_controller.py` mentions any.
-- The stack pointer moves only through `PUSH`, `POP`, `CALL` and `RET`. No
-  instruction reads it into a register or loads it from one.
+  Phase 2 appended six instructions (§13).
+- There were no interrupts, traps or privilege levels. Nothing in `cpu.py`,
+  `machine.py` or `io_controller.py` mentioned any. Since phase 2 there are
+  interrupts and faults; there are still no privilege levels.
+- The stack pointer moved only through `PUSH`, `POP`, `CALL` and `RET`. Since
+  phase 2, `GETSP` reads it into a register and `SETSP` loads it.
 - **The zero and less flags live in the Python `CPU` object.** Only `CMP` sets
-  them, and no instruction reads or writes them.
+  them, and no instruction reads or writes them. Since phase 2, entering a
+  handler pushes them in the flags word, and `IRET` puts them back.
 - `JMP` and `CALL` take a register as well as an address (`reg_or_imm`).
 - Opcodes are numbered in declaration order, and the file says new instructions
   can safely be **appended**.
-- Dividing by zero raises a Python exception, and an unknown opcode raises
-  `RuntimeError`. Either one ends the emulator, not just the program.
+- Dividing by zero raised a Python exception, and an unknown opcode raised
+  `RuntimeError`. Either one ended the emulator, not just the program. Since
+  phase 2 both are faults; with no handler, they raise exactly as before.
 - **Instructions run in three places:** `CPU.run` (tests, the benchmark),
   `Machine.step` (the debugger, tests) and a copy inlined in `Machine.run`
   (what users run). `test_run_and_step_execute_identically` keeps the last two
   in step.
 - `Machine.run` does its slow work — the clock, the display — once every
-  10,000 instructions (`CLOCK_SAMPLE_INTERVAL`). It doesn't catch a fetch past
-  the end of memory: that `try` is commented out (`machine.py:208`).
+  10,000 instructions (`CLOCK_SAMPLE_INTERVAL`). It didn't catch a fetch past
+  the end of memory: that `try` was commented out. Since phase 2 it catches it
+  as a fault, and the slow path asks the devices for interrupts.
 
 **IO and devices**
 - **A device is programmed one field at a time** — `IO_RW`, `IO_CMD`,
@@ -75,7 +82,8 @@ Checked in the code, not assumed:
   window (`lib/pigeon/io.h`, `io_controller.py`). There is one header and one
   window for the whole machine.
 - The timer is wall-clock based and polled — `START`, `STOP`, `RESET`,
-  `STATUS` — and raises nothing.
+  `STATUS` — and raised nothing. Since phase 2, `TICK` raises the timer
+  interrupt.
 - The keyboard and mouse are fed by an HTTP server thread, into queues guarded
   by a lock (`devices/hid.py`). Ctrl has keycodes, `KEY_LCTRL` and `KEY_RCTRL`.
 
@@ -485,6 +493,9 @@ phase 1, on 2026-09-14.
 
 ## 13. CPU changes
 
+> **Built in phase 2** (§17), as this section describes. Where it left a
+> detail open, what was built is written in.
+
 ### 13.1 Six instructions
 
 Appended after `SHR`, so every existing opcode, and every binary already
@@ -517,21 +528,32 @@ uses.
 
 | n | Kind | Raised by |
 |---|---|---|
-| 0 | fault | `DIV` by zero |
-| 1 | fault | an unknown opcode |
-| 2 | fault | fetching past the end of memory |
-| 3 | interrupt | the timer |
-| 4 | interrupt | break: Ctrl-C |
+| 0 `VEC_DIV_ZERO` | fault | `DIV` by zero |
+| 1 `VEC_BAD_OPCODE` | fault | an unknown opcode |
+| 2 `VEC_BAD_FETCH` | fault | fetching past the end of memory |
+| 3 `VEC_TIMER` | interrupt | the timer |
+| 4 `VEC_BREAK` | interrupt | break: Ctrl-C |
+
+The table is `VECTOR_COUNT` words, and a vector holding 0 has no handler.
+`FLAG_ZERO`, `FLAG_LESS` and `FLAG_IE` name the flags word's bits. All of
+these are in `memory_map.py`, so assembly and C have them as names too.
 
 ### 13.4 Faults
 
 - **Delivered even with interrupts off.** The pushed address is the faulting
   instruction's own, so a handler could fix the cause and retry it. The kernel
   abandons the program instead (§9).
-- **With no vector table set, a fault stops the emulator as it does today**,
-  so every existing program behaves the same.
-- **A fault inside kernel code** halts with "panic" in the prototype. A fault
-  while entering a fault handler should stop the emulator *(unverified)*.
+- **With no handler for it, a fault stops the emulator as it always did**, so
+  every existing program behaves the same. No handler means no vector table,
+  or a 0 in its vector. The fault raises what it always raised:
+  `ZeroDivisionError`, or `RuntimeError` for an unknown opcode or a fetch past
+  the end, with the faulting instruction's address. An interrupt with no
+  handler stops the emulator with a `RuntimeError` too.
+- **A fault inside kernel code** halts with "panic" in the prototype. **A
+  fault on a fault handler's first instruction stops the emulator**, with
+  "Double fault". That is a vector pointing at no code, which would otherwise
+  be entered again and again. A fault later in a handler is delivered as
+  usual.
 
 ### 13.5 When interrupts are taken
 
@@ -547,16 +569,36 @@ uses.
   instructions**, or a program with a timer behaves differently in the
   debugger. Checking every instruction in both is the simple way (Q5).
   `CPU.run` gets the same check.
+- **As built:** `CPU.run`, `Machine.step` and `Machine.run` check the pending
+  bits before every instruction. The devices are asked every
+  `CLOCK_SAMPLE_INTERVAL` instructions, by `step()` and `run()` through one
+  countdown. So a program takes its timer's interrupts at the same
+  instructions whether it is stepped, run, or stepped part of the way first.
+  An opcode with no instruction now has the fault in the handler table,
+  which took a check out of both loops.
+- **Measured, as built:** `user/demo.c` through `Machine.run`, against the
+  commit before phase 2, the two alternating. CPython ran 2.63 million
+  instructions a second before and 2.60 million after, medians of three; the
+  runs before varied by 4.5% among themselves. PyPy ran 38.2 million before and
+  38.4 million after. The cost P7 predicted is lost in the noise.
 
-### 13.6 Devices *(unverified — the prototype raised these itself)*
+### 13.6 Devices
 
-- **Timer:** a new command starts a periodic interrupt every so many
-  milliseconds, and `STOP` ends it. The check fits where `Machine.run` already
-  reads the clock.
-- **Keyboard:** a new command turns on break, so Ctrl+C raises vector 4
-  instead of queuing a `c`. Keys arrive on a server thread, so HID sets a flag
-  of its own, which the loop turns into a pending bit. Changing the CPU's
-  pending bits from two threads could lose one.
+The prototype raised these itself. Phase 2 built them on the devices.
+
+- **Timer:** `TICK`, command 6, starts the timer at `address` ticking every
+  `length` milliseconds, and `STOP` ends it. `START` makes it a one-shot timer
+  again. A ticking timer reads as `RUNNING`, with the time to its next tick.
+  The machine asks the timer where it samples the clock, so a tick waits at
+  most 10,000 instructions, and ticks missed in between arrive as one. The
+  timer reads the clock only while one is ticking.
+- **Keyboard:** `SET_BREAK`, command 8, turns break on with `address` 1 and
+  off with 0, and answers one byte: whether it is on. With break on, `c` or
+  `C` pressed while either Ctrl is held raises vector 4 instead of queuing a
+  key, and its release is dropped too. Keys arrive on a server thread, so HID
+  sets a flag of its own, which the machine turns into a pending bit on its
+  own thread. Changing the CPU's pending bits from two threads could lose
+  one. Turning break off drops a break not yet taken.
 - **No interrupt for ordinary keys.** The input queues already hold 256
   events.
 
@@ -591,7 +633,8 @@ prototyped)*.
 | `emulator/cpu.py` | interrupt state, entering a handler, faults instead of exceptions; `dump()` shows the new state |
 | `emulator/machine.py` | taking interrupts in `step()` and in the inlined `run()` |
 | `emulator/devices/timer.py`, `hid.py` | the periodic interrupt and break |
-| `tests/` | each instruction and handler entry; compiled C under interrupts, like P2; kernel execution tests, like P4–P6 |
+| `emulator/memory_map.py` | `VEC_*`, `VECTOR_COUNT` and `FLAG_*`, for assembly and C |
+| `tests/` | `test_interrupts.py`: each instruction and handler entry, the faults, compiled C under interrupts like P2, and the devices. Kernel execution tests, like P4–P6, come with the kernel |
 
 The prototype's CPU part was about 120 lines of Python.
 
@@ -661,9 +704,9 @@ switches.
 - **Relocation:** a program built at one address and patched to another runs
   there, with its frame stack and heap after its image, and `malloc` stops at
   its `__heap_limit`.
-- **CPU:** each new instruction; flags and interrupt state restored by
-  `IRET`; faults with and without a vector table; `run` and `step` taking
-  interrupts at the same instructions.
+- **CPU:** built, in `test_interrupts.py`: each new instruction; flags and
+  interrupt state restored by `IRET`; faults with and without a vector table;
+  `run` and `step` taking interrupts at the same instructions.
 - **The kernel:** load, run and return; `exit` from deep recursion; faults and
   break; system calls; programs running programs; the display and timers reset
   after a program; a file with a bad header refused; the right disk mounted
@@ -679,7 +722,9 @@ ran C compiled by `pigeon-cc`: kernels built at `0x20000` with hand-written
 assembly routines, and programs built as relocatable files (§8). The harness
 raised the device interrupts itself. The scripts are in
 [prototypes/kernel/](../prototypes/kernel/README.md), named after the rows
-below.
+below. Since phase 2 the emulator has the instructions itself; the harness
+still adds its own copies, which take opcodes 35–40, so the scripts run
+unchanged.
 
 | | What ran | Result |
 |---|---|---|
@@ -692,9 +737,10 @@ below.
 | **P7** | The cost of checking for interrupts, on copies of `Machine.run`'s loop; medians of 5 runs of 3.57 million instructions | CPython, 2.74 million IPS: every instruction −4.1%, in the slow path +1.4%. PyPy, 34.8 million IPS: +1.9% and +0.7%. Only CPython's every-instruction check cost more than the noise |
 
 **Not run:** booting the kernel from disk (the boot chain itself is built,
-[os_cd.md](os_cd.md)); the console and the shell's interface; the timer
-and keyboard device changes; cleanup after a program; a fault while entering
-a fault handler; IO from programs that are preempted; `printf`.
+[os_cd.md](os_cd.md)); the console and the shell's interface; cleanup after
+a program; IO from programs that are preempted; `printf`. The timer and
+keyboard device changes, and a double fault, were not prototyped; phase 2
+built and tested them.
 
 ---
 
@@ -768,7 +814,74 @@ form.
      The prototype's P0 and P2–P6 still run; their figures moved with the
      44 bytes, and §11, §16 and kernel_exec.md §5 carry the new ones.
 2. **The CPU:** `GETSP`, `SETSP` and faults first; then `EI`, `DI`, `IRET`,
-   `SETIV`, the timer interrupt and break.
+   `SETIV`, the timer interrupt and break. ***Done.***
+   - **What was built:**
+     - `emulator/instruction_set.py`: the six instructions, opcodes 29–34.
+       `DIV` by zero calls the fault instead of raising.
+     - `emulator/cpu.py`: `ie`, `ivt` and `pending`; `interrupt()`,
+       `take_interrupt()` and `fault()`, entering a handler as §13.2 says.
+       Every opcode with no instruction holds the bad-opcode fault in the
+       handler table, and a fetch past the end of memory is caught. `dump()`
+       shows the new state.
+     - `emulator/machine.py`: both loops take a pending interrupt before each
+       instruction. `poll_devices()` turns a tick come due, or a break, into
+       a pending bit every `CLOCK_SAMPLE_INTERVAL` instructions, counted by one
+       countdown for `step()` and `run()`. `run()` now catches a fetch past
+       the end.
+     - `emulator/devices/timer.py`: `TICK`, command 6, and `Timer.poll()`.
+       `emulator/devices/hid.py`: `SET_BREAK`, command 8, and `take_break()`.
+     - `emulator/memory_map.py`: `VEC_*`, `VECTOR_COUNT` and `FLAG_*`, so
+       assembly and C have the names.
+     - `assembler/assembler.py`: six `SYNTAX` rows.
+   - **Decided while building** (§13.4, §13.6): a vector holding 0 is no
+     handler. With none, a fault raises what it always raised, and an
+     interrupt raises `RuntimeError`. A fault on a fault handler's first
+     instruction is a double fault, which stops the emulator. The timer's
+     `TICK` is command 6 and HID's `SET_BREAK` command 8. Break takes either
+     Ctrl with `c` or `C`, and drops the release too.
+   - **Cost:** lost in the noise (§13.5).
+   - **`tests/test_interrupts.py`, 95 cases:**
+     - each instruction assembled, disassembled and run, and `SETSP` backing
+       out of fifty calls;
+     - entering a handler: the return address and the flags word, for each
+       combination of flags; interrupts off inside; `IRET` restoring the
+       flags, interrupts and the stack; an interrupt waiting through `DI`;
+       the lowest vector first, with no nesting; an interrupt with no handler;
+     - each fault through `CPU.run`, `Machine.step` and `Machine.run`: its
+       handler entered with interrupts off and the faulting address. Without
+       a handler, or with a table of zeros, the same exception and message as
+       before phase 2. A handler fixing the cause and retrying; a double
+       fault three ways; a fault later in a handler, delivered;
+     - compiled C, like P2, interrupted after every 1, 2, 7 and 101
+       instructions, with the same answer, stack and `F`. C abandoning a
+       divide by zero twenty calls deep, with `GETSP`, `SETSP` and a fault
+       handler, then returning normally through the same routine;
+     - the timer: due once a period, missed ticks arriving as one, `STOP`,
+       `START` making a one-shot again, and the clock read only while one
+       ticks. On a Machine, `step()`, `run()` and a mix of the two taking the
+       ticks at the same instructions, and a stopped timer interrupting no
+       more;
+     - break: Ctrl+C is a key until break is on; then either Ctrl with `c` or
+       `C` is the break, and neither edge is a key; `c` alone is still a key;
+       turning break off drops a raised one. On a Machine, Ctrl+C stops a
+       spinning program within one poll, and with break off it doesn't.
+   - **Twenty-eight deliberate breakages each failed the tests:** `IRET` not
+     restoring the zero flag, or interrupts; `GETSP` reading nothing; `SETIV`
+     ignoring a register; entry pushing in the wrong order, or leaving
+     interrupts on; a `DIV` fault returning past the `DIV`, or dividing
+     anyway; the highest vector first; `CPU.run` or `Machine.run` taking no
+     interrupts; no double-fault check; a 0 vector taken as a handler; the
+     bad-opcode fault naming the next instruction; `Machine.run` letting a
+     fetch past the end escape; `step()` or `run()` never polling the
+     devices; `run()` starting its countdown afresh; the machine never taking
+     a break; the timer reading the clock with nothing ticking, interrupting
+     for each missed tick, ticking after `STOP`, or finishing; break letting
+     the release through, ignoring right Ctrl, needing no Ctrl, or keeping a
+     raised break once off; and `SETSP` taking only a register. `SETIV`
+     ignoring a register was missed at first, as every program gave the
+     table as `#`; a test now loads it from a register.
+   - **The full suite passes: 1,107 tests**, the 1,012 from before and 95
+     new. The prototype's P0 and P2–P6 still run, with the same figures.
 3. **The kernel:** system calls, `exec` from `/bin`, `exit`, faults and break.
    Built at `0x20000`, so the old BIOS path can start it before boot exists.
 4. **Variadic functions for `printf`, then the console and the shell.**

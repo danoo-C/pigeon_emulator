@@ -90,9 +90,11 @@ varargs, `long long`. Each is rejected by name with a reason.
 
 ## The one thing worth knowing
 
-The stack pointer **cannot be read** on this machine — no instruction moves SP
-into a register. So locals cannot live at SP-relative addresses, and there is no
-conventional C stack frame.
+The stack pointer **could not be read** on this machine when the compiler was
+designed — no instruction moved SP into a register. So locals cannot live at
+SP-relative addresses, and there is no conventional C stack frame. `GETSP` and
+`SETSP` exist since the kernel's phase 2 ([docs/kernel.md](../docs/kernel.md)
+§13), for a kernel's `exit()`; the compiler doesn't use them.
 
 Instead there are two stacks:
 

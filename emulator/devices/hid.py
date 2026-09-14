@@ -22,7 +22,7 @@ from collections import deque
 from threading import Lock, Thread
 from typing import Optional
 
-from .keycodes import describe
+from .keycodes import KEY_LCTRL, KEY_RCTRL, describe
 
 # --- FIFO commands: ordered, destructive, nothing is lost ---------------
 CMD_GET_KEYBOARD = 3        # pops one character code; 0x00 if none waiting
@@ -36,6 +36,13 @@ CMD_GET_KEY_STATE = 6       # one byte 0/1 -- which key is passed in `address`
 CMD_GET_KEY_BITMAP = 7      # 32 bytes; bit N set means key N is held
 
 CMD_NOP = 0
+
+# --- break: Ctrl+C as an interrupt (docs/kernel.md §13) -----------------
+# `address` 1 turns break on: Ctrl+C then raises the break interrupt,
+# VEC_BREAK, instead of arriving as a 'c'. 0 turns it off. One byte comes
+# back: whether break is now on.
+CMD_SET_BREAK = 8
+_BREAK_KEYS = (ord("c"), ord("C"))
 
 # Two buffers, because they answer different questions. The FIFO answers
 # "what happened, in order" -- a press and release between two polls is
@@ -96,6 +103,13 @@ class HID:
         # Real-time key state: one bit per code, so 256 keys in 32 bytes.
         self._key_state = bytearray(KEY_BITMAP_BYTES)
 
+        # Break: whether Ctrl+C is the break interrupt, whether one is
+        # waiting for the machine to take it, and the C keys held down as
+        # a break, whose releases are not keys either.
+        self._break_on = False
+        self._break_raised = False
+        self._break_keys_down: set = set()
+
         self._server_thread: Optional[Thread] = None
 
     # --- state updates (called by the FastAPI endpoints below) -----------
@@ -128,6 +142,8 @@ class HID:
             return
 
         with self._lock:
+            if self._takes_break(code, pressed):
+                return
             if pressed:
                 # The character stream only carries presses -- a release is
                 # not a character.
@@ -138,6 +154,37 @@ class HID:
 
             event = _KEY_EVENT_VALID_BIT | (_KEY_EVENT_PRESS_BIT if pressed else 0)
             self._key_event_queue.append((event, code))
+
+    def _takes_break(self, code: int, pressed: bool) -> bool:
+        """Whether this key edge is Ctrl+C with break on, and so the break
+        rather than a key. Its release goes the same way, so the guest never
+        sees half of a key. Called with the lock held."""
+        if not pressed:
+            if code not in self._break_keys_down:
+                return False
+            self._break_keys_down.discard(code)
+            return True
+        state = self._key_state
+        ctrl = (state[KEY_LCTRL >> 3] >> (KEY_LCTRL & 7)
+                | state[KEY_RCTRL >> 3] >> (KEY_RCTRL & 7)) & 1
+        if not (self._break_on and ctrl and code in _BREAK_KEYS):
+            return False
+        self._break_raised = True
+        self._break_keys_down.add(code)
+        return True
+
+    def take_break(self) -> bool:
+        """Whether Ctrl+C has raised the break since the last look.
+
+        Keys arrive on the HTTP server's thread, so HID keeps a flag of its
+        own, and the machine turns it into the CPU's pending bit on the
+        thread that runs the CPU: two threads changing the pending bits
+        could lose one."""
+        if not self._break_raised:      # the usual answer, without the lock
+            return False
+        with self._lock:
+            raised, self._break_raised = self._break_raised, False
+        return raised
 
     def pop_key_event(self) -> bytes:
         """Next key edge as [flags][code], or two zero bytes when empty."""
@@ -217,6 +264,13 @@ class HID:
                                        CMD_GET_KEY_EVENT):
             log.warning("HID: command %d is a read; ignoring it on a write", cmd)
             return b""
+
+        if cmd == CMD_SET_BREAK:
+            with self._lock:
+                self._break_on = bool(address)
+                if not self._break_on:
+                    self._break_raised = False    # none left over for later
+                return bytes([self._break_on])
 
         # --- real-time state ------------------------------------------------
         if cmd == CMD_GET_MOUSE_POS:

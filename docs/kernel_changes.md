@@ -147,8 +147,8 @@ no paging.
 Command-line tools often stop deep inside the code — `exit(1)` on the first
 bad input. Without instructions that set the stack pointer (kernel.md §13),
 an error has to be returned through every caller up to `main`. That is
-kernel.md's Q5, which adds them, and it matters more for a tool like `ld`
-than for a game.
+kernel.md's Q5, which adds them — built in its phase 2 — and it matters more
+for a tool like `ld` than for a game.
 
 ---
 

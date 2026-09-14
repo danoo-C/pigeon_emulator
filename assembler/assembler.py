@@ -234,6 +234,14 @@ SYNTAX = {
     "RET":  [],
     "SHL":  [("dst", "reg"), ("src1", "reg"), ("src2", "reg_or_imm")],
     "SHR":  [("dst", "reg"), ("src1", "reg"), ("src2", "reg_or_imm")],
+
+    # Interrupts, faults and the stack pointer (docs/kernel.md §13)
+    "GETSP": [("dst", "reg")],
+    "SETSP": [("src1", "reg_or_imm")],
+    "EI":    [],
+    "DI":    [],
+    "IRET":  [],
+    "SETIV": [("src1", "reg_or_imm")],
 }
 
 # Mnemonics whose 3-operand form may be written with 2, duplicating the

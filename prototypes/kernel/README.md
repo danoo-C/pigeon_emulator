@@ -4,7 +4,10 @@ The evidence behind [docs/kernel.md](../../docs/kernel.md) §16 and
 [docs/kernel_exec.md](../../docs/kernel_exec.md) §5. **Nothing here changes
 the emulator.** `proto.py` adds six instructions — `GETSP`, `SETSP`, `EI`,
 `DI`, `IRET`, `SETIV` — to the instruction and syntax tables at runtime, and
-runs the CPU in its own loop, which can deliver interrupts and faults.
+runs the CPU in its own loop, which can deliver interrupts and faults. Since
+the kernel's phase 2 the emulator has these instructions itself; `proto.py`
+still registers its own copies, which take opcodes 35–40, so every script
+runs as it did.
 
 Run the scripts from this folder. PyPy is about ten times faster:
 
@@ -40,4 +43,4 @@ broken.
 - **Vectors:** 0 divide by zero, 1 unknown opcode, 2 fetch past memory,
   3 timer, 4 break.
 - **Device interrupts are raised by the scripts**, not by the timer and
-  keyboard devices, which are unchanged.
+  keyboard devices, which had no interrupts until phase 2.
