@@ -30,7 +30,7 @@
 | **bios2** (`firmware/bios2.c`) | `0x07000000` | Screen, countdown, menu; boots channel 1, or a boot sector from the hard disk or the CD | 46,068 bytes, built, with the display, input, mem and string libraries |
 | **Firmware device** | channel 7 | A read-only HDD holding `build/bios2.bin` | — |
 | **Boot sector** (`firmware/boot.asm`) | `0x15898` | Loads the file its boot record names into `0x20000`, and jumps; returns to bios2 if it can't | 376 of 384 bytes, built |
-| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | built; the example disc is 870.0 KiB |
+| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | built; the example disc is 870.5 KiB |
 | **Installer** (`user/os/installer.c`) | `0x20000` | Formats the hard disk, copies the disc onto it, makes it boot `/boot.bin`, and restarts | 139,164 bytes, built |
 
 ---
@@ -361,7 +361,7 @@ PigeonOS 0.1, from user/os/pigeon_compiler_init.txt
   /install.bin               139,164 B   user/os/installer.c
   /pigeon.txt                     60 B
   /boot.bin                  147,924 B   user/os/kernel.c
-  /bin/sh.bin                 41,988 B   user/os/bin/sh.c
+  /bin/sh.bin                 42,676 B   user/os/bin/sh.c
   /bin/ls.bin                 37,664 B   user/os/bin/ls.c
   /bin/cat.bin                 7,300 B   user/os/bin/cat.c
   /bin/echo.bin                6,308 B   user/os/bin/echo.c
@@ -375,8 +375,8 @@ PigeonOS 0.1, from user/os/pigeon_compiler_init.txt
   /bin/cube.bin               41,784 B   user/os/../cube.c
   /bin/files.bin             182,004 B   user/os/../files.c
   /docs/readme.txt               395 B   user/os/readme.txt
-  /etc/shell_header.conf         234 B   user/os/etc/shell_header.conf
-build/pigeonos.img: 870.0 KiB, label PIGEONOS, boots /install.bin
+  /etc/shell_header.conf         222 B   user/os/etc/shell_header.conf
+build/pigeonos.img: 870.5 KiB, label PIGEONOS, boots /install.bin
 ```
 
 **The launcher's `--cd PATH`, or `"cd"` in `config.json`**, puts a disc in

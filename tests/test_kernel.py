@@ -516,6 +516,7 @@ def test_ctrl_c_at_the_prompt_throws_the_line_away():
 # --- the console as a terminal: docs/phase4_plan.md step 3 -----------------------
 
 RED, GREEN, BLUE, INK, BG = (255, 0, 0), (0, 255, 0), (0, 0, 255), (216, 216, 216), (0, 0, 0)
+MAGENTA, WHITE = (255, 0, 255), (255, 255, 255)
 
 
 def cell_colors(fb, row, col):
@@ -631,13 +632,24 @@ def test_the_prompt_comes_from_etc_shell_header_conf(label, text, shown):
 
 
 def test_the_prompt_shows_colors_and_the_status_of_the_last_program():
-    with booted(extra=[("/etc/shell_header.conf", b"``RED``R``RESET````STATUS``> ")]) as c:
+    """``STATUS`` in the ink before it; ``CSTATUS`` white for 0, magenta for a
+    program's exit value, red for an error: here E_NOTPROG, -20."""
+    extra = [("/etc/shell_header.conf", b"``RED``R``RESET````STATUS``:``CSTATUS``> "),
+             ("/bin/bad.bin", b"not a program")]
+    with booted(extra=extra) as c:
         assert c.ready(), c.rows()
-        assert c.rows()[1] == "R0> _", c.rows()
-        fb = c.machine.display_io.snapshot()
-        assert cell_colors(fb, 1, 0) == {RED, BG} and cell_colors(fb, 1, 1) <= {INK, BG}
-        c.command("cat /docs/nothing")
-        assert last_row(c.rows()) == "R1> _", c.rows()
+        for line, shown, col, ink in ((None, "R0:0> _", 3, WHITE),
+                                      ("cat /docs/nothing", "R1:1> _", 3, MAGENTA),
+                                      ("bad", "R-20:-20> _", 5, RED)):
+            if line is not None:
+                c.command(line)
+            rows = c.rows()
+            assert last_row(rows) == shown, c.rows()
+            row = max(r for r, text in enumerate(rows) if text.strip())
+            fb = c.machine.display_io.snapshot()
+            assert cell_colors(fb, row, 0) == {RED, BG}, line
+            assert cell_colors(fb, row, 1) - {BG} == {INK}, line
+            assert cell_colors(fb, row, col) - {BG} == {ink}, line
 
 
 def test_the_second_line_is_the_first_prompt_and_the_first_line_every_one_after():

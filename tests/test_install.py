@@ -29,7 +29,7 @@ from emulator.memory_map import BOOT_BLOCK, BOOT_CODE, PROGRAM_LOAD_ADDR  # noqa
 from pfs import PgfsImage                                             # noqa: E402
 from test_bios2 import ENTER, ESC, power_on                           # noqa: E402
 from test_graph import curve_pixels                                   # noqa: E402
-from test_kernel import BG, BLUE, GREEN, INK, RED, Console, cell_colors, last_row  # noqa: E402
+from test_kernel import BG, BLUE, GREEN, INK, WHITE, Console, cell_colors, last_row  # noqa: E402
 from test_project import EXAMPLE, quiet                               # noqa: E402
 
 MiB = 1 << 20
@@ -111,7 +111,7 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_she
             assert shell.ready(), shell.rows()
             assert shell.rows()[:3] == ["PigeonOS", "|-(PGS)-[2:/]-(0)", "|-> _"], shell.rows()
             fb = p.machine.display_io.snapshot()
-            for col, ink in ((0, GREEN), (3, BLUE), (9, INK), (15, RED)):
+            for col, ink in ((0, GREEN), (3, BLUE), (9, INK), (15, WHITE)):    # ``CSTATUS``: 0 in white
                 assert cell_colors(fb, 1, col) - {BG} == {ink}, (col, cell_colors(fb, 1, col))
             shell.type("graph\n")
             assert shell.run_until(

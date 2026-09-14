@@ -997,7 +997,8 @@ form.
        a look byte for each of the 384 cells, the parser's state kept between
        writes, and the ink put back when a program ends.
      - **The shell's prompt** from `/etc/shell_header.conf` (step 5, shell.md
-       §2), with nine color names, and a second line shown once as the first
+       §2), with nine color names, ``` ``CSTATUS`` ```, which colors the
+       status by its sign (yours), and a second line shown once as the first
        prompt. Its messages are written with `printf`.
      - **Four system calls,** `mkdir`, `rmdir`, `remove` and `rename`, in
        slots 13–16, and **six commands** in `user/os/bin/` (step 6): `mkdir`,
@@ -1015,8 +1016,8 @@ form.
        returns, opens interrupts for one instruction, and puts the vector
        back.
      - **The example disc** carries the six commands, and your prompt as
-       `/etc/shell_header.conf`: `|-(PGS)-[2:/]-(0)` over `|-> `, in green,
-       blue and red, with a blank line between commands.
+       `/etc/shell_header.conf`: `|-(PGS)-[2:/]-(0)` over `|-> `, in green
+       and blue with the status colored, and a blank line between commands.
    - **Decided while building:**
      - With no prompt file, or one it refuses, the built-in prompt is the
        current directory and `> `, as in phase 3, not shell.md's example; the
@@ -1034,9 +1035,9 @@ form.
      - Break stays on while a program reads a line only through line input;
        restoring it as a program left it comes with 4b's `setbreak`.
    - **Sizes:** the kernel is 147,924 bytes, up from 141,636; the shell
-     41,988, up from 22,264; `ls` 37,664. A command that uses `printf` is
+     42,676, up from 22,264; `ls` 37,664. A command that uses `printf` is
      about 26 KB, as `stdio.c` brings `string.c`, while `clear`, with only
-     `print`, is 5,872 bytes. The example disc is 870.0 KiB, up from 670.0.
+     `print`, is 5,872 bytes. The example disc is 870.5 KiB, up from 670.0.
    - **Tests, 47 new:**
      - **`test_compiler.py`, 15:** none, one and eight extra arguments, and
        negative ones; chars and pointers; a `va_list` passed on; a call

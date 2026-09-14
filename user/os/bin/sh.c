@@ -7,8 +7,9 @@
  *
  * The prompt is /etc/shell_header.conf when there is one (shell.md §2). Its
  * first line is the prompt, where \n is a line break, \\ a backslash,
- * ``CWD`` the current directory, ``STATUS`` the last program's status, a
- * color name its color and ``RESET`` the normal ink. A second line, when
+ * ``CWD`` the current directory, ``STATUS`` the last program's status,
+ * ``CSTATUS`` the same colored by its sign, a color name its color and
+ * ``RESET`` the normal ink. A second line, when
  * there is one, is shown once in its place: the first prompt after the shell
  * starts. Without the file the prompt is the current directory and "> ".
  *
@@ -191,8 +192,14 @@ static void show_prompt(char *text) {
                     i = j + 2u;
                     continue;
                 }
-                if (strcmp(name, "STATUS_COLOR") == 0) {
-                    printf("%d", last_status);
+                if (strcmp(name, "CSTATUS") == 0) {
+                    /* white for 0, magenta for a program's exit value, red
+                     * for an error: a crash, Ctrl+C, a file that isn't a
+                     * program. The color stays on after it. */
+                    if (last_status == 0) code = color_code("WHITE");
+                    else if (last_status > 0) code = color_code("MAGENTA");
+                    else code = color_code("RED");
+                    printf("%s%d", code, last_status);
                     i = j + 2u;
                     continue;
                 }

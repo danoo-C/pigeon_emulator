@@ -46,11 +46,11 @@ The shell reads this file when it starts. **The first line is the prompt.**
 prompt after the shell starts. The example disc's file:
 
 ```
-"\n``GREEN``|-(``BLUE``PGS``GREEN``)-[``RESET````CWD````GREEN``]-(``RED````STATUS````GREEN``)\n|-``BLUE``>``RESET`` "
-"``GREEN``|-(``BLUE``PGS``GREEN``)-[``RESET````CWD````GREEN``]-(``RED````STATUS````GREEN``)\n|-``BLUE``>``RESET`` "
+"\n``GREEN``|-(``BLUE``PGS``GREEN``)-[``RESET````CWD````GREEN``]-(``CSTATUS````GREEN``)\n|-``BLUE``>``RESET`` "
+"``GREEN``|-(``BLUE``PGS``GREEN``)-[``RESET````CWD````GREEN``]-(``CSTATUS````GREEN``)\n|-``BLUE``>``RESET`` "
 ```
 
-looks like this, in green, blue and red, after `cd /docs`:
+looks like this, in green and blue with the status in white, after `cd /docs`:
 
 ```
 PigeonOS
@@ -71,6 +71,7 @@ there's no blank line under `PigeonOS` at boot.
 | `\\` | a backslash |
 | ``` ``CWD`` ``` | the current directory |
 | ``` ``STATUS`` ``` | the last program's exit status |
+| ``` ``CSTATUS`` ``` | the same, colored by its sign: white for 0, magenta for a program's exit value, red for an error such as a crash or Ctrl+C. The color stays on after it |
 | ``` ``BLACK`` ``` ``` ``RED`` ``` ``` ``GREEN`` ``` ``` ``YELLOW`` ``` ``` ``BLUE`` ``` ``` ``MAGENTA`` ``` ``` ``CYAN`` ``` ``` ``WHITE`` ``` | text in that color from here on |
 | ``` ``GREY`` ``` | the console's own light grey ink |
 | ``` ``RESET`` ``` | back to the normal color |
