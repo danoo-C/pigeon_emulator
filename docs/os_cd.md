@@ -43,7 +43,7 @@ BIOS, at 0x0
 
 bios2, at 0x07000000
   check channel 1, the hard disk (channel 2) and the CD (channel 6)
-  draw the screen and count down 2 seconds; Esc opens the menu
+  draw the screen and count down 5 seconds; Esc opens the menu
   a program on channel 1:    DMA it to 0x20000, and call it
   a disk or a disc:          copy its block 0 to 0x15818, store the channel
                              at 0x15A18, and call 0x15898
@@ -221,7 +221,7 @@ UP DOWN choose   ENTER boot
    The hard disk and the CD are bootable when block 0 has the boot signature
    at byte 52. **bios2 checks only that.** It reads the volume label at byte
    36 just to show a name.
-2. **Draw the screen, and count down 2 seconds** on the timer.
+2. **Draw the screen, and count down 5 seconds** on the timer.
 3. **Esc opens the menu, and Enter boots straight away.** In the menu, the
    arrow keys choose and Enter boots the choice.
 4. **With no key pressed, boot the first bootable device**, in this order:
@@ -492,7 +492,7 @@ record again (`pfs.py boot` does, on the host; kernel.md §5).
      `mem.c` and `string.c`. The screen is §5.2's:
      - a title, the RAM, and one row per device, with what it holds or why it
        can't boot;
-     - a 2-second countdown to the first device that can boot: Enter boots at
+     - a 5-second countdown to the first device that can boot: Enter boots at
        once, Esc opens the menu;
      - in the menu, the arrow keys choose and Enter boots;
      - with nothing to boot, it waits in the menu. A disc put in changes the

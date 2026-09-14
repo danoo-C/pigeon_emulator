@@ -38,7 +38,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _runner import cases, run_module                                 # noqa: E402
+from _runner import cases, real_clock, run_module                     # noqa: E402
 from assembler.assembler import Assembler, assemble_file              # noqa: E402
 from emulator.cli import build_bios2_if_stale, in_program, second_stage  # noqa: E402
 from emulator.config import load_config                               # noqa: E402
@@ -70,6 +70,12 @@ with contextlib.redirect_stdout(io.StringIO()):
     BIOS2 = Program(name="bios2", source=REPO_ROOT / "firmware" / "bios2.c",
                     binary=Path(_BUILD.name) / "bios2.bin",
                     origin="BIOS2_LOAD_ADDR").ensure_built(quiet=True).read_bytes()
+
+# bios2's countdown, read from its source so these tests follow a change to it.
+COUNTDOWN_MS = next(int(line.split()[2].rstrip("u"))
+                    for line in (REPO_ROOT / "firmware" / "bios2.c").read_text().splitlines()
+                    if line.startswith("#define COUNTDOWN_MS"))
+COUNTDOWN_S = -(-COUNTDOWN_MS // 1000)      # as bios2 shows it: whole seconds, rounded up
 
 PROGRAM = 0xC0FFEE              # what a channel-1 program leaves in A
 STAGE2 = 0xB1052                # what the stand-in bios2 leaves in A
@@ -331,6 +337,7 @@ def status_is(text):
 
 # --- bios2: the countdown ----------------------------------------------------------
 
+@real_clock
 def test_the_boot_screen_lists_the_devices_and_counts_down():
     """Waits for the keys row, which bios2 draws last. Two matching looks
     are not enough on their own here: while bios2 clears the empty keys
@@ -345,18 +352,25 @@ def test_the_boot_screen_lists_the_devices_and_counts_down():
     assert rows[R_PROGRAM] == "  Program    816 bytes", rows
     assert rows[R_DISK] == "  Hard disk  no boot sector", rows
     assert rows[R_CD] == "  CD         no disc", rows
-    assert rows[R_STATUS] in ("Booting Program in 2", "Booting Program in 1"), rows
+    assert rows[R_STATUS] in (f"Booting Program in {COUNTDOWN_S}",
+                              f"Booting Program in {COUNTDOWN_S - 1}"), rows
 
 
+@real_clock
 def test_with_no_key_the_first_bootable_device_boots_when_the_countdown_ends():
     with tempfile.TemporaryDirectory() as t, power_on(t, program=image(10, PROGRAM)) as p:
         started = time.time()
-        assert p.run(steps=20_000_000), "never booted"
+        # Bounded by the clock, not by a number of instructions, which would
+        # cover more or fewer seconds with the speed of the host.
+        while not p.run(100_000):
+            assert time.time() < started + COUNTDOWN_S + 30, "never booted"
         waited = time.time() - started
         assert p.a == PROGRAM, f"A={p.a:#x}"
-    assert waited >= 1.9, f"booted after {waited:.2f} s, before the countdown ran out"
+    assert waited >= COUNTDOWN_MS / 1000 - 0.1, \
+        f"booted after {waited:.2f} s, before the {COUNTDOWN_MS} ms countdown ran out"
 
 
+@real_clock
 def test_enter_during_the_countdown_boots_at_once():
     with tempfile.TemporaryDirectory() as t, \
             power_on(t, program=image(10, PROGRAM), keys=[ENTER]) as p:
@@ -423,11 +437,12 @@ def test_esc_opens_the_menu_and_enter_boots_the_one_chosen():
             assert struct.unpack_from("<I", mem, BOOT_CHANNEL)[0] == CH_HDD
 
 
+@real_clock
 def test_a_disc_with_a_boot_sector_counts_down_and_boots_from_the_cd():
     with tempfile.TemporaryDirectory() as t:
         disc = bootable_image(Path(t) / "disc.img", label="INSTALL")
         with power_on(t, disc=disc) as p:
-            assert p.run_until(status_is("Booting CD in 2")), p.rows()
+            assert p.run_until(status_is(f"Booting CD in {COUNTDOWN_S}")), p.rows()
             assert p.rows()[R_CD] == "  CD         INSTALL", p.rows()
             assert p.press(ENTER), "the disc did not boot"
             assert p.a == SECTOR + CH_CD, f"A={p.a:#x}, want {SECTOR + CH_CD:#x}"

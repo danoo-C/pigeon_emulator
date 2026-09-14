@@ -237,7 +237,7 @@ disks/                the channel-2 disk image (gitignored, survives a clean)
    it holds one of at most 15 MB, a single `READ_DMA` copies it to
    `0x07000000` and the BIOS jumps there ([docs/os_cd.md](docs/os_cd.md)).
 3. **bios2** lists what it can boot from — the program on channel 1, the
-   hard disk, the CD — and counts down 2 s to the first that can boot. Enter
+   hard disk, the CD — and counts down 5 s to the first that can boot. Enter
    boots at once; Esc opens a menu. A program is loaded with one more
    `READ_DMA` and called at `0x20000`. A disk or disc whose block 0 carries a
    boot sector has that block copied to `0x15818`, and its code called. The
@@ -386,7 +386,7 @@ python3 tests/test_project.py     # cc.py --project, and the launcher's --cd
 python3 tests/test_relocatable.py # program files the kernel loads anywhere: cc.py --relocatable
 python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
 python3 tests/test_fs.py          # PigeonFS on the guest, checked against pfs.py
-python3 -m pytest tests/          # all 149, if you have pytest
+python3 -m pytest                 # all of them, in parallel: pip install -r requirements-dev.txt
 
 python3 tools/bench.py            # interpreter throughput
 python3 tools/disasm.py build/bios.bin
@@ -396,7 +396,16 @@ python3 tools/pfs.py boot /boot.bin   # make that disk boot a program, through b
 ```
 
 The suite runs without pytest — `tests/_runner.py` provides a minimal runner,
-since this project's environment is PEP 668-managed.
+since this project's environment is PEP 668-managed. With pytest,
+`pytest.ini` runs the tests on one worker per logical CPU: 1,012 tests in a
+minute and a half on 12, against seven and a half minutes in one process.
+`-n 0` runs them in one process.
+
+Either way, each test runs with the timer device on a clock that moves 50 ms
+every time it is read (`tests/_runner.py`). The BIOS's two-second wait costs
+no real time, and a test that stops after a number of instructions doesn't
+pass or fail with the speed of the host. A test that measures real seconds is
+marked `@real_clock`.
 
 `tests/golden/` holds three binaries assembled by the *original* toolchain.
 They are the regression gate: if the assembler's output ever changes, read the

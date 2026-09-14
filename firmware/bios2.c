@@ -15,7 +15,7 @@
  *   CD         channel 6. BOOT_RECORD. That is the only check; the volume
  *              label is read just to show a name.
  *
- * A two-second countdown boots the first device that can boot. Enter boots
+ * A five-second countdown boots the first device that can boot. Enter boots
  * it at once. Esc opens the menu instead, where the arrow keys choose and
  * Enter boots. With nothing to boot it waits in the menu, watching the CD
  * drive's generation counter, so a disc put in from a front end shows up
@@ -77,7 +77,7 @@
 #define TIMER_STOP    2u
 #define TIMER_STATUS  5u
 #define TIMER_RUNNING 1u
-#define COUNTDOWN_MS  2000u
+#define COUNTDOWN_MS  5000u
 
 #define DEVICES   3
 #define D_PROGRAM 0

@@ -1,0 +1,5 @@
+# The tests, under pytest: python3 -m pytest. pytest.ini runs them in
+# parallel, which needs pytest-xdist. tests/_runner.py runs any one test
+# file without either: python3 tests/test_smoke.py
+pytest>=8
+pytest-xdist>=3

@@ -36,12 +36,18 @@ Return encoding:
     come back as a mostly-zero, multi-KB response. CMD_NOP still
     echoes back `length` zero bytes, matching the original stub.
 
-Timing note: this is wall-clock based (uses time.time()), so it's a
-"real seconds" timer, not tied to emulated CPU cycles.
+Timing note: this is wall-clock based (it reads `clock`, which is
+time.time()), so it's a "real seconds" timer, not tied to emulated CPU
+cycles.
 """
 
 import struct
-import time as t
+import time
+
+# What every timer reads the time from. The tests swap in a clock that steps
+# each time it is read (tests/_runner.py), so a guest waiting on a timer
+# costs them no real seconds.
+clock = time.time
 
 
 CMD_NOP = 0
@@ -75,7 +81,7 @@ class TI:
 
     def start(self, duration_seconds: float) -> None:
         self.user_time = duration_seconds
-        self.start_time = t.time()
+        self.start_time = clock()
         self.status = STATUS_RUNNING
 
     def stop(self) -> None:
@@ -83,7 +89,7 @@ class TI:
 
     def reset(self) -> None:
         """Restart the countdown using the last duration passed to start()."""
-        self.start_time = t.time()
+        self.start_time = clock()
         self.status = STATUS_RUNNING
 
     def get(self):
@@ -94,7 +100,7 @@ class TI:
         if self.status != STATUS_RUNNING:
             return (self.status, 0)
 
-        elapsed = t.time() - self.start_time
+        elapsed = clock() - self.start_time
         remaining = self.user_time - elapsed
         if remaining <= 0:
             self.status = STATUS_DONE
