@@ -30,6 +30,7 @@ system    = kernel.c            # what the installed hard disk boots: the kernel
 /bin/edit.bin    = bin/edit.c
 /bin/splash.bin  = bin/splash.c   # the boot screen /etc/boot.conf names
 /bin/reboot.bin  = bin/reboot.c
+/bin/img.bin     = bin/img.c      # shows a BMP until Esc
 
 /bin/graph.bin   = ../graph.c   # the graphing calculator; Esc goes back to the shell
 /bin/cube.bin    = ../cube.c

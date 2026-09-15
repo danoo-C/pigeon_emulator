@@ -38,7 +38,7 @@ INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt", "/etc/shell_header.
              "/etc/boot.conf", "/etc/bmp/pigeon.bmp",
              "/etc/bmp/eye-mask.bmp"] + [
     f"/bin/{name}.bin" for name in ("sh", "ls", "cat", "echo", "mkdir", "rmdir", "rm", "mv",
-                                    "cp", "clear", "more", "edit", "graph", "cube", "files", "corrupter", "splash", "reboot")]
+                                    "cp", "clear", "more", "edit", "graph", "cube", "files", "corrupter", "splash", "reboot", "img")]
 
 # The example disc, built once for the whole file.
 _BUILD = tempfile.TemporaryDirectory()

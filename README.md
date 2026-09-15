@@ -150,8 +150,9 @@ formats the hard disk, copies the disc onto it and makes it boot the
 kernel. Enter again restarts: the hard disk boots the kernel, which runs
 what `/etc/boot.conf` names: a splash screen, which any key cuts short, then
 the shell ([docs/phase6_plan.md](docs/phase6_plan.md)). `ls /bin` lists what it can run: `mkdir`, `cp`,
-`mv`, `rm` and the other file commands, and `graph` — the graphing
-calculator — among them, where Esc or Ctrl+C comes back to the prompt
+`mv`, `rm` and the other file commands, `graph` — the graphing
+calculator — and `img FILE.bmp`, which shows an image (`-s` stretches it to
+the screen), among them; in both, Esc or Ctrl+C comes back to the prompt
 ([docs/kernel.md](docs/kernel.md)). The prompt is the file
 `/etc/shell_header.conf` ([docs/shell.md](docs/shell.md)). Installing erases the hard disk,
 hence `--disk disks/os.img` rather than the `disks/hdd.img` your programs

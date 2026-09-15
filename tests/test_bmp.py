@@ -376,5 +376,76 @@ def test_bmp_load_and_bmp_info_read_through_the_kernel():
         assert c.command("bmpc /s.bmp 0 8 0") == ["load: no such size or mode", "bmpc: exit 2"]
 
 
+# --- img: the viewer ------------------------------------------------------------------
+
+ESC = 0x1B
+
+
+def screen_of(data, mode):
+    """The screen's bytes showing `data` as img would."""
+    return struct.pack(f"<{192 * 108}I", *reference(data, 192, 108, mode))
+
+
+def viewer(extra=()):
+    """The kernel, with img in /bin, pigeon.bmp in /docs, and `extra`."""
+    import test_kernel as tk
+    files = [("/bin/img.bin", tk.shell_program("img")), ("/docs/p.bmp", PIGEON.read_bytes())]
+    return tk, tk.booted(extra=files + list(extra))
+
+
+def test_img_shows_an_image_from_where_you_are_until_esc():
+    tk, boot = viewer()
+    want = screen_of(PIGEON.read_bytes(), CROP)
+    with boot as c:
+        assert c.ready(), c.rows()
+        assert c.command("cd /docs") == []
+        c.type("img ./p.bmp\n")
+        assert c.run_until(lambda rows: c.machine.display_io.snapshot() == want, seconds=60), "no image"
+        assert not c.run_until(lambda rows: c.machine.display_io.snapshot() != want, seconds=1), \
+            "the image didn't stay"
+        c.press(ord("x"))
+        assert not c.run_until(lambda rows: c.machine.display_io.snapshot() != want, seconds=1), \
+            "a key that isn't Esc ended it"
+        c.press(ESC)
+        assert c.ready(), c.rows()
+        assert c.output("img ./p.bmp") == [] and tk.last_row(c.rows()) == "2:/docs> _", c.rows()
+
+
+def test_ctrl_c_ends_img_too():
+    tk, boot = viewer()
+    want = screen_of(PIGEON.read_bytes(), CROP)
+    with boot as c:
+        assert c.ready(), c.rows()
+        c.type("img /docs/p.bmp\n")
+        assert c.run_until(lambda rows: c.machine.display_io.snapshot() == want, seconds=60), "no image"
+        c.press(tk.KEY_LCTRL, ord("c"))
+        assert c.ready(), c.rows()
+        assert c.output("img /docs/p.bmp") == ["^C", "img: stopped"], c.rows()
+
+
+@cases(("a small image, in the middle", "img /s.bmp", CROP),
+       ("stretched to the screen", "img -s /s.bmp", STRETCH))
+def test_img_centres_a_small_image_or_stretches_it(label, line, mode):
+    small = write_bmp(50, 30)
+    tk, boot = viewer([("/s.bmp", small)])
+    want = screen_of(small, mode)
+    with boot as c:
+        assert c.ready(), c.rows()
+        c.type(line + "\n")
+        assert c.run_until(lambda rows: c.machine.display_io.snapshot() == want, seconds=60), label
+        c.press(ESC)
+        assert c.ready(), f"{label}: {c.rows()}"
+
+
+def test_img_says_what_is_wrong_in_one_line():
+    tk, boot = viewer([("/t.txt", b"not a picture\n")])
+    with boot as c:
+        assert c.ready(), c.rows()
+        assert c.command("img") == ["usage: img [-s] FILE.bmp", "img: exit 1"]
+        assert c.command("img -x /t.txt") == ["usage: img [-s] FILE.bmp", "img: exit 1"]
+        assert c.command("img /nope.bmp") == ["img: /nope.bmp: not found", "img: exit 1"]
+        assert c.command("img /t.txt") == ["img: /t.txt: not a BMP", "img: exit 1"]
+
+
 if __name__ == "__main__":
     raise SystemExit(run_module(dict(globals()), "BMP images"))

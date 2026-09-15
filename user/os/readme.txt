@@ -18,6 +18,8 @@ Try, at the prompt:
   graph     (Esc comes back)
   cube      (Esc comes back)
   files     (Esc comes back)
+  img /etc/bmp/pigeon.bmp
+            (Esc comes back)
   help
 
 The prompt is the file
