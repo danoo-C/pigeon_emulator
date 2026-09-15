@@ -42,6 +42,9 @@ int rename(char *from, char *to);           /* on one disk; to must not exist */
 int  exec(char *path, int argc, char **argv);  /* runs it, waits: its status */
 void exit(int code);                        /* ends this program, now      */
 int  getkey(void);                          /* a key, or -1; never waits   */
+int  setcomplete(char *dir, char *builtins);  /* Tab's commands: a directory of
+                                               .bin files, and built-ins
+                                               between spaces; 63 bytes each */
 
 /* --- for people ---------------------------------------------------------- */
 void  print(char *s);                       /* a string to STDOUT          */

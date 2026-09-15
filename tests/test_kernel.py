@@ -29,8 +29,10 @@ sys.path.insert(0, str(REPO_ROOT / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import cases, run_module                                   # noqa: E402
-from assembler.assembler import assemble_file                           # noqa: E402
-from emulator.devices.keycodes import KEY_LCTRL                         # noqa: E402
+from assembler.assembler import Assembler, assemble_file                # noqa: E402
+from emulator.devices.keycodes import (                                 # noqa: E402
+    KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_LCTRL, KEY_LEFT, KEY_PGDN,
+    KEY_PGUP, KEY_RIGHT, KEY_TAB, KEY_UP)
 from emulator.machine import Machine                                    # noqa: E402
 from emulator.memory_map import (                                       # noqa: E402
     BOOT_CHANNEL, CH_CD, CH_HDD, CH_USERPROG, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
@@ -140,9 +142,32 @@ int main(void) {
     return fs_save("/docs/own.txt", "mine\n", 5u) != 5;
 }
 ''',
+    "lines": r'''#include <pigeon/string.h>
+#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    char n[12];
+    int i;
+    int count;
+    count = 0;
+    if (argc > 1) count = atoi(argv[1]);
+    for (i = 1; i <= count; i++) { print("line "); itoa(i, n); print(n); print("\n"); }
+    return 0;
+}
+''',
+    "ask": r'''#include <pigeon/sys.h>
+int main(void) {
+    char line[256];
+    int n;
+    print("line one\nname? ");
+    n = read(STDIN, line, 255u);
+    if (n > 0) write(STDOUT, line, (unsigned)n);
+    return 0;
+}
+''',
     "term": r'''#include <pigeon/sys.h>
 int main(int argc, char **argv) {
     char m;
+    int i;
     if (argc < 2) return 1;
     m = argv[1][0];
     if (m == 'c') print("\x1b[31mRRR\x1b[0m\x1b[34mBBB\x1b[0m\n");
@@ -153,6 +178,12 @@ int main(int argc, char **argv) {
     if (m == 's') { write(STDOUT, "\x1b[3", 3u); print("2mgreen\x1b[0m\n"); }
     if (m == 'u') print("a\x1b[5qb\x1b[?25lc\n");
     if (m == 'l') print("\x1b[32mleft on\n");
+    if (m == 'r') print("\x1b[2J\x1b[1;1Htop\x1b[12;1Hbottom\x1b[3;5r\x1b[3;1H1\n2\n3\n4\n5\x1b[r\x1b[6;1H");
+    if (m == 'S') print("\x1b[2J\x1b[1;1Ha\nb\nc\nd\x1b[2;3r\x1b[S\x1b[r\x1b[6;1H");
+    if (m == 'T') print("\x1b[2J\x1b[1;1Ha\nb\nc\nd\x1b[2;3r\x1b[T\x1b[r\x1b[6;1H");
+    if (m == 'R') print("\x1b[2;4r\x1b[6;1H");
+    if (m == 'o') print("a\x1b]133;A\x07b\x1b]0;title\x1b\\c\n");
+    if (m == 'O') { print("d\x1b]"); for (i = 0; i < 70; i++) print("x"); print("\n"); }
     return 0;
 }
 ''',
@@ -602,6 +633,383 @@ def test_a_color_left_on_by_a_program_is_reset_after_it():
         row = row_of(c, "left on")
         assert cell_colors(fb, row, 0) == {GREEN, BG}
         assert cell_colors(fb, row + 1, 0) <= {INK, BG}, "the prompt came out green"
+
+
+# --- scrolling: docs/phase4b_plan.md step 1 ----------------------------------------
+
+def test_a_scroll_region_scrolls_only_its_rows():
+    """Rows 3 to 5 take five lines; the rows around them stay, and ESC [ r
+    gives the shell the whole screen back."""
+    with terminal() as c:
+        c.type("term r\n")
+        assert c.run_until(lambda rows: rows[5] == "2:/> _"), c.rows()
+        rows = c.rows()
+        assert rows[0] == "top" and rows[11] == "bottom", rows
+        assert rows[2:5] == ["3", "4", "5"], rows
+        assert rows[1] == "" and rows[6:11] == [""] * 5, rows
+
+
+@cases(("up, ESC [ S", "S", ["a", "c", "", "d"]),
+       ("down, ESC [ T", "T", ["a", "", "b", "d"]))
+def test_a_region_scrolls_when_asked(label, mode, shown):
+    with terminal() as c:
+        c.type(f"term {mode}\n")
+        assert c.run_until(lambda rows: rows[5] == "2:/> _"), f"{label}: {c.rows()}"
+        assert c.rows()[:4] == shown, f"{label}: {c.rows()}"
+
+
+def test_a_scroll_region_left_set_is_undone_after_the_program():
+    """term R sets rows 2 to 4 and ends. Kept, the shell's output would stop
+    scrolling at the bottom row and write over itself there."""
+    with terminal() as c:
+        c.type("term R\n")
+        assert c.run_until(lambda rows: rows[5] == "2:/> _"), c.rows()
+        for i in range(6):
+            c.command(f"echo {i}")
+        assert c.rows()[9:12] == ["2:/> echo 5", "5", "2:/> _"], c.rows()
+
+
+def kernel_symbols():
+    """The kernel's labels, from the assembly its build left beside it."""
+    kernel()
+    asm = Assembler(str(WORK / "build" / "kernel.asm"))
+    with contextlib.redirect_stdout(io.StringIO()):
+        asm.assemble()
+    return asm.symbols
+
+
+def test_a_console_scroll_costs_a_few_thousand_instructions():
+    """Counted, not timed: one con_newline on the bottom row, from its first
+    instruction to its return. Redrawing the screen instead cost up to a
+    million (docs/phase4b_plan.md §1)."""
+    entry = kernel_symbols()["con_newline"]
+    with booted() as c:
+        assert c.ready(), c.rows()
+        for i in range(5):
+            c.command(f"echo {i}")
+        assert c.rows()[11] == "2:/> _", c.rows()
+        cpu = c.machine.cpu
+        c.press(ENTER)
+        with contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(1_000_000):
+                if cpu.pc == entry:
+                    break
+                c.machine.step()
+            assert cpu.pc == entry, "Enter never reached con_newline"
+            sp, steps = cpu.sp, 0
+            while cpu.sp <= sp and steps < 2_000_000:
+                c.machine.step()
+                steps += 1
+        assert c.rows()[9:12] == ["4", "2:/>", ""], c.rows()
+        assert steps < 20_000, f"a console scroll took {steps:,} instructions"
+
+
+# --- line editing and history: docs/phase4b_plan.md step 2 ------------------------
+
+def edited(c, keys, line):
+    """Keys pressed at the prompt -- text typed, a key code, or a chord such
+    as (KEY_LCTRL, ord("a")) -- then Enter: what the line printed, found on
+    the screen by the line as it should read."""
+    before = c.rows()
+    for key in keys:
+        if isinstance(key, str):
+            c.type(key)
+        elif isinstance(key, tuple):
+            c.press(*key)
+        else:
+            c.press(key)
+    c.press(ENTER)
+    assert c.run_until(lambda rows: rows != before and PROMPT.match(last_row(rows))), c.rows()
+    return c.output(line)
+
+
+def ctrl(letter):
+    return (KEY_LCTRL, ord(letter))
+
+
+@cases(("typing in the middle", ["echo hllo", KEY_LEFT, KEY_LEFT, KEY_LEFT, "e"], "echo hello", ["hello"]),
+       ("Backspace in the middle", ["echo helxlo", KEY_LEFT, KEY_LEFT, KEY_BACKSPACE], "echo hello", ["hello"]),
+       ("Delete under the cursor", ["echo hexllo", KEY_LEFT, KEY_LEFT, KEY_LEFT, KEY_LEFT, KEY_DELETE],
+        "echo hello", ["hello"]),
+       ("Home and End", ["cho hi", KEY_HOME, "e", KEY_END, "!"], "echo hi!", ["hi!"]),
+       ("Ctrl+A and Ctrl+E", ["cho hi", ctrl("a"), "e", ctrl("e"), "!"], "echo hi!", ["hi!"]),
+       ("Ctrl+U throwing the line away", ["garbage", ctrl("u"), "echo ok"], "echo ok", ["ok"]),
+       ("moving past either end", ["echo ab", KEY_RIGHT, KEY_HOME, KEY_LEFT, KEY_END, "c"], "echo abc",
+        ["abc"]),
+       ("deleting past either end", ["echo ab", KEY_DELETE, KEY_HOME, KEY_BACKSPACE, KEY_END, "c"],
+        "echo abc", ["abc"]),
+       ("Ctrl with a letter typing nothing", ["echo a", ctrl("z"), "b"], "echo ab", ["ab"]))
+def test_the_line_is_edited_where_the_cursor_is(label, keys, line, printed):
+    with booted() as c:
+        assert c.ready(), c.rows()
+        assert edited(c, keys, line) == printed, f"{label}: {c.rows()}"
+
+
+def test_a_long_line_wraps_and_is_edited_on_its_second_row():
+    word = "abcdefghijklmnopqrstuvwxyz0123456789"
+    with booted() as c:
+        assert c.ready(), c.rows()
+        keys = ["echo " + word, KEY_LEFT, KEY_LEFT, KEY_LEFT, "!", KEY_END, "?"]
+        typed = word[:-3] + "!" + word[-3:] + "?"
+        assert edited(c, keys, "echo " + typed) == [typed], c.rows()
+
+
+def test_a_line_typed_on_the_bottom_row_scrolls_the_screen_under_it():
+    """A two-line prompt on the bottom row: the line wraps, the screen
+    scrolls under it, and it is edited back on the row that moved up."""
+    with booted(extra=[("/etc/shell_header.conf", b'"``CWD``\\n> "')]) as c:
+        assert c.ready(), c.rows()
+        for i in range(3):
+            c.command(f"echo {i}")
+        assert c.rows()[10:] == ["2:/", "> _"], c.rows()
+        keys = ["echo " + "z" * 40] + [KEY_LEFT] * 20 + ["Q"]
+        typed = "z" * 20 + "Q" + "z" * 20
+        # what it printed, then the next prompt's first row
+        assert edited(c, keys, "echo " + typed) == [typed, "2:/"], c.rows()
+        shown = lines(c.rows())
+        at = shown.index("> echo " + typed)
+        assert shown[at - 1] == "2:/", shown
+
+
+def test_up_and_down_walk_through_the_lines_typed():
+    """Empty lines and a line repeating the one before aren't kept, Up
+    stops at the oldest, and Down past the newest gives back the typing."""
+    with booted() as c:
+        assert c.ready(), c.rows()
+        for line in ("echo one", "echo two", "echo two"):
+            c.command(line)
+        before = c.rows()
+        c.press(ENTER)
+        assert c.run_until(lambda rows: rows != before and last_row(rows) == "2:/> _"), c.rows()
+
+        def shows(line):
+            assert c.run_until(lambda rows: last_row(rows) == f"2:/> {line}_"), (line, c.rows())
+
+        c.type("ec")
+        c.press(KEY_UP)
+        shows("echo two")
+        c.press(KEY_UP)
+        shows("echo one")
+        c.press(KEY_UP)
+        c.press(KEY_DOWN)
+        shows("echo two")
+        c.press(KEY_DOWN)
+        shows("ec")
+        assert edited(c, [KEY_DOWN, "ho back"], "echo back") == ["back"]
+
+
+def test_ctrl_l_moves_the_prompt_to_the_top_by_its_mark():
+    """The disc's kind of prompt: a blank line, then two rows. The blank row
+    at the mark is skipped."""
+    with booted(extra=[("/etc/shell_header.conf", b'"\\n``CWD``\\n> "')]) as c:
+        assert c.ready(), c.rows()
+        c.command("echo hi")
+        c.type("echo x")
+        c.press(*ctrl("l"))
+        assert c.run_until(lambda rows: rows[:2] == ["2:/", "> echo x_"]), c.rows()
+        assert c.rows()[2:] == [""] * 10, c.rows()
+        assert edited(c, [], "echo x") == ["x", "2:/"]
+
+
+def test_ctrl_l_without_a_mark_moves_the_line_itself_to_the_top():
+    with booted(extra=[("/bin/ask.bin", standin("ask"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("ask\n")
+        assert c.run_until(lambda rows: last_row(rows) == "name? _"), c.rows()
+        c.type("ab")
+        c.press(*ctrl("l"))
+        assert c.run_until(lambda rows: rows[0] == "name? ab_"), c.rows()
+        c.press(ENTER)
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+        assert lines(c.rows())[:2] == ["name? ab", "ab"], c.rows()
+
+
+# --- Tab completion: docs/phase4b_plan.md step 3 ----------------------------------
+
+@cases(("a command from /bin", ["ec", KEY_TAB, "hi"], "echo hi", ["hi"]),
+       ("a built-in", ["hel", KEY_TAB], "help",
+        ["cd DIR   go to a directory", "exit     end the shell", "help     this",
+         "Anything else runs a program;", "ls /bin shows them."]),
+       ("a file", ["cat /docs/re", KEY_TAB], "cat /docs/readme.txt", ["PigeonOS test disk", "second line"]),
+       ("a directory, with its /", ["ls /do", KEY_TAB], "ls /docs/", ["readme.txt"]),
+       ("in the middle of a line", ["cat /do x", KEY_LEFT, KEY_LEFT, KEY_TAB, "re", KEY_TAB, KEY_END,
+                                   KEY_BACKSPACE, KEY_BACKSPACE], "cat /docs/readme.txt",
+        ["PigeonOS test disk", "second line"]),
+       ("no match leaving the word alone", ["echo zz", KEY_TAB], "echo zz", ["zz"]))
+def test_tab_completes_the_word_before_the_cursor(label, keys, line, printed):
+    with booted() as c:
+        assert c.ready(), c.rows()
+        assert edited(c, keys, line) == printed, f"{label}: {c.rows()}"
+
+
+def test_a_second_tab_lists_the_names_that_match_under_the_line():
+    extra = [("/docs/alpha1.txt", b"one\n"), ("/docs/alpha2.txt", b"two\n")]
+    with booted(extra=extra) as c:
+        assert c.ready(), c.rows()
+        c.type("cat /docs/al")
+        c.press(KEY_TAB)
+        assert c.run_until(lambda rows: rows[1] == "2:/> cat /docs/alpha_"), c.rows()
+        c.press(KEY_TAB)
+        # the cursor is drawn last: wait for it too, or catch it half drawn
+        assert c.run_until(lambda rows: rows[2] == "alpha1.txt  alpha2.txt"
+                           and rows[1] == "2:/> cat /docs/alpha_"), c.rows()
+        c.type("2")
+        assert c.run_until(lambda rows: rows[1] == "2:/> cat /docs/alpha2_" and rows[2] == ""), c.rows()
+        assert edited(c, [KEY_TAB], "cat /docs/alpha2.txt") == ["two"]
+
+
+def test_the_commands_listed_include_the_built_ins_in_order():
+    with booted(extra=with_commands()) as c:
+        assert c.ready(), c.rows()
+        c.type("c")
+        c.press(KEY_TAB)
+        c.press(KEY_TAB)
+        assert c.run_until(lambda rows: rows[2] == "cat    cd     clear  cp"), c.rows()
+
+
+def test_a_long_list_scrolls_the_line_up_and_counts_what_doesnt_fit():
+    extra = [(f"/docs/f{i:02}.txt", b"") for i in range(40)]
+    with booted(extra=extra) as c:
+        assert c.ready(), c.rows()
+        for i in range(5):
+            c.command(f"echo {i}")
+        assert c.rows()[11] == "2:/> _", c.rows()
+        c.type("cat /docs/f")
+        c.press(KEY_TAB)
+        c.press(KEY_TAB)
+        assert c.run_until(lambda rows: rows[11] == "and 10 more"
+                           and rows[0] == "2:/> cat /docs/f_"), c.rows()
+        rows = c.rows()
+        assert rows[1] == "f00.txt  f01.txt  f02.txt" and rows[10] == "f27.txt  f28.txt  f29.txt", rows
+
+
+def test_a_name_with_a_space_comes_back_in_quotes():
+    with booted(extra=[("/docs/my notes.txt", b"quoted\n")]) as c:
+        assert c.ready(), c.rows()
+        assert edited(c, ["cat /docs/my", KEY_TAB], 'cat "/docs/my notes.txt"') == ["quoted"]
+
+
+def test_a_program_that_names_no_commands_completes_file_names_only():
+    """ask never calls setcomplete, and the shell's setting isn't passed on."""
+    with booted(extra=[("/bin/ask.bin", standin("ask"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("ask\n")
+        assert c.run_until(lambda rows: last_row(rows) == "name? _"), c.rows()
+        c.type("ech")
+        c.press(KEY_TAB)
+        c.type(" /do")
+        c.press(KEY_TAB)
+        assert c.run_until(lambda rows: last_row(rows) == "name? ech /docs/_"), c.rows()
+        c.press(ENTER)
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+        shown = lines(c.rows())
+        assert shown[shown.index("name? ech /docs/") + 1] == "ech /docs/", shown
+
+
+# --- scrollback and the wheel: docs/phase4b_plan.md step 4 ------------------------
+
+def marker(fb, text):
+    """Whether `text` is the scrollback marker: inverse cells ending row 0,
+    with the cell before them not inverse."""
+    def inverse(col):
+        lit = sum(1 for dy in range(ROW_H) for dx in range(6)
+                  if fb[(dy * DISPLAY_W + col * 6 + dx) * 4 + 2] == 216)
+        return lit > 30
+    start = COLS - len(text)
+    return all(inverse(col) for col in range(start, COLS)) and not inverse(start - 1)
+
+
+def shows_marker(c, text):
+    """For run_until: the marker is drawn after the rows, so wait for it too."""
+    return marker(c.machine.display_io.snapshot(), text)
+
+
+def notch(c, button):
+    c.machine.hid.push_mouse_event(button, True)
+    c.machine.hid.push_mouse_event(button, False)
+
+
+def run_lines(c, count):
+    """`lines COUNT`, waited for by the screen it leaves: its last 11 lines
+    and the prompt. c.command can't find the command once it scrolls off."""
+    c.type(f"lines {count}\n")
+    assert c.run_until(lambda rows: rows[0] == f"line {count - 10}" and rows[11] == "2:/> _",
+                       seconds=180), c.rows()
+
+
+@contextlib.contextmanager
+def scrolled_off(count):
+    """`lines COUNT` run, so that many rows and more have scrolled off. The
+    scrollback then holds PigeonOS, the command, and the lines before the
+    screen's: row k of it is line k - 1."""
+    with booted(extra=[("/bin/lines.bin", standin("lines"))] + with_commands()) as c:
+        assert c.ready(), c.rows()
+        run_lines(c, count)
+        yield c
+
+
+def test_pgup_and_pgdn_look_back_and_a_key_comes_back():
+    with scrolled_off(30) as c:
+        assert c.rows()[0] == "line 20", c.rows()
+        c.press(KEY_PGUP)
+        assert c.run_until(lambda rows: rows[0].startswith("line 9") and rows[11] == "line 20"
+                           and shows_marker(c, "-11")), c.rows()
+        c.press(KEY_PGUP)                          # 21 rows is all there are
+        assert c.run_until(lambda rows: rows[0].startswith("PigeonOS") and shows_marker(c, "-21")), \
+            c.rows()
+        c.press(KEY_PGDN)                          # 10 rows back
+        assert c.run_until(lambda rows: rows[0].startswith("line 10")), c.rows()
+        c.type("x")
+        assert c.run_until(lambda rows: rows[0] == "line 20" and last_row(rows) == "2:/> x_"), c.rows()
+        assert not marker(c.machine.display_io.snapshot(), "-10")
+
+
+def test_the_wheel_moves_the_view_three_rows_a_notch():
+    with scrolled_off(30) as c:
+        notch(c, 5)
+        notch(c, 5)
+        assert c.run_until(lambda rows: rows[0].startswith("line 14") and rows[11] == "line 25"
+                           and shows_marker(c, "-6")), c.rows()
+        notch(c, 6)
+        notch(c, 6)
+        assert c.run_until(lambda rows: rows[0] == "line 20" and rows[11] == "2:/> _"), c.rows()
+
+
+def test_the_scrollback_keeps_the_last_hundred_rows():
+    with scrolled_off(130) as c:
+        for _ in range(10):
+            c.press(KEY_PGUP)
+        assert c.run_until(lambda rows: rows[0].startswith("line 20") and shows_marker(c, "-100")), \
+            c.rows()
+
+
+def test_esc_bracket_2_j_keeps_the_scrollback_and_clear_empties_it():
+    """How many rows the scrollback holds is read from the kernel's memory:
+    on the screen, a PgUp into an empty scrollback and a key typed after it
+    end the same way as a PgUp and a key after a full one."""
+    back_count = kernel_symbols()["__g_back_count"]
+    with scrolled_off(30) as c:
+        assert c.machine.ram.read_word(back_count) == 21
+        c.type("clear\n")
+        assert c.run_until(lambda rows: rows[0] == "2:/> _"), c.rows()
+        assert c.machine.ram.read_word(back_count) == 0, "clear left the scrollback"
+        c.press(KEY_PGUP)
+        c.type("x")
+        assert c.run_until(lambda rows: rows[0] == "2:/> x_"), c.rows()
+    with booted(extra=[("/bin/lines.bin", standin("lines")), ("/bin/term.bin", standin("term"))]) as c:
+        assert c.ready(), c.rows()
+        run_lines(c, 30)
+        c.type("term j\n")
+        assert c.run_until(lambda rows: rows[0] == "top" and PROMPT.match(last_row(rows))), c.rows()
+        c.press(KEY_PGUP)
+        assert c.run_until(lambda rows: rows[11] == "top" and rows[0] != ""), c.rows()
+
+
+@cases(("a known one and one ended by ESC \\", "o", ["abc"]),
+       ("one never ended, given up after 64 characters", "O", ["d" + "x" * 6]))
+def test_esc_bracket_sequences_are_not_printed(label, mode, printed):
+    with terminal() as c:
+        assert c.command(f"term {mode}") == printed, f"{label}: {c.rows()}"
 
 
 # --- printf, the prompt, file commands and ls: docs/phase4_plan.md steps 2, 5-7 --

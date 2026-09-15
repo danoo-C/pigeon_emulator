@@ -13,10 +13,10 @@ Ten headers, compiled by `pigeon-cc` and covered by execution tests in
 | `<pigeon/stdarg.h>` | `va_list` `va_start` `va_arg` `va_copy` `va_end`, for a function of your own that takes `...` |
 | `<pigeon/fs.h>` | files and directories on the HDD channels: `fs_open`/`read`/`write`/`seek`, `fs_mkdir`/`readdir`/`rename`, `fs_load`/`fs_save`, a current directory |
 | `<pigeon/cd.h>` | the CD drive: `cd_info`, `cd_read`, `cd_has_fs`/`cd_label` for a disc that carries a filesystem, `cd_save` to copy a disc onto the current volume, and `cd_eject` |
-| `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped |
-| `<pigeon/input.h>` | mouse position/buttons/edges, keyboard characters, key edges, held-key state |
+| `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped — and `disp_scroll` |
+| `<pigeon/input.h>` | mouse position/buttons/edges and wheel notches, keyboard characters, key edges, held-key state |
 | `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
-| `<pigeon/sys.h>` | for a program the kernel runs: `write` `read` `open` `close`, `opendir` `readdir` `stat`, `mkdir` `rmdir` `remove` `rename`, `chdir` `getcwd`, `exec` `exit` `getkey`, `print`, `sys_strerror` |
+| `<pigeon/sys.h>` | for a program the kernel runs: `write` `read` `open` `close`, `opendir` `readdir` `stat`, `mkdir` `rmdir` `remove` `rename`, `chdir` `getcwd`, `exec` `exit` `getkey`, `setcomplete`, `print`, `sys_strerror` |
 
 There is no linker: units are compiled together, so pass the library
 sources on the command line.
@@ -86,6 +86,13 @@ framebuffer and overwrites its own code until the CPU faults.
 `disp_line` and `disp_circle` take signed `int` because Bresenham needs
 negative deltas — the only functions here that pay for signed comparison.
 
+**`disp_scroll(y, h, dy, bg)` moves rows of pixels** up or down within a band
+and clears the rows left behind: a console's scroll. The display device's
+`COPY` command moves them, and the blank rows are one row drawn and copied,
+so a whole screen scrolls in 7,121 instructions. Without the device it falls
+back to `memmove`, which took 674,955 (both measured; docs/phase4b_plan.md
+step 1).
+
 ## input
 
 Two buffers, because guest code asks two different questions:
@@ -113,6 +120,10 @@ and released inside one frame. Use the right one.
 Keycodes are one byte: printable ASCII passes through, named keys live in
 `0x80`–`0x9F`. Front ends translate into that space; the device rejects
 anything wider rather than truncating it.
+
+**The mouse wheel is two buttons:** each notch is a press and a release of
+`ME_WHEEL_UP`, button 5, or `ME_WHEEL_DOWN`, button 6, in the mouse-event
+queue. Both front ends add up what the OS reports into notches.
 
 ## math
 
@@ -245,7 +256,17 @@ that doesn't exist, or anything on the read-only CD.
 `ESC [ 30 m` to `ESC [ 37 m` for an ink, `ESC [ 7 m` for inverse, `ESC [ 0 m`
 back to normal, `ESC [ 2 J` to clear, `ESC [ r ; c H` to move the cursor, and
 `ESC [ K` to clear to the end of the line ([docs/kernel.md](../docs/kernel.md)
-§12). The kernel puts the ink back to normal after each program.
+§12). Since phase 4b.1 there is also `ESC [ t ; b r` to scroll only rows `t`
+to `b`, `ESC [ n S` and `ESC [ n T` to scroll them up or down, `ESC [ 3 J` to
+empty the scrollback, and `ESC ] 133 ; A BEL`, which marks where a prompt
+starts. The kernel puts the ink and the scrolling rows back to normal after
+each program.
+
+**`setcomplete(dir, builtins)` tells Tab where your commands are,** for the
+first word of a line your program reads: the `.bin` files in `dir`, and the
+built-ins in `builtins`, between spaces. The shell calls
+`setcomplete("/bin", "cd exit help")`. It lasts until the program ends, and
+a program that never calls it gets file names completed only.
 
 ## stdio
 

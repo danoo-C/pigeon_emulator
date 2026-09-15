@@ -456,6 +456,110 @@ def test_alpha_zero_is_invisible():
     assert fb[index + 3] == 0, "alpha byte should be zero"
 
 
+def run_on_machine(source, *libraries):
+    """Run on a Machine, whose bus has the display device, so the library
+    takes its hardware path. The screen, and how many instructions it took."""
+    machine = Machine(bios_path=str(REPO_ROOT / "build" / "bios.bin"))
+    try:
+        machine.ram.load_bytes(build(source, *libraries), PROGRAM_LOAD_ADDR)
+        machine.cpu.pc = PROGRAM_LOAD_ADDR
+        steps = 0
+        with contextlib.redirect_stdout(io.StringIO()):
+            while steps < STEP_LIMIT and machine.step() != 1:
+                steps += 1
+        return machine.display_io.snapshot(), steps
+    finally:
+        machine.close()
+
+
+SCROLL_BACKGROUND = 0xFF00FF00
+
+
+def scroll_program(scroll):
+    """Every row its own colour, then the scroll given as C."""
+    return (DISPLAY + "int main(void){ unsigned y;"
+            " for (y = 0u; y < DISP_H; y++) disp_hline(0u, y, DISP_W, 0xFF000000u | (y + 1u));"
+            f" {scroll} return 0; }}")
+
+
+def scrolled(y, h, dy):
+    """Each row's colour after disp_scroll(y, h, dy): the model the C must match."""
+    rows = [0xFF000000 | (r + 1) for r in range(DISPLAY_H)]
+    if y >= DISPLAY_H or h == 0 or dy == 0:
+        return rows
+    h = min(h, DISPLAY_H - y)
+    band, n = rows[y:y + h], abs(dy)
+    if n >= h:
+        band = [SCROLL_BACKGROUND] * h
+    elif dy < 0:
+        band = band[n:] + [SCROLL_BACKGROUND] * n
+    else:
+        band = [SCROLL_BACKGROUND] * n + band[:h - n]
+    return rows[:y] + band + rows[y + h:]
+
+
+def rows_of(fb):
+    """Each row's colour, or None for a row that isn't one colour."""
+    out = []
+    for r in range(DISPLAY_H):
+        row = fb[r * DISPLAY_W * 4:(r + 1) * DISPLAY_W * 4]
+        out.append(int.from_bytes(row[:4], "little") if row == row[:4] * DISPLAY_W else None)
+    return out
+
+
+SCROLLS = (("the whole screen up a cell", 0, DISPLAY_H, -9),
+           ("a band in the middle up a row", 9, 81, -1),
+           ("a band down two cells", 9, 81, 18),
+           ("further than the band is tall", 18, 27, -40),
+           ("a band cut off by the bottom", DISPLAY_H - 8, 50, -3),
+           ("not at all", 0, DISPLAY_H, 0))
+
+
+@cases(*SCROLLS)
+def test_disp_scroll_moves_rows_without_the_device(label, y, h, dy):
+    """A bare CPU: disp_scroll's memmove path."""
+    cpu = run(scroll_program(f"disp_scroll({y}u, {h}u, {dy}, {SCROLL_BACKGROUND}u);"), "display.c")
+    assert rows_of(framebuffer(cpu.ram)) == scrolled(y, h, dy), label
+
+
+@cases(*SCROLLS)
+def test_disp_scroll_moves_rows_with_the_display_device(label, y, h, dy):
+    """A Machine: the same rows, moved by COPY."""
+    fb, _ = run_on_machine(scroll_program(f"disp_scroll({y}u, {h}u, {dy}, {SCROLL_BACKGROUND}u);"),
+                           "display.c")
+    assert rows_of(fb) == scrolled(y, h, dy), label
+
+
+def test_a_scroll_with_the_display_device_costs_a_few_thousand_instructions():
+    """Counted, not timed. Moving the framebuffer with memmove cost 674,955,
+    and redrawing a screen of text about a million (docs/phase4b_plan.md §1).
+    This took 7,121, most of them drawing the one blank row the copies
+    start from."""
+    _, without = run_on_machine(scroll_program(""), "display.c")
+    _, with_scroll = run_on_machine(
+        scroll_program(f"disp_scroll(0u, DISP_H, -9, {SCROLL_BACKGROUND}u);"), "display.c")
+    cost = with_scroll - without
+    assert cost < 10_000, f"a scroll took {cost:,} instructions"
+
+
+def test_a_wheel_notch_reaches_input_c_as_button_five_then_six():
+    from emulator.devices.hid import BUTTON_WHEEL_DOWN, BUTTON_WHEEL_UP
+
+    def notches(hid):
+        for button in (BUTTON_WHEEL_UP, BUTTON_WHEEL_DOWN):
+            hid.push_mouse_event(button, True)
+            hid.push_mouse_event(button, False)
+
+    got = run_with_hid(INPUT + "int main(void){ unsigned e[4]; int i;"
+                       " for (i = 0; i < 4; i++) e[i] = mouse_event();"
+                       " return ME_BUTTON(e[0]) == ME_WHEEL_UP && ME_PRESSED(e[0])"
+                       " && ME_BUTTON(e[1]) == ME_WHEEL_UP && !ME_PRESSED(e[1])"
+                       " && ME_BUTTON(e[2]) == ME_WHEEL_DOWN && ME_PRESSED(e[2])"
+                       " && ME_BUTTON(e[3]) == ME_WHEEL_DOWN && mouse_event() == 0u ? 1 : 0; }",
+                       notches)
+    assert got == 1
+
+
 # --- <pigeon/input.h> -------------------------------------------------------
 
 def run_with_hid(source, setup):

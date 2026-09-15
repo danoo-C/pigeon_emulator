@@ -127,9 +127,28 @@ def _fmt_size(n):
         return f"{n / 1024:.1f} KB"
     return f"{n / (1024 * 1024):.1f} MB"
 
-# pygame button index -> HID button index (4 and 5 are the legacy scroll
-# wheel, which the HID event byte has no encoding for, so they are dropped)
+# pygame button index -> HID button index. 4 and 5 are pygame's legacy wheel
+# buttons, sent alongside MOUSEWHEEL for the same notch, so they are dropped
+# and MOUSEWHEEL alone becomes wheel_edges().
 MOUSE_BUTTON_MAP = {1: 0, 3: 1, 2: 2}
+
+# HID's wheel buttons (emulator/devices/hid.py): a notch is a press and a
+# release of 5 for up, or of 6 for down (docs/phase4b_plan.md step 4).
+WHEEL_UP, WHEEL_DOWN = 5, 6
+
+# A held key repeats after this many milliseconds, then every this many --
+# close to a browser, which repeats keydown on its own.
+KEY_REPEAT_DELAY, KEY_REPEAT_INTERVAL = 400, 40
+
+
+def wheel_edges(y):
+    """A MOUSEWHEEL event's y, in notches, as the HID edges to send: a press
+    and a release of WHEEL_UP for each notch up, of WHEEL_DOWN for each down."""
+    button = WHEEL_UP if y > 0 else WHEEL_DOWN
+    edges = []
+    for _ in range(abs(int(y))):
+        edges += [(button, True), (button, False)]
+    return edges
 
 
 class Button:
@@ -200,6 +219,7 @@ class DisplayClient:
             self._hid_available = False
 
         pygame.init()
+        pygame.key.set_repeat(KEY_REPEAT_DELAY, KEY_REPEAT_INTERVAL)
         pygame.display.set_caption("Pigeon Display")
         self.font = pygame.font.SysFont(None, 22)
         self.clock = pygame.time.Clock()
@@ -744,6 +764,9 @@ class DisplayClient:
                         hid_button = MOUSE_BUTTON_MAP.get(event.button)
                         if hid_button is not None:
                             self._send_mouse_button(hid_button, False)
+                elif event.type == pygame.MOUSEWHEEL:
+                    for button, pressed in wheel_edges(event.y):
+                        self._send_mouse_button(button, pressed)
                 elif event.type == pygame.KEYDOWN:
                     code = to_pigeon_key(event.key, event.unicode)
                     if code is not None:

@@ -63,6 +63,10 @@ BUTTON_RIGHT = 1
 BUTTON_MIDDLE = 2
 BUTTON_BACK = 3
 BUTTON_FORWARD = 4
+# The wheel, as buttons: one notch is a press and a release of BUTTON_WHEEL_UP
+# or BUTTON_WHEEL_DOWN, which both front ends send (docs/phase4b_plan.md step 4).
+BUTTON_WHEEL_UP = 5
+BUTTON_WHEEL_DOWN = 6
 
 # Mouse event byte layout (why not just reuse the bitmask): a bitmask only tells
 # you what's held *right now*, so a quick press+release between two CPU polls

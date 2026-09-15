@@ -163,6 +163,7 @@ static void show_prompt(char *text) {
     unsigned i = 0u;
     unsigned j;
     unsigned k;
+    print("\x1b]133;A\x07");               /* where the prompt starts, for Ctrl+L */
     while (text[i] != 0) {
         if (text[i] == '\\' && text[i + 1u] == 'n') {
             print("\n");
@@ -232,6 +233,7 @@ int main(int argc, char **argv) {
     int count;
     int status;
 
+    setcomplete("/bin", "cd exit help");   /* for Tab: find() looks in /bin first */
     load_prompt();
     shown = prompt;
     if (first[0] != 0) shown = first;       /* line 2, once */

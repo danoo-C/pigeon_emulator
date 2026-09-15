@@ -1,7 +1,9 @@
 # Phase 4b: line editing, Tab completion, scrollback, `more` and `edit`
 
-> **Status: final plan, 2026-09-15. Every question is decided (§9 and
-> §10). Nothing built.** The second half of
+> **Status: final plan, 2026-09-15; every question is decided (§9 and §10).
+> 4b.1 is built** (steps 1–4), as kernel.md §17 records, with four
+> corrections to this plan in [§11](#11-corrections-while-building). **4b.2
+> is next.** The second half of
 > [phase4_plan.md](phase4_plan.md) §4, its steps 4, 8 and 9, planned against
 > the code as 4a left it. What they do was decided there; this plan adds how,
 > one step phase 4 didn't foresee (step 1), and two things you added: Tab
@@ -554,3 +556,27 @@ Answered in the chat on 2026-09-15.
 
    **Decided:** A (step 3). The list goes under the line in columns, the
    prompt and the line stay put, and the next key clears it.
+
+---
+
+## 11. Corrections while building
+
+Found while building 4b.1, on 2026-09-15:
+
+1. **Typing ahead doesn't survive a program,** as step 2 said it did. The
+   kernel empties the key queues after every program, on purpose, so the Esc
+   that closes `graph` never reaches the shell. Step 2 left that alone.
+2. **A scroll costs thousands of instructions, not a few hundred** (step 1's
+   estimate). Moving the pixels is a handful; drawing the blank row the rest
+   are copied from is most of it. `disp_scroll` of a whole screen took 7,121,
+   and a console scroll, with its grid of characters and looks, 13,731
+   *(measured)*, against up to about a million before.
+3. **The console's scroll isn't checked pixel for pixel against a full
+   redraw** (step 1's tests): nothing can ask the kernel to redraw in the
+   middle of a test. Every scrolled cell is read back as text and in its
+   color instead, and `disp_scroll` is checked pixel for pixel against a
+   model, with the display device and without.
+4. **The kernel grew by 56,392 bytes, not about 15 KB** (§6's estimate).
+   About 14 KB is history, scrollback and Tab's names, which live in the
+   image as globals; the rest is the code for editing, Tab and looking back.
+   At 204,316 bytes it is still far under the 1 MB the boot sector loads.

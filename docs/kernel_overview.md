@@ -152,13 +152,14 @@ Decided 2026-09-14, left to me. Each is recorded where the question was asked.
 3. ***Done.*** **The kernel:** system calls, `exec`, `exit` and faults,
    installed as the project's `system`. With it, a console and a simple
    shell with `ls`, `cat` and `echo` (kernel.md Q9).
-4. ***Half done.*** **`printf` and the rest of the shell**
+4. ***In progress.*** **`printf` and the rest of the shell**
    ([phase4_plan.md](phase4_plan.md)). 4a is built: variadic functions and
    `printf`; colors and cursor codes in the console; the prompt from
    `/etc/shell_header.conf` ([shell.md](shell.md)); `mkdir`, `rmdir`, `rm`,
    `mv`, `cp` and `clear`; a sorted `ls` with `-l`; and Ctrl+C only while a
-   program runs. 4b is next: line editing, history and scrollback with the
-   mouse wheel, `more`, and `edit`, a mini nano.
+   program runs. 4b.1 is built too ([phase4b_plan.md](phase4b_plan.md)): fast
+   scrolling, line editing and history, Tab completion, and scrollback with
+   the mouse wheel. Next are 4b.2, `more`, and 4b.3, `edit`, a mini nano.
 5. **A boot screen and a startup script,** from `/etc/boot.conf`.
 6. **The serial debug port,** with a panel beside the screen.
 7. **The launcher.**

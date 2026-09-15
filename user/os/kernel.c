@@ -23,6 +23,7 @@
 #include <pigeon/fs.h>
 #include <pigeon/input.h>
 #include <pigeon/io.h>
+#include <pigeon/mem.h>
 #include <pigeon/string.h>
 #include <pigeon/syscall.h>
 #asm "kernel.asm"
@@ -54,6 +55,19 @@
 #define CON_ESC_NONE 0u
 #define CON_ESC_SEEN 1u             /* ESC, waiting for '['                     */
 #define CON_ESC_CSI  2u             /* ESC [, reading numbers until a letter    */
+#define CON_ESC_OSC  3u             /* ESC ], reading text until BEL or ESC \   */
+#define CON_ESC_OSC_END 4u          /* ESC inside ESC ]: the end, with its \    */
+#define CON_OSC_MAX  64u            /* an ESC ] that never ends stops here      */
+
+/* Line input (docs/phase4b_plan.md step 2). */
+#define LINE_MAX     255u           /* characters in a typed line, as the shell's */
+#define HISTORY      16u            /* lines Up and Down step through            */
+#define HISTORY_LINE 256u
+#define COMPLETE_TEXT 64u           /* setcomplete's directory and built-ins, each */
+#define MATCHES      64u            /* names Tab considers, of up to 31 bytes      */
+#define SCROLLBACK   100u           /* rows kept after they scroll off the top     */
+#define PAGE_ROWS    11u            /* PgUp and PgDn: a screen, less a row to keep */
+#define WHEEL_ROWS   3u             /* a wheel notch                               */
 
 typedef int  (*call4_fn)(unsigned, int, char **, unsigned *);
 typedef void (*abort_fn)(int, unsigned *);
@@ -82,6 +96,7 @@ extern int w_mkdir;
 extern int w_rmdir;
 extern int w_remove;
 extern int w_rename;
+extern int w_setcomplete;
 extern int kswallow;
 extern int fault_div;
 extern int fault_opcode;
@@ -110,10 +125,36 @@ char con_grid[384];             /* CON_ROWS * CON_COLS characters            */
 char con_look[384];             /* each cell's ink, and CON_INVERSE          */
 unsigned con_row;
 unsigned con_col;               /* CON_COLS: the row is full, wrap before the next */
+unsigned con_top;               /* the rows that scroll, ESC [ t ; b r: all 12 */
+unsigned con_bottom;            /* unless a program such as edit sets fewer   */
 unsigned con_attr;              /* the look new characters get               */
 unsigned con_esc;               /* CON_ESC_*: partway through a sequence     */
 unsigned con_arg[4];            /* its numbers, as far as it has got         */
 unsigned con_args;
+char con_osc[16];               /* the start of an ESC ] sequence's text     */
+unsigned con_osc_len;
+unsigned con_marked;            /* 1: con_mark_row is where a prompt starts  */
+unsigned con_mark_row;
+
+char history[4096];             /* HISTORY lines of HISTORY_LINE, oldest first */
+unsigned history_count;
+char line_typed[256];           /* the line being typed, while Up shows another */
+unsigned line_row;              /* where the line being typed starts         */
+unsigned line_col;
+
+char complete_dir[512];         /* MAX_DEPTH x COMPLETE_TEXT: where each      */
+char complete_builtins[512];    /* program's commands are, from setcomplete  */
+char match_names[2048];         /* MATCHES x 32: the names Tab found          */
+unsigned match_dir[64];         /* 1: that name is a directory's              */
+unsigned match_count;
+unsigned list_row;              /* Tab's list under the line: its first row   */
+unsigned list_rows;             /* and how many; 0 when none is showing       */
+
+char back_grid[3200];           /* SCROLLBACK x CON_COLS: the rows that scrolled off, */
+char back_look[3200];           /* a ring with back_next where the next one goes      */
+unsigned back_count;
+unsigned back_next;
+unsigned view_back;             /* rows the view is scrolled back; 0 is the screen    */
 
 /* Inks 0 to 7 are the ANSI colors, in ANSI's order; 8 is the console's own. */
 color_t con_palette[9] = {BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, CON_INK};
@@ -140,19 +181,24 @@ static void k_break(unsigned on) {
 
 /* --- the console ------------------------------------------------------- */
 
-/* A cell on a background already cleared: its character in its ink, or,
- * inverse, the ink as the background and the character cut out of it. */
-static void con_draw(unsigned row, unsigned col) {
+/* A character in a look, at a cell on a background already cleared: in its
+ * ink, or, inverse, the ink as the background and the character cut out of
+ * it. */
+static void con_paint(unsigned row, unsigned col, int ch, unsigned look) {
     unsigned x = col * CON_CELL_W;
     unsigned y = row * CON_CELL_H;
-    unsigned look = (unsigned)con_look[row * CON_COLS + col];
     color_t ink = con_palette[look & 15u];
     if ((look & CON_INVERSE) != 0u) {
         disp_rect(x, y, CON_CELL_W, CON_CELL_H, ink);
-        disp_char(x, y, (int)con_grid[row * CON_COLS + col], CON_BG);
+        disp_char(x, y, ch, CON_BG);
     } else {
-        disp_char(x, y, (int)con_grid[row * CON_COLS + col], ink);
+        disp_char(x, y, ch, ink);
     }
+}
+
+/* A cell of the screen, on a background already cleared. */
+static void con_draw(unsigned row, unsigned col) {
+    con_paint(row, col, (int)con_grid[row * CON_COLS + col], (unsigned)con_look[row * CON_COLS + col]);
 }
 
 static void con_cell(unsigned row, unsigned col) {
@@ -184,42 +230,118 @@ static void con_clear(void) {
     }
     con_row = 0u;
     con_col = 0u;
+    con_marked = 0u;
     con_redraw();
 }
 
+/* The top n rows, about to scroll off the whole screen, kept in the
+ * scrollback: the last SCROLLBACK of them (docs/phase4b_plan.md step 4). */
+static void back_keep(unsigned n) {
+    unsigned r;
+    for (r = 0u; r < n; r++) {
+        memcpy((void *)(back_grid + back_next * CON_COLS), (void *)(con_grid + r * CON_COLS), CON_COLS);
+        memcpy((void *)(back_look + back_next * CON_COLS), (void *)(con_look + r * CON_COLS), CON_COLS);
+        back_next = (back_next + 1u) % SCROLLBACK;
+        if (back_count < SCROLLBACK) back_count++;
+    }
+}
+
+/* Rows top to bottom move n rows up, or down, on the grid and on the
+ * screen, and the rows they leave are blank. The pixels are moved rather
+ * than the text drawn again (docs/phase4b_plan.md step 1), and blank rows
+ * need no drawing: disp_scroll leaves them the background. */
+static void con_scroll(unsigned top, unsigned bottom, unsigned n, unsigned up) {
+    unsigned rows = bottom + 1u - top;
+    unsigned kept;
+    unsigned blank;
+    int dy;
+    if (n > rows) n = rows;
+    kept = rows - n;
+    if (up != 0u && top == 0u && bottom == CON_ROWS - 1u) back_keep(n);
+    if (up != 0u) {
+        memmove((void *)(con_grid + top * CON_COLS), (void *)(con_grid + (top + n) * CON_COLS), kept * CON_COLS);
+        memmove((void *)(con_look + top * CON_COLS), (void *)(con_look + (top + n) * CON_COLS), kept * CON_COLS);
+        blank = top + kept;
+        dy = 0 - (int)(n * CON_CELL_H);
+    } else {
+        memmove((void *)(con_grid + (top + n) * CON_COLS), (void *)(con_grid + top * CON_COLS), kept * CON_COLS);
+        memmove((void *)(con_look + (top + n) * CON_COLS), (void *)(con_look + top * CON_COLS), kept * CON_COLS);
+        blank = top;
+        dy = (int)(n * CON_CELL_H);
+    }
+    memset((void *)(con_grid + blank * CON_COLS), ' ', n * CON_COLS);
+    memset((void *)(con_look + blank * CON_COLS), (int)CON_DEFAULT, n * CON_COLS);
+    disp_scroll(top * CON_CELL_H, rows * CON_CELL_H, dy, CON_BG);
+
+    /* What points at rows moves with them: the line being typed, and the
+     * prompt's mark, which is lost when its row scrolls away. */
+    if (up != 0u && line_row >= top && line_row <= bottom)
+        line_row = line_row >= top + n ? line_row - n : top;
+    if (con_marked != 0u && con_mark_row >= top && con_mark_row <= bottom) {
+        if (up != 0u && con_mark_row >= top + n) con_mark_row = con_mark_row - n;
+        else if (up == 0u && con_mark_row + n <= bottom) con_mark_row = con_mark_row + n;
+        else con_marked = 0u;
+    }
+}
+
+/* The next row: on the scrolling rows' last one, they scroll; below them,
+ * on the screen's last row, the cursor stays, as on a terminal. */
 static void con_newline(void) {
-    unsigned i;
     con_col = 0u;
-    if (con_row + 1u < CON_ROWS) {
-        con_row++;
+    if (con_row == con_bottom) {
+        con_scroll(con_top, con_bottom, 1u, 1u);
         return;
     }
-    for (i = 0u; i < (CON_ROWS - 1u) * CON_COLS; i++) {
-        con_grid[i] = con_grid[i + CON_COLS];
-        con_look[i] = con_look[i + CON_COLS];
-    }
-    for (i = (CON_ROWS - 1u) * CON_COLS; i < CON_ROWS * CON_COLS; i++) {
-        con_grid[i] = ' ';
-        con_look[i] = (char)CON_DEFAULT;
-    }
-    con_redraw();
+    if (con_row + 1u < CON_ROWS) con_row++;
 }
 
 /* One character of an escape sequence, after the ESC: '[', then numbers
  * separated by ';', then a letter (docs/phase4_plan.md step 3). The console
- * knows m, J, H and K. Anything else ends the sequence and is dropped, never
+ * knows m, J, H and K, and r, S and T for scrolling some of the rows
+ * (docs/phase4b_plan.md step 1). Anything else ends the sequence and is dropped, never
  * printed, and so are the other parameter bytes, such as the '?' of
  * ESC [ ? 25 l. The state lives here between calls, so a sequence may come
  * in two writes. */
+/* One character of an ESC ] sequence's text, which ends at a BEL or at
+ * ESC \, or is given up after CON_OSC_MAX characters so a stray ESC ]
+ * can't swallow everything after it. The console knows one: ESC ] 133 ; A,
+ * the mark a shell prints where its prompt starts, which Ctrl+L goes by
+ * (docs/phase4b_plan.md step 2). Any other is dropped. */
+static void con_osc_char(int c) {
+    if (c == 7 || con_esc == CON_ESC_OSC_END) {
+        con_esc = CON_ESC_NONE;
+        con_osc[con_osc_len < 15u ? con_osc_len : 15u] = 0;
+        if (con_osc_len < 15u && strcmp(con_osc, "133;A") == 0) {
+            con_marked = 1u;
+            con_mark_row = con_row;
+        }
+        return;
+    }
+    if (c == 27) {
+        con_esc = CON_ESC_OSC_END;
+        return;
+    }
+    if (con_osc_len < 15u) con_osc[con_osc_len] = (char)c;
+    con_osc_len++;
+    if (con_osc_len >= CON_OSC_MAX) con_esc = CON_ESC_NONE;
+}
+
 static void con_escape(int c) {
     unsigned i;
     unsigned n;
+    if (con_esc == CON_ESC_OSC || con_esc == CON_ESC_OSC_END) {
+        con_osc_char(c);
+        return;
+    }
     if (con_esc == CON_ESC_SEEN) {
         con_esc = CON_ESC_NONE;
         if (c == '[') {
             con_esc = CON_ESC_CSI;
             con_args = 0u;
             con_arg[0] = 0u;
+        } else if (c == ']') {
+            con_esc = CON_ESC_OSC;
+            con_osc_len = 0u;
         }
         return;
     }
@@ -252,6 +374,10 @@ static void con_escape(int c) {
         }
     } else if (c == 'J') {
         if (con_args > 0u && con_arg[0] == 2u) con_clear();
+        if (con_args > 0u && con_arg[0] == 3u) {        /* ESC [ 3 J: the scrollback */
+            back_count = 0u;
+            back_next = 0u;
+        }
     } else if (c == 'H') {
         n = (con_args > 0u && con_arg[0] > 0u) ? con_arg[0] : 1u;
         i = (con_args > 1u && con_arg[1] > 0u) ? con_arg[1] : 1u;
@@ -265,6 +391,21 @@ static void con_escape(int c) {
             con_look[con_row * CON_COLS + i] = (char)con_attr;
             con_cell(con_row, i);
         }
+    } else if (c == 'r') {
+        /* ESC [ t ; b r: rows t to b scroll, counting from 1; ESC [ r, all
+         * of them. The cursor goes home, as on a VT100. */
+        n = (con_args > 0u && con_arg[0] > 0u) ? con_arg[0] : 1u;
+        i = (con_args > 1u && con_arg[1] > 0u) ? con_arg[1] : CON_ROWS;
+        if (i > CON_ROWS) i = CON_ROWS;
+        if (n < i) {
+            con_top = n - 1u;
+            con_bottom = i - 1u;
+            con_row = 0u;
+            con_col = 0u;
+        }
+    } else if (c == 'S' || c == 'T') {
+        n = (con_args > 0u && con_arg[0] > 0u) ? con_arg[0] : 1u;
+        con_scroll(con_top, con_bottom, n, (unsigned)(c == 'S'));
     }
 }
 
@@ -308,30 +449,408 @@ static void con_number(unsigned v, unsigned base) {
     con_puts(digits);
 }
 
-/* The cursor: an underscore in the cell where the next character goes. */
-static void con_cursor(unsigned on) {
-    if (con_col == CON_COLS) {
-        if (on == 0u) return;
-        con_newline();
+/* --- typing a line ------------------------------------------------------ */
+
+/* The console's position for character i of the line being typed, which
+ * starts at line_row, line_col and wraps at CON_COLS. A position below the
+ * scrolling rows scrolls them first, and line_row moves up with them. */
+static void line_place(unsigned i) {
+    unsigned cell = line_col + i;
+    unsigned row = line_row + cell / CON_COLS;
+    if (row > con_bottom) {
+        con_scroll(con_top, con_bottom, row - con_bottom, 1u);
+        row = line_row + cell / CON_COLS;
     }
+    if (row >= CON_ROWS) row = CON_ROWS - 1u;
+    con_row = row;
+    con_col = cell % CON_COLS;
+}
+
+/* Just past the line's last character, as con_put leaves a row it filled:
+ * CON_COLS, so a newline after it doesn't leave a blank row. */
+static void line_end(unsigned n) {
+    if (n > 0u && (line_col + n) % CON_COLS == 0u) {
+        line_place(n - 1u);
+        con_col = CON_COLS;
+        return;
+    }
+    line_place(n);
+}
+
+/* The cursor, an underscore over character i, on or off. */
+static void line_cursor(unsigned i, unsigned on) {
+    line_place(i);
     con_cell(con_row, con_col);
     if (on != 0u) disp_char(con_col * CON_CELL_W, con_row * CON_CELL_H, '_', CON_INK);
 }
 
-static void con_back(void) {
-    if (con_col == 0u) {
-        if (con_row == 0u) return;
-        con_row--;
-        con_col = CON_COLS;
+/* The line from character `from` to its end drawn again, and the cells
+ * after it blanked up to `old`, where a longer line ended: after a change,
+ * only what moved is drawn. */
+static void line_draw(char *buf, unsigned from, unsigned n, unsigned old) {
+    unsigned i;
+    for (i = from; i < n || i < old; i++) {
+        line_place(i);
+        con_grid[con_row * CON_COLS + con_col] = i < n ? buf[i] : ' ';
+        con_look[con_row * CON_COLS + con_col] = (char)con_attr;
+        con_cell(con_row, con_col);
     }
-    con_col--;
-    con_grid[con_row * CON_COLS + con_col] = ' ';
-    con_cell(con_row, con_col);
+}
+
+/* A line from history, or the one being typed, into buf: its length. */
+static unsigned line_load(char *buf, char *from, unsigned max) {
+    unsigned n = 0u;
+    while (from[n] != 0 && n < max) {
+        buf[n] = from[n];
+        n++;
+    }
+    return n;
+}
+
+/* A line typed kept for Up, unless it repeats the last one. The oldest
+ * goes when HISTORY are kept. */
+static void history_add(char *line, unsigned n) {
+    char *last;
+    if (history_count > 0u) {
+        last = history + (history_count - 1u) * HISTORY_LINE;
+        if (strlen(last) == n && memcmp((void *)last, (void *)line, n) == 0) return;
+    }
+    if (history_count == HISTORY) {
+        memmove((void *)history, (void *)(history + HISTORY_LINE), (HISTORY - 1u) * HISTORY_LINE);
+        history_count--;
+    }
+    memcpy((void *)(history + history_count * HISTORY_LINE), (void *)line, n);
+    history[history_count * HISTORY_LINE + n] = 0;
+    history_count++;
+}
+
+static unsigned con_blank_row(unsigned row) {
+    unsigned i;
+    for (i = 0u; i < CON_COLS; i++) {
+        if (con_grid[row * CON_COLS + i] != ' '
+                || ((unsigned)con_look[row * CON_COLS + i] & CON_INVERSE) != 0u) return 0u;
+    }
+    return 1u;
+}
+
+/* --- Tab (docs/phase4b_plan.md step 3) ------------------------------------ */
+
+/* A name Tab could complete to, kept unless it's there already or MATCHES
+ * are. */
+static void match_add(char *name, unsigned n, unsigned dir) {
+    unsigned i;
+    char *slot;
+    if (n == 0u || n > 31u || match_count == MATCHES) return;
+    for (i = 0u; i < match_count; i++) {
+        slot = match_names + i * 32u;
+        if (strlen(slot) == n && memcmp((void *)slot, (void *)name, n) == 0) return;
+    }
+    slot = match_names + match_count * 32u;
+    memcpy((void *)slot, (void *)name, n);
+    slot[n] = 0;
+    match_dir[match_count] = dir;
+    match_count++;
+}
+
+/* The names in a directory that start with prefix: every one, or with
+ * commands on, the .bin files, without their .bin. */
+static void match_entries(char *path, char *prefix, unsigned plen, unsigned commands) {
+    fs_stat_t st;
+    unsigned n;
+    int dh = fs_opendir(path);
+    if (dh < 0) return;                     /* none, or fs.c's handles all open */
+    while (fs_readdir(dh, &st) == 1) {
+        n = strlen(st.name);
+        if (n < plen || memcmp((void *)st.name, (void *)prefix, plen) != 0) continue;
+        if (commands == 0u) {
+            match_add(st.name, n, st.type == S_DIR ? 1u : 0u);
+        } else if (st.type == S_FILE && n > 4u && n - 4u >= plen
+                   && strcmp(st.name + n - 4u, ".bin") == 0) {
+            match_add(st.name, n - 4u, 0u);
+        }
+    }
+    fs_closedir(dh);
+}
+
+/* The matches in name order, for the list. */
+static void match_sort(void) {
+    char held[32];
+    unsigned dir;
+    unsigned i;
+    unsigned j;
+    for (i = 1u; i < match_count; i++) {
+        memcpy((void *)held, (void *)(match_names + i * 32u), 32u);
+        dir = match_dir[i];
+        j = i;
+        while (j > 0u && strcmp(match_names + (j - 1u) * 32u, held) > 0) {
+            memcpy((void *)(match_names + j * 32u), (void *)(match_names + (j - 1u) * 32u), 32u);
+            match_dir[j] = match_dir[j - 1u];
+            j--;
+        }
+        memcpy((void *)(match_names + j * 32u), (void *)held, 32u);
+        match_dir[j] = dir;
+    }
+}
+
+/* Tab: the word before the cursor completed, as far as the names that
+ * match it agree. A word is split off at spaces outside double quotes, as
+ * the shell splits. The first word, when the program named its commands
+ * with setcomplete, matches those; any other word, or one with a '/',
+ * matches the names in its directory. One match gets a '/' after a
+ * directory and a space after anything else, and a name with a space
+ * comes back inside quotes. Returns 1 when several names matched and there
+ * was nothing to add, so a second Tab lists them. */
+static unsigned line_tab(char *buf, unsigned *np, unsigned *curp, unsigned max) {
+    char word[256];
+    char path[256];
+    char add[300];
+    unsigned n = *np;
+    unsigned cur = *curp;
+    unsigned start = 0u;            /* where the word starts in buf   */
+    unsigned first = 1u;            /* it is the line's first word    */
+    unsigned quoted = 0u;
+    unsigned inside = 0u;
+    unsigned w = 0u;                /* the word, quotes left out      */
+    unsigned slash = 0u;            /* its directory: up to its last / */
+    unsigned plen;
+    unsigned common;
+    unsigned len;
+    unsigned quote;
+    unsigned i;
+    char *dir;
+    char *b;
+
+    for (i = 0u; i < cur; i++) {
+        if (buf[i] == '"') inside = 1u - inside;
+        if (buf[i] == ' ' && inside == 0u) start = i + 1u;
+    }
+    for (i = 0u; i < start; i++) {
+        if (buf[i] != ' ') first = 0u;
+    }
+    for (i = start; i < cur; i++) {
+        if (buf[i] == '"') {
+            quoted = 1u;
+            continue;
+        }
+        word[w] = buf[i];
+        w++;
+        if (buf[i] == '/') slash = w;
+    }
+    word[w] = 0;
+    plen = w - slash;
+
+    match_count = 0u;
+    dir = complete_dir + (unsigned)depth * COMPLETE_TEXT;
+    if (first != 0u && slash == 0u && dir[0] != 0) {
+        b = complete_builtins + (unsigned)depth * COMPLETE_TEXT;
+        while (*b != 0) {                   /* the built-ins, between spaces */
+            while (*b == ' ') b++;
+            len = 0u;
+            while (b[len] != 0 && b[len] != ' ') len++;
+            if (len >= plen && memcmp((void *)b, (void *)word, plen) == 0) match_add(b, len, 0u);
+            b = b + len;
+        }
+        match_entries(dir, word, plen, 1u);
+    } else {
+        strlcpy(path, ".", 256u);
+        if (slash > 0u) {
+            memcpy((void *)path, (void *)word, slash);
+            path[slash] = 0;
+            if (slash > 1u && path[slash - 2u] != ':') path[slash - 1u] = 0;   /* "/docs/", not "/" or "2:/" */
+        }
+        match_entries(path, word + slash, plen, 0u);
+    }
+    if (match_count == 0u) return 0u;
+    match_sort();
+
+    common = strlen(match_names);           /* the start every match shares */
+    for (i = 1u; i < match_count; i++) {
+        len = 0u;
+        while (len < common && match_names[i * 32u + len] == match_names[len]) len++;
+        common = len;
+    }
+    if (match_count > 1u && common == plen) return 1u;
+
+    quote = quoted;
+    for (i = 0u; i < slash; i++) {
+        if (word[i] == ' ') quote = 1u;
+    }
+    for (i = 0u; i < common; i++) {
+        if (match_names[i] == ' ') quote = 1u;
+    }
+    len = 0u;
+    if (quote != 0u) {
+        add[len] = '"';
+        len++;
+    }
+    memcpy((void *)(add + len), (void *)word, slash);
+    len = len + slash;
+    memcpy((void *)(add + len), (void *)match_names, common);
+    len = len + common;
+    if (match_count == 1u && match_dir[0] != 0u) {
+        add[len] = '/';
+        len++;
+    } else if (match_count == 1u) {
+        if (quote != 0u) {
+            add[len] = '"';
+            len++;
+        }
+        add[len] = ' ';
+        len++;
+    }
+    if (n - (cur - start) + len > max) return 0u;
+    memmove((void *)(buf + start + len), (void *)(buf + cur), n - cur);
+    memcpy((void *)(buf + start), (void *)add, len);
+    *np = n - (cur - start) + len;
+    *curp = start + len;
+    return 0u;
+}
+
+/* The matches listed under the line, in columns, as zsh does. The screen
+ * scrolls up to make room, and a list taller than the room left ends with
+ * how many more there are. The next key clears it (line_unlist). */
+static void line_list(unsigned n) {
+    unsigned width = 0u;
+    unsigned cols;
+    unsigned rows;
+    unsigned room;
+    unsigned shown;
+    unsigned extra;                         /* the line's rows after its first */
+    unsigned i;
+    unsigned r;
+    unsigned c;
+    char *name;
+    for (i = 0u; i < match_count; i++) {
+        c = strlen(match_names + i * 32u) + match_dir[i];
+        if (c > width) width = c;
+    }
+    width = width + 2u;
+    if (width > CON_COLS) width = CON_COLS;
+    cols = CON_COLS / width;
+    rows = (match_count + cols - 1u) / cols;
+    extra = (line_col + n) / CON_COLS;
+    if (con_bottom - con_top <= extra) return;
+    room = con_bottom - con_top - extra;
+    list_rows = rows > room ? room : rows;
+    shown = rows > room ? room - 1u : rows;
+    if (line_row + extra + list_rows > con_bottom)
+        con_scroll(con_top, con_bottom, line_row + extra + list_rows - con_bottom, 1u);
+    list_row = line_row + extra + 1u;
+    for (r = 0u; r < shown; r++) {
+        for (c = 0u; c < cols && r * cols + c < match_count; c++) {
+            i = r * cols + c;
+            name = match_names + i * 32u;
+            con_row = list_row + r;
+            con_col = c * width;
+            con_puts(name);
+            if (match_dir[i] != 0u) con_put('/');
+        }
+    }
+    if (shown < rows) {
+        con_row = list_row + shown;
+        con_col = 0u;
+        con_puts("and ");
+        con_number(match_count - shown * cols, 10u);
+        con_puts(" more");
+    }
+}
+
+static void line_unlist(void) {
+    unsigned r;
+    for (r = 0u; r < list_rows; r++) {
+        memset((void *)(con_grid + (list_row + r) * CON_COLS), ' ', CON_COLS);
+        memset((void *)(con_look + (list_row + r) * CON_COLS), (int)CON_DEFAULT, CON_COLS);
+        disp_rect(0u, (list_row + r) * CON_CELL_H, DISP_W, CON_CELL_H, CON_BG);
+    }
+    list_rows = 0u;
+}
+
+/* --- looking back (docs/phase4b_plan.md step 4) ----------------------------- */
+
+/* Where row v of the view comes from, `back` rows back: the scrollback's
+ * rows, oldest first, run on into the screen's. */
+static char *view_grid(unsigned back, unsigned v) {
+    unsigned i = back_count - back + v;
+    if (i < back_count) return back_grid + ((back_next + SCROLLBACK - back_count + i) % SCROLLBACK) * CON_COLS;
+    return con_grid + (i - back_count) * CON_COLS;
+}
+
+static char *view_look(unsigned back, unsigned v) {
+    unsigned i = back_count - back + v;
+    if (i < back_count) return back_look + ((back_next + SCROLLBACK - back_count + i) % SCROLLBACK) * CON_COLS;
+    return con_look + (i - back_count) * CON_COLS;
+}
+
+/* Row v of the view drawn, from column `from` to the end. */
+static void view_row(unsigned back, unsigned v, unsigned from) {
+    char *grid = view_grid(back, v);
+    char *look = view_look(back, v);
+    unsigned col;
+    disp_rect(from * CON_CELL_W, v * CON_CELL_H, (CON_COLS - from) * CON_CELL_W, CON_CELL_H, CON_BG);
+    for (col = from; col < CON_COLS; col++) {
+        if (grid[col] != ' ' || ((unsigned)look[col] & CON_INVERSE) != 0u)
+            con_paint(v, col, (int)grid[col], (unsigned)look[col]);
+    }
+}
+
+/* The view moved to `back` rows back. The pixels scroll and only the rows
+ * that come into view are drawn, then the marker in the top-right corner
+ * that says how far back it is. */
+static void view_move(unsigned back) {
+    char mark[12];
+    unsigned d;
+    unsigned v;
+    unsigned len;
+    unsigned i;
+    if (back > back_count) back = back_count;
+    if (back == view_back) return;
+    d = back > view_back ? back - view_back : view_back - back;
+    if (d >= CON_ROWS) {
+        for (v = 0u; v < CON_ROWS; v++) view_row(back, v, 0u);
+    } else if (back > view_back) {          /* further back: the rows move down */
+        disp_scroll(0u, CON_ROWS * CON_CELL_H, (int)(d * CON_CELL_H), CON_BG);
+        for (v = 0u; v < d; v++) view_row(back, v, 0u);
+        view_row(back, d, CON_COLS - 4u);   /* where the old marker went */
+    } else {
+        disp_scroll(0u, CON_ROWS * CON_CELL_H, 0 - (int)(d * CON_CELL_H), CON_BG);
+        for (v = CON_ROWS - d; v < CON_ROWS; v++) view_row(back, v, 0u);
+        view_row(back, 0u, CON_COLS - 4u);
+    }
+    view_back = back;
+    if (back > 0u) {
+        mark[0] = '-';
+        utoa(back, mark + 1, 10u);
+        len = strlen(mark);
+        for (i = 0u; i < len; i++) con_paint(0u, CON_COLS - len + i, (int)mark[i], CON_DEFAULT | CON_INVERSE);
+    }
+}
+
+/* The view moved by delta rows, back when positive. The line's cursor
+ * hides while the view is off the screen's bottom row. */
+static void view_by(int delta, unsigned cur) {
+    unsigned back;
+    if (delta > 0) back = view_back + (unsigned)delta;
+    else back = (unsigned)(0 - delta) >= view_back ? 0u : view_back - (unsigned)(0 - delta);
+    if (back > back_count) back = back_count;
+    if (back == view_back) return;
+    if (view_back == 0u) line_cursor(cur, 0u);
+    view_move(back);
+    if (view_back == 0u) line_cursor(cur, 1u);
 }
 
 /* A typed line into buf, '\n' included and not NUL-terminated, as read()
- * returns it. Keys other than printable ones, Backspace and Enter do
- * nothing. Waits: this is the kernel, interrupts off, until Enter.
+ * returns it, of up to LINE_MAX characters. Waits: this is the kernel,
+ * interrupts off, until Enter.
+ *
+ * The keys (docs/phase4b_plan.md step 2): Left, Right, Home and End, or
+ * Ctrl+A and Ctrl+E, move; typing inserts at the cursor; Backspace and
+ * Delete delete; Ctrl+U throws away what's typed; Up and Down step through
+ * the last HISTORY lines, Down past the newest giving back what was being
+ * typed; Ctrl+L moves the prompt and the line to the top of the screen,
+ * the prompt found by its mark (con_osc_char); Tab completes the word
+ * before the cursor, and a second Tab lists the choices (line_tab). PgUp,
+ * PgDn and the mouse wheel look back through the scrollback, and any other
+ * key brings the view back first (view_by).
  *
  * Break is off while it waits, or Ctrl+C would sit pending until the line
  * was done and then end the program reading it. Here Ctrl+C is a key that
@@ -340,14 +859,32 @@ static void con_back(void) {
  * before this looks; the character queue holds the same presses, and is
  * emptied at the end so the next program doesn't get them. */
 static int con_read_line(char *buf, unsigned size) {
-    unsigned n = 0u;
+    unsigned n = 0u;                /* characters typed */
+    unsigned cur = 0u;              /* the cursor, before character cur */
+    unsigned old;
+    unsigned max;
+    unsigned browse = history_count;
     unsigned event;
     unsigned code;
     unsigned ctrl = 0u;
+    unsigned top;
+    unsigned tabbed = 0u;           /* the last key was a Tab */
+    unsigned was_tab;
+    unsigned wheel;
     if (size < 2u) return FS_EINVAL;
+    max = size - 2u;
+    if (max > LINE_MAX) max = LINE_MAX;
     k_break(0u);
-    con_cursor(1u);
+    if (con_col == CON_COLS) con_newline();
+    line_row = con_row;
+    line_col = con_col;
+    line_cursor(0u, 1u);
     while (1) {
+        wheel = mouse_event();              /* a notch: a press and a release */
+        if (wheel != 0u && ME_PRESSED(wheel) != 0u) {
+            if (ME_BUTTON(wheel) == ME_WHEEL_UP) view_by((int)WHEEL_ROWS, cur);
+            if (ME_BUTTON(wheel) == ME_WHEEL_DOWN) view_by(0 - (int)WHEEL_ROWS, cur);
+        }
         event = key_event();
         if (event == 0u) continue;
         code = KE_CODE(event);
@@ -356,32 +893,97 @@ static int con_read_line(char *buf, unsigned size) {
             continue;
         }
         if (KE_PRESSED(event) == 0u) continue;
-        if (ctrl != 0u && (code == 'c' || code == 'C')) {
-            con_cursor(0u);
+        if (ctrl != 0u && code >= 'A' && code <= 'Z') code = code + 32u;
+        if (code == KEY_PGUP || code == KEY_PGDN) {
+            view_by(code == KEY_PGUP ? (int)PAGE_ROWS : 0 - (int)PAGE_ROWS, cur);
+            continue;
+        }
+        if (view_back > 0u) view_move(0u);  /* any other key: back to the bottom */
+        line_cursor(cur, 0u);
+        if (list_rows > 0u) line_unlist();
+        was_tab = tabbed;
+        tabbed = 0u;
+        if (ctrl != 0u && code == 'c') {
+            line_end(n);
             con_puts("^C");
             n = 0u;
             break;
         }
-        if (code == KEY_ENTER) break;
-        if (code == KEY_BACKSPACE) {
-            if (n > 0u) {
-                n--;
-                con_cursor(0u);
-                con_back();
-                con_cursor(1u);
-            }
-            continue;
+        if (code == KEY_ENTER) {
+            line_end(n);
+            break;
         }
-        if (code < 32u || code > 126u || n + 2u > size) continue;
-        buf[n] = (char)code;
-        n++;
-        con_put((int)code);
-        con_cursor(1u);
+        old = n;
+        if (code == KEY_LEFT) {
+            if (cur > 0u) cur--;
+        } else if (code == KEY_RIGHT) {
+            if (cur < n) cur++;
+        } else if (code == KEY_HOME || (ctrl != 0u && code == 'a')) {
+            cur = 0u;
+        } else if (code == KEY_END || (ctrl != 0u && code == 'e')) {
+            cur = n;
+        } else if (code == KEY_BACKSPACE) {
+            if (cur > 0u) {
+                memmove((void *)(buf + cur - 1u), (void *)(buf + cur), n - cur);
+                cur--;
+                n--;
+                line_draw(buf, cur, n, old);
+            }
+        } else if (code == KEY_DELETE) {
+            if (cur < n) {
+                memmove((void *)(buf + cur), (void *)(buf + cur + 1u), n - cur - 1u);
+                n--;
+                line_draw(buf, cur, n, old);
+            }
+        } else if (ctrl != 0u && code == 'u') {
+            n = 0u;
+            cur = 0u;
+            line_draw(buf, 0u, 0u, old);
+        } else if (ctrl != 0u && code == 'l') {
+            top = line_row;
+            if (con_marked != 0u && con_mark_row <= line_row) top = con_mark_row;
+            while (top < line_row && con_blank_row(top) != 0u) top++;
+            if (top > con_top) con_scroll(con_top, con_bottom, top - con_top, 1u);
+        } else if (code == KEY_TAB && ctrl == 0u) {
+            if (line_tab(buf, &n, &cur, max) != 0u) {
+                if (was_tab != 0u) line_list(n);
+            } else {
+                line_draw(buf, 0u, n, old);
+            }
+            tabbed = 1u;
+        } else if (code == KEY_UP) {
+            if (browse > 0u) {
+                if (browse == history_count) {
+                    memcpy((void *)line_typed, (void *)buf, n);
+                    line_typed[n] = 0;
+                }
+                browse--;
+                n = line_load(buf, history + browse * HISTORY_LINE, max);
+                cur = n;
+                line_draw(buf, 0u, n, old);
+            }
+        } else if (code == KEY_DOWN) {
+            if (browse < history_count) {
+                browse++;
+                if (browse == history_count) n = line_load(buf, line_typed, max);
+                else n = line_load(buf, history + browse * HISTORY_LINE, max);
+                cur = n;
+                line_draw(buf, 0u, n, old);
+            }
+        } else if (ctrl == 0u && code >= 32u && code <= 126u && n < max) {
+            memmove((void *)(buf + cur + 1u), (void *)(buf + cur), n - cur);
+            buf[cur] = (char)code;
+            n++;
+            cur++;
+            line_draw(buf, cur - 1u, n, old);
+        }
+        line_cursor(cur, 1u);
     }
-    con_cursor(0u);
     con_put('\n');
+    if (n > 0u) history_add(buf, n);
     buf[n] = '\n';
     while (key_read() >= 0) { }
+    con_marked = 0u;                        /* a mark counts for one line */
     k_break(1u);                            /* a program is reading this line */
     return (int)(n + 1u);
 }
@@ -468,6 +1070,16 @@ int k_remove(char *path) { return fs_remove(path); }
 
 int k_rename(char *from, char *to) { return fs_rename(from, to); }
 
+/* Where the calling program's commands are, for Tab in its first word:
+ * a directory of .bin files, and its built-ins between spaces. It lasts
+ * until the program ends; a program it runs starts without. */
+int k_setcomplete(char *dir, char *builtins) {
+    if (strlen(dir) >= COMPLETE_TEXT || strlen(builtins) >= COMPLETE_TEXT) return FS_EINVAL;
+    strlcpy(complete_dir + (unsigned)depth * COMPLETE_TEXT, dir, COMPLETE_TEXT);
+    strlcpy(complete_builtins + (unsigned)depth * COMPLETE_TEXT, builtins, COMPLETE_TEXT);
+    return 0;
+}
+
 /* --- running programs ------------------------------------------------------ */
 
 /* Put back what a program may have left behind: files open, timers
@@ -498,6 +1110,9 @@ static void k_tidy(void) {
     }
     con_attr = CON_DEFAULT;                 /* no color left on for the shell */
     con_esc = CON_ESC_NONE;
+    con_marked = 0u;
+    con_top = 0u;                           /* nor a scroll region */
+    con_bottom = CON_ROWS - 1u;
     con_redraw();
 }
 
@@ -545,6 +1160,8 @@ int k_exec(char *path, int argc, char **argv) {
     *(unsigned *)(base + header[6] + 4u) = PROGRAMS_TOP;       /* its __heap_limit */
 
     depth++;
+    complete_dir[(unsigned)depth * COMPLETE_TEXT] = 0;         /* no commands for Tab yet */
+    complete_builtins[(unsigned)depth * COMPLETE_TEXT] = 0;
     procs[depth].base = base;
     procs[depth].heap_ptr_at = base + header[6];
     started = 1u;
@@ -601,6 +1218,7 @@ static void k_tables(void) {
     table[SYS_RMDIR] = (unsigned)&w_rmdir;
     table[SYS_REMOVE] = (unsigned)&w_remove;
     table[SYS_RENAME] = (unsigned)&w_rename;
+    table[SYS_SETCOMPLETE] = (unsigned)&w_setcomplete;
     vectors[VEC_DIV_ZERO] = (unsigned)&fault_div;
     vectors[VEC_BAD_OPCODE] = (unsigned)&fault_opcode;
     vectors[VEC_BAD_FETCH] = (unsigned)&fault_fetch;
@@ -618,6 +1236,7 @@ int main(void) {
     in_kernel = 1u;
     k_tables();
     con_attr = CON_DEFAULT;
+    con_bottom = CON_ROWS - 1u;
     con_clear();
     con_puts("PigeonOS\n");
 

@@ -3,7 +3,9 @@
 > **Status: built,** `user/os/bin/sh.c`. §1's loop, splitting with quotes,
 > the lookup, and `cd`, `exit` and `help` came in kernel.md's phase 3; §2's
 > prompt file and its colors in phase 4a ([phase4_plan.md](phase4_plan.md)
-> step 5). The box characters wait for a later phase. The shell is
+> step 5); §5's line editing, Tab completion and scrollback in phase 4b.1
+> ([phase4b_plan.md](phase4b_plan.md)). The box characters wait for a later
+> phase. The shell is
 > `/bin/sh.bin`, an ordinary program that the kernel starts at boot
 > ([kernel_overview.md](kernel_overview.md)). Decided 2026-09-14.
 
@@ -157,3 +159,43 @@ and prints the prompt with `write`, all of which are already planned
   `ESC [ r ; c H` and `ESC [ K` too ([kernel.md](kernel.md) §12).
 - **Five box-drawing glyphs**, only if you want Kali's real `┌──` rather than
   `|-`.
+
+---
+
+## 5. Typing at the prompt
+
+*Built in phase 4b.1* ([phase4b_plan.md](phase4b_plan.md) steps 2–4). The
+kernel's console does all of it, so every program that reads a line gets the
+same keys, not only the shell.
+
+| Key | Does |
+|---|---|
+| Left, Right, Home, End | move along the line; Ctrl+A and Ctrl+E are Home and End |
+| Backspace, Delete | delete before, or at, the cursor |
+| Up, Down | the last 16 lines typed; Down past the newest gives back what you were typing |
+| Tab | complete a command or a file name; a second Tab lists the choices under the line |
+| Ctrl+U | throw away what's typed |
+| Ctrl+L | move the prompt and the line to the top of the screen |
+| Ctrl+C | throw the line away |
+| PgUp, PgDn, the mouse wheel | look back through the last 100 rows; any other key comes back |
+
+- **Tab completes the word before the cursor.**
+  - **In the first word, commands.** When the shell starts, it tells the
+    console where they are: the `.bin` files in `/bin`, and the built-ins
+    `cd`, `exit` and `help`.
+  - **In any other word, or one with a `/`, file and directory names.**
+  - One match gets a `/` after a directory and a space after anything else.
+    Several grow the word as far as they agree, and a second Tab lists them
+    in columns under the line, as zsh does; the next key clears the list.
+  - A name with a space comes back in quotes.
+- **Ctrl+L finds where the prompt starts** by an invisible mark the shell
+  prints first, `ESC ] 133 ; A`, so a prompt of several rows moves up whole,
+  and the blank line before it stays behind.
+- **While looking back,** a marker in the top-right corner, such as `-24`,
+  says how many rows back the view is. `clear` also empties what you can look
+  back through.
+- **History is kept in memory,** so it starts empty at each boot. An empty
+  line, or one repeating the last, isn't kept. A line holds up to 255
+  characters.
+- **Keys typed while a program runs are thrown away when it ends,** so the
+  Esc that closes `graph` never reaches the prompt.

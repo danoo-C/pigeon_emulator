@@ -224,6 +224,16 @@ w_rename:
     EI
     RET
 
+w_setcomplete:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_setcomplete
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
 w_exit:
     DI
     MOV C, #__g_in_kernel

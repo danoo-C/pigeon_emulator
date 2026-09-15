@@ -27,7 +27,8 @@
 #define SYS_RMDIR    14
 #define SYS_REMOVE   15
 #define SYS_RENAME   16
-#define SYS_COUNT    17
+#define SYS_SETCOMPLETE 17
+#define SYS_COUNT    18
 
 /* --- the console: every program starts with these; open() gives 3 up -- */
 #define STDIN  0

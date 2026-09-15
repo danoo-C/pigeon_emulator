@@ -9,6 +9,7 @@ what follows is about what the device REFUSES to do.
 """
 import contextlib
 import io
+import struct
 import sys
 from pathlib import Path
 
@@ -18,10 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import cases, run_module                                 # noqa: E402
 from emulator.devices.display_io import (                             # noqa: E402
-    CMD_FILL, CMD_GET_BASE, CMD_INFO, CMD_NOP, CMD_SET_BASE, DisplayIO)
+    CMD_COPY, CMD_FILL, CMD_GET_BASE, CMD_INFO, CMD_NOP, CMD_SET_BASE, DisplayIO)
 from emulator.memory_map import (                                     # noqa: E402
     DISPLAY_H, DISPLAY_SIZE, DISPLAY_START, DISPLAY_W, HEAP_START,
-    IO_START, PROGRAM_LOAD_ADDR, RAM_SIZE)
+    IO_START, IOHeader, PROGRAM_LOAD_ADDR, RAM_SIZE)
 from emulator.ram import RAM                                          # noqa: E402
 
 
@@ -164,6 +165,59 @@ def test_changing_colour_repaints():
              data=colour.to_bytes(4, "little"), read_write=1)
         assert display.ram.mem[HEAP_START:HEAP_START + 4] \
             == colour.to_bytes(4, "little")
+
+
+# --- the copy: a console's scroll (docs/phase4b_plan.md step 1) -----------
+
+WINDOW = IO_START + IOHeader.USABLE_AFTER
+
+
+def copy(display, base, to, source, count):
+    """COPY with its three words in the data window, as a guest sends it."""
+    display.ram.mem[WINDOW:WINDOW + 12] = struct.pack("<III", to, source, count)
+    return word(display.callback(0, CMD_COPY, 4, base, bytearray(4)))
+
+
+def test_copy_moves_bytes_within_a_buffer_either_way():
+    display = device()
+    mem = display.ram.mem
+    pattern = bytes(range(256)) * 4
+
+    mem[HEAP_START:HEAP_START + len(pattern)] = pattern
+    assert copy(display, HEAP_START, 0, 16, 512) == 1           # up, overlapping
+    assert bytes(mem[HEAP_START:HEAP_START + 512]) == pattern[16:528]
+    assert bytes(mem[HEAP_START + 512:HEAP_START + 1024]) == pattern[512:]
+
+    mem[HEAP_START:HEAP_START + len(pattern)] = pattern
+    assert copy(display, HEAP_START, 16, 0, 512) == 1           # down, overlapping
+    assert bytes(mem[HEAP_START:HEAP_START + 16]) == pattern[:16]
+    assert bytes(mem[HEAP_START + 16:HEAP_START + 528]) == pattern[:512]
+
+
+def test_copy_reaches_the_last_byte_of_the_screen():
+    display = device()
+    mem = display.ram.mem
+    end = DISPLAY_START + DISPLAY_SIZE
+    mem[end - 4:end] = b"\x01\x02\x03\x04"
+    assert copy(display, DISPLAY_START, 0, DISPLAY_SIZE - 4, 4) == 1
+    assert bytes(mem[DISPLAY_START:DISPLAY_START + 4]) == b"\x01\x02\x03\x04"
+
+
+@cases(("an unaligned buffer", HEAP_START + 1, 0, 4, 4),
+       ("the IO header as the buffer", IO_START, 0, 4, 4),
+       ("a destination running past the screen", HEAP_START, DISPLAY_SIZE - 4, 0, 8),
+       ("a source running past the screen", HEAP_START, 0, DISPLAY_SIZE - 4, 8),
+       ("a count as big as a word", HEAP_START, 0, 0, 0xFFFFFFFF),
+       ("a buffer at the very end of RAM", RAM_SIZE - 4, 0, 0, 4))
+def test_a_copy_outside_its_buffer_is_refused(label, base, to, source, count):
+    display = device()
+    mem = display.ram.mem
+    mem[HEAP_START:HEAP_START + 64] = bytes(range(64))
+    before = bytes(mem[HEAP_START:HEAP_START + DISPLAY_SIZE])
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert copy(display, base, to, source, count) == 0, label
+    assert len(mem) == RAM_SIZE, f"{label}: the copy resized RAM"
+    assert bytes(mem[HEAP_START:HEAP_START + DISPLAY_SIZE]) == before, label
 
 
 def test_an_unknown_command_is_survivable():

@@ -508,6 +508,13 @@ phase 1, on 2026-09-14.
 - **Programs print through it** with a system call, and with `printf` since
   phase 4a, when the compiler gained variadic functions (kernel_changes.md
   §3.1).
+- **Typing a line, built in phase 4b.1** ([phase4b_plan.md](phase4b_plan.md)
+  steps 1–4): editing anywhere in the line, 16 lines of history, Tab
+  completion, Ctrl+L by the prompt's `ESC ] 133 ; A` mark, and 100 rows of
+  scrollback with PgUp, PgDn and the mouse wheel (shell.md §5). Scrolling
+  moves pixels with the display's `COPY`, 13,731 instructions a line where
+  redrawing the screen cost up to a million, and `ESC [ t ; b r`, `S` and `T`
+  scroll only some rows.
 - Commands, argument splitting and program lookup are in kernel_exec.md §3.
 
 ---
@@ -976,9 +983,9 @@ form.
      - bios2 leaving `BOOT_CHANNEL` alone for channel 1.
    - **The full suite passes: 1,140 tests.**
 4. **`printf`, a fuller shell, and tools for working with files,** planned in
-   [phase4_plan.md](phase4_plan.md), in two halves. ***4a is done;*** 4b is
-   next: line editing, history and scrollback with the mouse wheel, `more`,
-   and `edit`, a mini nano.
+   [phase4_plan.md](phase4_plan.md), in two halves. ***4a is done, and so is
+   4b.1*** ([phase4b_plan.md](phase4b_plan.md)); 4b.2, `more`, and 4b.3,
+   `edit`, a mini nano, are next.
    - **What 4a built:**
      - **Variadic functions** (step 1). The parser records `...` on a
        function and on a function-pointer type, and refuses it with no named
@@ -1085,6 +1092,93 @@ form.
        end, kept; a file over 1024 bytes cut short without a word; and quotes
        kept on a line.
    - **The full suite passes: 1,187 tests**, the 1,140 from before and 47
+     new.
+   - **4b.1, built** (phase4b_plan.md steps 1–4):
+     - **Fast scrolling.** The display device's `COPY`, command 5, moves
+       bytes within a buffer. `disp_scroll` in `display.c` moves rows of
+       pixels with it, or with `memmove` when there's no device, and the
+       console scrolls by moving pixels instead of redrawing.
+       `ESC [ t ; b r`, `ESC [ n S` and `ESC [ n T` scroll only some rows,
+       and tidying after a program gives the whole screen back.
+     - **Line editing** in `con_read_line`: Left, Right, Home, End, Ctrl+A
+       and Ctrl+E; Backspace and Delete anywhere in the line; Ctrl+U; 16
+       lines of history on Up and Down; and Ctrl+L. The console learns
+       `ESC ]` sequences, and the shell prints `ESC ] 133 ; A` where its
+       prompt starts.
+     - **Tab completion.** A new system call, `setcomplete`, slot 17, which
+       the shell calls with `/bin` and its built-ins. File and directory
+       names in any other word. A second Tab lists the choices in columns
+       under the line.
+     - **Scrollback:** the last 100 rows, looked through with PgUp, PgDn and
+       the mouse wheel, with a marker saying how far back. `ESC [ 3 J`
+       empties it, and `clear` prints that too.
+     - **The wheel:** HID's buttons 5 and 6, named in `hid.py` and
+       `input.h`. The pygame client sends `MOUSEWHEEL` as notches, and
+       repeats a held key after 400 ms, every 40 ms. The browser adds up
+       wheel distance into notches: 100 pixels, 3 lines or a page each.
+   - **Decided while building** (phase4b_plan.md §11 has the corrections to
+     the plan):
+     - a typed line holds up to 255 characters, the shell's limit, so a
+       program asking `read()` for more still gets 255 at most;
+     - a Tab straight after any Tab lists the matches, whether the first one
+       added something or not;
+     - Ctrl with a letter no longer types the letter;
+     - mouse events other than the wheel are dropped while a line is typed.
+   - **Measured:** a whole-screen `disp_scroll` with the device, 7,121
+     instructions; one console scroll, 13,731. Before, up to about a
+     million.
+   - **Sizes:** the kernel is 204,316 bytes, up from 147,924, where the plan
+     guessed about 15 KB more. About 14 KB of it is history, scrollback and
+     Tab's names, which are globals and so live in the image; the rest is
+     code. A program with the display library grew by 4,188 bytes for
+     `disp_scroll`, one with `sys.c` by 184 for `setcomplete`, and the shell
+     is 43,052. The example disc is 943.5 KiB, up from 870.5.
+   - **Tests, 63 new:**
+     - **`test_kernel.py`, 36:** scroll regions, `S` and `T`, and a region
+       left set undone after its program; a console scroll counted in
+       instructions; each editing key at both ends and in the middle; a line
+       wrapping, and one typed on the bottom row under a two-line prompt;
+       history; Ctrl+L with and without a mark; `ESC ]` dropped, and given
+       up after 64 characters; Tab for a command, a built-in, a file, a
+       directory, the middle of a line and no match; the list on a second
+       Tab, in order, cleared by the next key, and scrolled into view with
+       `and N more`; a name with a space in quotes; a program that names no
+       commands; PgUp and PgDn with the marker, the wheel, 100 rows kept, and
+       `ESC [ 2 J` keeping them while `clear` empties them.
+     - **`test_display.py`, 8:** `COPY` both ways and to the screen's last
+       byte, and six refusals.
+     - **`test_libs.py`, 14:** `disp_scroll` six ways with the device and six
+       without, its cost, and a wheel notch through `input.c`.
+     - **`test_input.py`, 5:** the wheel buttons through HID, the browser's
+       adder under node and its listener, and the pygame client's notches and
+       key repeat.
+   - **Forty-one deliberate breakages each failed the tests,** two of them
+     only after a test was fixed:
+     - `COPY` refusing nothing, or ignoring its source; `disp_scroll`'s
+       fallback moving rows the wrong way, or clearing only the first row
+       left behind; the console redrawing after a scroll; a newline ignoring
+       the region; `ESC [ S` scrolling down; a region kept after its program;
+     - typing over instead of inserting; Backspace taking the wrong
+       character; a shorter line leaving its old end on screen; history
+       keeping repeats; Down losing what was typed; the line's row not moving
+       with a scroll; Ctrl+L ignoring the mark, or keeping blank rows;
+       `ESC ]` never given up; a mark outliving its line; Ctrl with a letter
+       typing it; the shell printing no mark;
+     - Tab offering no commands, or leaving out the built-ins; a directory
+       completed with a space; a name with a space left unquoted; the list
+       unsorted, never shown, never cleared, or not scrolled into view; the
+       shell naming no commands;
+     - nothing kept in the scrollback, or it read from the wrong end;
+       `ESC [ 3 J` ignored; `clear` keeping the scrollback; no marker; a key
+       leaving the view back; the wheel's up going down;
+     - the browser's notches the wrong way, or never starting the count
+       again; pygame sending its legacy wheel buttons too, turning the wheel
+       the wrong way, or not repeating keys.
+     - **Missed at first:** `ESC [ 3 J` ignored, and `clear` keeping the
+       scrollback. The test pressed PgUp after `clear` and then typed a key,
+       and a key brings the view back whether PgUp moved it or not. It now
+       reads how many rows the scrollback holds from the kernel's memory.
+   - **The full suite passes: 1,250 tests**, the 1,187 from before and 63
      new.
 5. **A boot screen and a startup script,** from `/etc/boot.conf`
    ([phase4_plan.md §11](phase4_plan.md#11-later-phases)).

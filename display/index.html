@@ -245,6 +245,25 @@
         .finally(()=>{ sending = false; drain(); });
     }
 
+    // The mouse wheel, as HID wants it: a notch is a press and a release of
+    // button 5 (up) or 6 (down). Browsers report a distance instead, and a
+    // trackpad a stream of small ones, so the distance is added up and a
+    // notch sent for every 100 pixels, 3 lines or page (deltaMode 0, 1, 2).
+    // Turning the other way starts the count again.
+    let wheelTotal = 0;
+    function wheelNotches(deltaY, deltaMode){
+      if (!deltaY) return [];
+      const size = deltaMode === 1 ? 3 : deltaMode === 2 ? 1 : 100;
+      if ((wheelTotal < 0) !== (deltaY < 0)) wheelTotal = 0;
+      wheelTotal += deltaY;
+      const notches = [];
+      while (Math.abs(wheelTotal) >= size){
+        notches.push(wheelTotal < 0 ? 5 : 6);      // a negative deltaY is up
+        wheelTotal -= Math.sign(wheelTotal) * size;
+      }
+      return notches;
+    }
+
     // No default geometry on purpose. /info is the only source of it,
     // and guessing wrong is invisible: every frame then fails the
     // length check below and is dropped, so the screen just stays
@@ -369,6 +388,15 @@
         post('/mouse_event', {button: BTN[e.button], pressed: false});
       });
       canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+      // Not passive, so the page itself doesn't scroll under the screen.
+      canvas.addEventListener('wheel', e => {
+        e.preventDefault();
+        for (const button of wheelNotches(e.deltaY, e.deltaMode)){
+          post('/mouse_event', {button, pressed: true});
+          post('/mouse_event', {button, pressed: false});
+        }
+      }, {passive: false});
 
       canvas.addEventListener('keydown', e => {
         const c = toPigeonKey(e);

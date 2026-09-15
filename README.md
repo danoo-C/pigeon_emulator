@@ -363,9 +363,9 @@ that fires the command.
 |---|---|---|
 | 1 `CH_USERPROG` | boot disk | as HDD |
 | 2 `CH_HDD` | disk | `0` NOP `1` GET_SIZE `2` READ `3` WRITE `4` TRUNCATE `5` FLUSH · `6` READ_DMA `7` WRITE_DMA — straight to and from RAM, any length, with `[address, count]` in the window and R/W 0 so the count comes back |
-| 3 `CH_HID` | input | **real-time:** `1` mouse pos (x≪16\|y) `2` button mask `6` one key's state `7` 32-byte held-key bitmap · **FIFO:** `3` pop character `4` pop mouse edge `5` pop key edge · **break:** `8` SET_BREAK, ADDRESS 1 on or 0 off: Ctrl+C raises `VEC_BREAK` instead of arriving as a key |
+| 3 `CH_HID` | input | **real-time:** `1` mouse pos (x≪16\|y) `2` button mask `6` one key's state `7` 32-byte held-key bitmap · **FIFO:** `3` pop character `4` pop mouse edge (a wheel notch: button 5 up or 6 down, pressed then released) `5` pop key edge · **break:** `8` SET_BREAK, ADDRESS 1 on or 0 off: Ctrl+C raises `VEC_BREAK` instead of arriving as a key |
 | 4 `CH_TIMER` | timers | `1` START `2` STOP `4` RESET `5` STATUS → `(status, remaining_ms)` · `6` TICK: raise `VEC_TIMER` every LENGTH ms until STOP |
-| 5 `CH_DISPLAY` | framebuffer | `1` INFO → `(w, h, size)` `2` SET_BASE (page flip, ADDRESS = the buffer to scan out) `3` GET_BASE `4` FILL (ADDRESS = destination, colour in the data window) |
+| 5 `CH_DISPLAY` | framebuffer | `1` INFO → `(w, h, size)` `2` SET_BASE (page flip, ADDRESS = the buffer to scan out) `3` GET_BASE `4` FILL (ADDRESS = destination, colour in the data window) `5` COPY (ADDRESS = a buffer, `[to, from, count]` offsets in the data window, R/W 0 so 1 moved or 0 refused comes back) |
 | 6 `CH_CD` | removable disc | `0`-`5` as HDD, but **read-only**: WRITE and TRUNCATE are refused · `8` MEDIA → `(magic, present, generation, size, name[32])` · `9` EJECT → `(ejected, generation)` |
 | 7 `CH_BIOS2` | firmware | the second-stage BIOS ([docs/os_cd.md](docs/os_cd.md)). As HDD, but **read-only**: WRITE, TRUNCATE and anything sent with R/W 1 get 0 bytes, WRITE_DMA gets `0xFFFFFFFF`. Registered only when there is a bios2; `fs.c` and `cd.c` never send it anything |
 

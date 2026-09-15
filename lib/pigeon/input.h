@@ -31,6 +31,10 @@ unsigned mouse_event(void);        /* 0 when the queue is empty */
 #define ME_VALID(e)   ((e) & 0x80)
 #define ME_PRESSED(e) ((e) & 0x40)
 #define ME_BUTTON(e)  ((e) & 0x1F)
+/* A wheel notch is a press and a release of button 5, up, or 6, down --
+ * compare with ME_BUTTON(e). */
+#define ME_WHEEL_UP   5
+#define ME_WHEEL_DOWN 6
 
 /* --- keyboard: FIFO ---------------------------------------------------- */
 int      key_read(void);           /* next character, or -1 if none */

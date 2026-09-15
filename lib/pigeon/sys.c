@@ -70,6 +70,10 @@ void exit(int code) { ((sys_exit_fn)SYS_SLOT(SYS_EXIT))(code); }
 
 int getkey(void) { return ((sys_none)SYS_SLOT(SYS_GETKEY))(); }
 
+int setcomplete(char *dir, char *builtins) {
+    return ((sys_path_path)SYS_SLOT(SYS_SETCOMPLETE))(dir, builtins);
+}
+
 void print(char *s) {
     unsigned n = 0u;
     while (s[n] != 0) n++;
