@@ -2,7 +2,8 @@
 
 > **Status: final plan, 2026-09-15. 4a is built** (§4): steps 1, 2, 3, 5,
 > 6, 7 and 10, with step 11 for them, as kernel.md §17 records. **4b is
-> next:** steps 4, 8 and 9. The stage after
+> next:** steps 4, 8 and 9, planned in detail in
+> [phase4b_plan.md](phase4b_plan.md). The stage after
 > [kernel.md](kernel.md)'s phase 3, which built the kernel, its console, a
 > simple shell, and `ls`, `cat` and `echo`. It follows kernel.md §17's
 > phase 4 and the decisions in [kernel_changes.md](kernel_changes.md) and
