@@ -2,8 +2,8 @@
 
 > **Status: final plan, 2026-09-15, checked again against the code the same
 > day ([§11](#11-checked-again)). Every question is decided
-> ([§10](#10-your-answers)). Parts 5a and 5b are built, 5b as planned in
-> [phase5b_plan.md](phase5b_plan.md); 5c is next.** Swapped with the boot
+> ([§10](#10-your-answers)). All three parts are built: 5b as planned in
+> [phase5b_plan.md](phase5b_plan.md), and 5c in [phase5c_plan.md](phase5c_plan.md).** Swapped with the boot
 > screen and startup script, as you decided: those become phase 6, and the
 > launcher phase 7. The idea was sketched in [phase4_plan.md](phase4_plan.md)
 > §11; this is the full plan. Facts marked *checked* were read in the code,
@@ -399,6 +399,9 @@ an install, a cancel and a disk too small.
     without.
 
 ### Part 5c: the panel, in both front ends
+
+*Planned in full, with its decisions, in [phase5c_plan.md](phase5c_plan.md),
+and built there.*
 
 **Step 9. The browser.** `display/index.html`.
 **Tests,** in `test_input.py` or a new `test_front_ends.py`, run under node

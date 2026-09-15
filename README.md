@@ -105,6 +105,14 @@ dialog needs tkinter, which is a system package rather than a pip one
 (`sudo apt install python3-tk`); without it that one button says so and
 everything else works.
 
+Both have a **Serial panel** too, left of the screen: what the machine writes
+to its debug port, IO channel 8, each line with the time since power-on
+([docs/phase5c_plan.md](docs/phase5c_plan.md)). The *Serial* button opens and
+closes it, its right edge drags it wider or narrower, and it follows new lines
+unless you scroll up. *Clear* empties the view only, and *times* hides the
+times. The browser remembers it in `localStorage`, and the pygame client in
+`build/display.json`. Nothing done in the panel reaches the machine.
+
 ### Running it
 
 Without `--run` you get a menu (run / single-step debugger / dump RAM / CPU

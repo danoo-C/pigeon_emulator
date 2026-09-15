@@ -1313,7 +1313,9 @@ form.
    stage 1, bios2 and the installer say where they've got to, and the kernel
    logs starting, its disk, every `exec` and how each program ended, and a
    panic. `k_exec` also sets `started` again after a program, so `exit`
-   after a command that couldn't start restarts the shell.
+   after a command that couldn't start restarts the shell. ***And 5c,***
+   which finishes phase 5: the Serial panel beside the screen, in the browser
+   and the pygame client ([phase5c_plan.md](phase5c_plan.md)).
 6. **A boot screen and a startup script,** from `/etc/boot.conf`
    ([phase4_plan.md §11](phase4_plan.md#11-later-phases)).
 7. **The launcher, `config.json`, and the docs.**
