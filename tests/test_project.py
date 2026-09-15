@@ -292,7 +292,7 @@ def test_the_example_project_builds_and_its_installer_asks_first():
             assert img.label == "PIGEONOS" and img.fsck().clean
             assert img.read_file(SYSTEM_PATH) == built(t, REPO_ROOT / "user" / "os" / "kernel.c")
             for name in ("sh", "ls", "cat", "echo", "mkdir", "rmdir", "rm", "mv", "cp", "clear", "more", "edit",
-                         "graph", "cube", "files", "corrupter", "splash"):
+                         "graph", "cube", "files", "corrupter", "splash", "reboot"):
                 path = f"/bin/{name}.bin"
                 assert img.read_file(path)[:4] == b"PGEX", f"{path} is not a program file"
         with power_on(t, disc=disc, keys=[ENTER]) as p:
@@ -301,7 +301,7 @@ def test_the_example_project_builds_and_its_installer_asks_first():
             rows = p.rows()
     assert rows[0] == "PigeonOS 0.1" and rows[1] == "INSTALLER", rows
     assert rows[3] == "Hard disk: 4096 K" and rows[4] == "Everything on it is erased.", rows
-    assert rows[6] == "24 files to copy" and rows[7] == "It will boot /boot.bin", rows
+    assert rows[6] == "25 files to copy" and rows[7] == "It will boot /boot.bin", rows
 
 
 def test_cc_py_builds_a_project_on_the_command_line():
