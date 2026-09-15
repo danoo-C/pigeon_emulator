@@ -1042,7 +1042,7 @@ def main():
     parser.add_argument("--hid-port", type=int, default=defaults["hid_port"],
                         help="HID server port")
     parser.add_argument("--fps", type=int, default=30, help="Display update FPS")
-    parser.add_argument("--pixel-size", type=int, default=8,
+    parser.add_argument("--pixel-size", type=int, default=5,
                         help="Initial pixel size magnification")
     args = parser.parse_args()
 
