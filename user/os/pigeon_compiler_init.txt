@@ -31,5 +31,6 @@ system    = kernel.c            # what the installed hard disk boots: the kernel
 /bin/graph.bin   = ../graph.c   # the graphing calculator; Esc goes back to the shell
 /bin/cube.bin    = ../cube.c
 /bin/files.bin   = ../files.c
+/bin/corrupter.bin   = bin/graph-corrupt.c
 /docs/readme.txt = readme.txt
 /etc/shell_header.conf = etc/shell_header.conf   # the prompt (docs/shell.md)
