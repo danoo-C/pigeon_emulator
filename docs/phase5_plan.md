@@ -2,7 +2,8 @@
 
 > **Status: final plan, 2026-09-15, checked again against the code the same
 > day ([§11](#11-checked-again)). Every question is decided
-> ([§10](#10-your-answers)). Part 5a is built; 5b and 5c are next.** Swapped with the boot
+> ([§10](#10-your-answers)). Parts 5a and 5b are built, 5b as planned in
+> [phase5b_plan.md](phase5b_plan.md); 5c is next.** Swapped with the boot
 > screen and startup script, as you decided: those become phase 6, and the
 > launcher phase 7. The idea was sketched in [phase4_plan.md](phase4_plan.md)
 > §11; this is the full plan. Facts marked *checked* were read in the code,
@@ -367,6 +368,9 @@ today; and how deep the formatter goes on the frame stack, for a panic on
   added to the project file alongside this part, not by it.
 
 ### Part 5b: what the machine says
+
+*Planned in full, with each line's format, in
+[phase5b_plan.md](phase5b_plan.md), and built there.*
 
 **Step 5. Stage 1.** The message before the jump to bios2, if it fits.
 **Tests:** `test_bios2.py` finds `bios: bios2` first on the port, and the

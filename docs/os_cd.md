@@ -148,6 +148,12 @@ Assembled, not run:
 | Loads bios2, and nothing else | 248 | 31 |
 | Loads bios2, or falls back to today's loader | 928 | 116 |
 | **As built:** the same, plus a check of the size against `BIOS2_MAX` | 944 | 118 |
+| **Phase 5b:** the same, and `[bios] bios2` on the debug port before the jump | 1,013 | 125 |
+
+**Phase 5b gave stage 1 one line** on the debug port, IO channel 8
+([phase5b_plan.md](phase5b_plan.md)): once bios2 has arrived whole, a
+`WRITE_DMA` of `[bios] bios2` straight from the BIOS's own bytes. The
+fallback to channel 1 says nothing.
 
 **With the fallback, nothing that exists changes.** Every test, and every
 `Machine` built without bios2, boots exactly as today. The progress bar
@@ -252,6 +258,23 @@ UP DOWN choose   ENTER boot
   - call `0x15898`.
 - **Both are calls**, so the program starts on top of two of bios2's return
   addresses: SP is `STACK_TOP - 8`. `tests/test_bios2.py` pins it.
+
+### 5.4 On the debug port
+
+Since phase 5b, bios2 says what it does on the debug port, IO channel 8,
+each line starting `[bios2] ` ([phase5b_plan.md](phase5b_plan.md)):
+
+- **each device,** at power-on, after a boot that came back, and the CD again
+  when a disc goes in or out: `Program: 816 bytes, bootable`,
+  `Hard disk: PIGEONOS, bootable`, `CD: no disc`;
+- **the countdown,** `counting down 5 s to CD`, and what ended it:
+  `Enter: booting CD`, `time: booting CD` or `Esc: the menu`; with nothing
+  to boot, `nothing to boot: the menu`;
+- **each hand-over:** `Program: 816 bytes, at 0x00020000`, or
+  `Hard disk: its boot sector, at 0x00015898`;
+- **every reason the screen gives,** from `say`: `Program: load failed`,
+  `CD: can't boot`;
+- **each menu choice:** `menu: Hard disk`.
 
 ---
 
@@ -415,6 +438,13 @@ the disc, it puts the disc on the hard disk:
 
 A failure stops with the reason on screen: no hard disk, a disk too small,
 or a `/boot.bin` that would not boot.
+
+**On the debug port,** since phase 5b, each step is a line starting
+`[installer] ` ([phase5b_plan.md](phase5b_plan.md)): the disc and its title,
+or why it couldn't be mounted; the hard disk's size; the files to copy and
+whether the disk will boot; Enter or Esc; formatting; each file copied; the
+boot record's block and size; every failure, naming the file that didn't
+fit; the count installed; and the restart.
 
 **The project names what the installed disk boots.** `system = kernel.c`
 in `[boot]` puts the kernel on the disc as `/boot.bin` (§7). Until the

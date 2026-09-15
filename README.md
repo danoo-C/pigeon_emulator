@@ -116,6 +116,19 @@ the one the launcher builds, used as it is ([docs/os_cd.md](docs/os_cd.md)).
 `--serial` prints what the machine writes to its debug port in this terminal,
 each line with the time since power-on, and `--serial-log PATH` writes the same
 lines to a file, started fresh each run ([docs/phase5_plan.md](docs/phase5_plan.md)).
+Booting the installed disk and running `ls` prints lines like these:
+
+```
+[   0.000] [bios] bios2
+[   0.031] [bios2] Hard disk: PIGEONOS, bootable
+[   0.035] [bios2] counting down 5 s to Hard disk
+[   1.920] [bios2] Enter: booting Hard disk
+[   2.104] [kernel] started, 236068 bytes at 0x00020000
+[   2.106] [kernel] mounted channel 2, PIGEONOS
+[   2.210] [kernel] exec /bin/sh.bin at 0x01000000, depth 1
+[   9.873] [kernel] exec /bin/ls.bin at 0x0103C000, depth 2
+[   9.951] [kernel] /bin/ls.bin ended: 0
+```
 
 An installation disc is a project file away:
 

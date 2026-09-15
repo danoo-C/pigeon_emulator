@@ -18,6 +18,7 @@ import functools
 import io
 import logging
 import re
+import struct
 import sys
 import tempfile
 import time
@@ -35,8 +36,8 @@ from emulator.devices.keycodes import (                                 # noqa: 
     KEY_PGUP, KEY_RIGHT, KEY_TAB, KEY_UP)
 from emulator.machine import Machine                                    # noqa: E402
 from emulator.memory_map import (                                       # noqa: E402
-    BOOT_CHANNEL, CH_CD, CH_HDD, CH_USERPROG, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
-    VEC_BREAK)
+    BOOT_CHANNEL, CH_CD, CH_DEBUG, CH_HDD, CH_USERPROG, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
+    BOOT_LOAD_ADDR, BOOT_RECORD, BOOT_SIGNATURE, VEC_BREAK)
 from emulator.programs import Program                                   # noqa: E402
 from pfs import PgfsImage                                               # noqa: E402
 from test_files import text_at                                          # noqa: E402
@@ -1383,6 +1384,172 @@ def test_a_fault_in_the_kernel_is_a_panic_that_stops_the_machine():
         panic = [line for line in lines(c.rows()) if line.startswith("kernel panic:")]
         assert len(panic) == 1 and panic[0].startswith(
             "kernel panic: ran a bad instruction at 0x"), c.rows()
+
+
+# --- the debug port: docs/phase5b_plan.md step 4 ------------------------------------
+
+def serial(c):
+    """The kernel's lines on the debug port."""
+    return c.machine.debug.since(0).data.decode().splitlines()
+
+
+EXEC_LINE = re.compile(r"^\[kernel\] exec (\S+) at 0x([0-9A-F]{8}), depth (\d+)$")
+
+
+def execs(said):
+    """(path, address, depth) for each exec line."""
+    return [(m[1], int(m[2], 16), int(m[3])) for m in map(EXEC_LINE.match, said) if m]
+
+
+def test_the_kernel_logs_starting_mounting_and_the_shell():
+    with booted() as c:
+        assert c.ready(), c.rows()
+        assert serial(c) == ["[kernel] started at 0x00020000", "[kernel] mounted channel 2, TEST",
+                             "[kernel] exec /bin/sh.bin at 0x01000000, depth 1"], serial(c)
+
+
+def test_the_kernel_logs_why_it_stops_at_boot():
+    with booted(shell=False) as c:
+        assert not c.run_until(lambda rows: False, seconds=20) and c.machine.cpu.halted
+        assert serial(c)[2:] == ["[kernel] exec /bin/sh.bin: no such file or directory",
+                                 "[kernel] cannot start /bin/sh.bin: no such file or directory"], \
+            serial(c)
+    with tempfile.TemporaryDirectory() as t:
+        disk = Path(t) / "blank.img"
+        disk.write_bytes(bytes(MiB))
+        c = Console(disk)
+        try:
+            assert not c.run_until(lambda rows: False, seconds=20) and c.machine.cpu.halted
+            said = serial(c)
+        finally:
+            c.close()
+    assert said[0] == "[kernel] started at 0x00020000", said
+    assert said[1].startswith("[kernel] cannot mount channel 2: ") and len(said) == 2, said
+
+
+def test_each_exec_is_logged_with_how_it_ended():
+    """A return and exit() told apart, a fault two levels down with where it
+    happened, Ctrl+C -- and nothing the programs print."""
+    extra = [(f"/bin/{name}.bin", standin(name)) for name in ("deep", "div0", "nested", "spin")]
+    with booted(extra=extra) as c:
+        assert c.ready(), c.rows()
+        start = len(serial(c))
+        assert c.command("echo hi") == ["hi"]
+        c.command("deep")
+        c.command("nested")
+        c.type("spin\n")
+        assert c.run_until(lambda rows: last_row(rows) == "spinning"), c.rows()
+        c.press(KEY_LCTRL, ord("c"))
+        assert c.ready(), c.rows()
+        said = serial(c)[start:]
+    started = execs(said)
+    assert [(path, depth) for path, _, depth in started] == [
+        ("/bin/echo.bin", 2), ("/bin/deep.bin", 2), ("/bin/nested.bin", 2),
+        ("/bin/echo.bin", 3), ("/bin/div0.bin", 3), ("/bin/spin.bin", 2)], said
+    assert all(address > 0x01000000 for _, address, _ in started), said
+    ended = [line for line in said if not EXEC_LINE.match(line)]
+    fault = re.match(r"^\[kernel\] /bin/div0\.bin ended: divided by zero at 0x([0-9A-F]{8})$",
+                     ended[3])
+    div0_at = started[4][1]
+    assert fault and div0_at <= int(fault[1], 16) < div0_at + len(standin("div0")), said
+    assert ended[:3] + ended[4:] == [
+        "[kernel] /bin/echo.bin ended: 0", "[kernel] /bin/deep.bin ended: exit 42",
+        "[kernel] /bin/echo.bin ended: 0", "[kernel] /bin/nested.bin ended: 5",
+        "[kernel] /bin/spin.bin ended: Ctrl+C"], said
+    assert all(line.startswith("[kernel] ") for line in said), said
+
+
+def test_q_and_ctrl_c_at_more_are_how_the_command_ended():
+    with booted(extra=with_more(("/bin/lines.bin", standin("lines")))) as c:
+        assert c.ready(), c.rows()
+        for keys, how in ((("q",), "q at -- more --"), (ctrl("c"), "Ctrl+C")):
+            start = len(serial(c))
+            c.type("more lines 30\n")
+            assert c.run_until(lambda rows: "line 11" in rows and paused(c)), c.rows()
+            if keys == ("q",):
+                c.type("q")
+            else:
+                c.press(*keys)
+            assert c.ready(), c.rows()
+            said = serial(c)[start:]
+            assert [(path, depth) for path, _, depth in execs(said)] == [
+                ("/bin/more.bin", 2), ("/bin/lines.bin", 3)], said
+            assert said[2] == f"[kernel] /bin/lines.bin ended: {how}", said
+            assert said[3].startswith("[kernel] /bin/more.bin ended: ") and len(said) == 4, said
+
+
+def test_a_panic_is_logged_before_the_machine_stops():
+    with booted(extra=[("/bin/panic.bin", standin("panic"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("panic\n")
+        assert not c.run_until(lambda rows: False, seconds=20) and c.machine.cpu.halted
+        said = serial(c)
+    assert said[-2].startswith("[kernel] exec /bin/panic.bin at "), said
+    assert re.match(r"^\[kernel\] panic: ran a bad instruction at 0x[0-9A-F]{8}$", said[-1]), said
+
+
+def test_a_program_that_cannot_start_is_logged_and_exit_still_restarts_the_shell():
+    """k_exec left `started` at 0 after a program failed to start, so a shell
+    that exited next was taken for one that never started, and the kernel
+    stopped with "cannot start /bin/sh.bin: ok" (docs/phase5b_plan.md §1)."""
+    with booted(extra=[("/bin/junk.bin", b"not a program at all\n")]) as c:
+        assert c.ready(), c.rows()
+        assert c.command("junk") == ["junk: not a program"]
+        assert c.command("exit") == ["shell ended, starting it again"]
+        assert c.command("echo back") == ["back"]
+        said = serial(c)
+    assert "[kernel] exec /bin/junk.bin: not a program" in said, said
+    i = said.index("[kernel] the shell ended; starting it again")
+    assert said[i - 1] == "[kernel] /bin/sh.bin ended: 0", said
+    assert said[i + 1] == "[kernel] exec /bin/sh.bin at 0x01000000, depth 1", said
+
+
+@cases(("booted from the hard disk", CH_HDD, "[kernel] started, 229528 bytes at 0x00020000"),
+       ("from channel 1, with a disk's record left behind", CH_USERPROG,
+        "[kernel] started at 0x00020000"))
+def test_the_kernel_takes_its_size_from_the_record_of_the_disk_it_booted(label, channel, first):
+    """bios2 leaves a booted disk's block 0 at BOOT_LOAD_ADDR, boot record
+    and all. Booted from channel 1, the record there is an earlier boot's."""
+    with tempfile.TemporaryDirectory() as t:
+        c = Console(make_disk(Path(t) / "hdd.img"), boot_channel=channel)
+        try:
+            struct.pack_into("<III", c.machine.ram.mem, BOOT_LOAD_ADDR + BOOT_RECORD,
+                             BOOT_SIGNATURE, 7, 229528)
+            assert c.ready(), f"{label}: {c.rows()}"
+            assert serial(c)[0] == first, f"{label}: {serial(c)}"
+        finally:
+            c.close()
+
+
+def first_exec_of_echo(port):
+    """Instructions from k_exec's first to its return, for the first echo
+    typed, with the debug port on the bus or not."""
+    entry = kernel_symbols()["k_exec"]
+    with booted() as c:
+        if not port:
+            del c.machine.io_controller.channels[CH_DEBUG]
+        assert c.ready(), c.rows()
+        cpu = c.machine.cpu
+        c.type("echo hi\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(5_000_000):
+                if cpu.pc == entry:
+                    break
+                c.machine.step()
+            assert cpu.pc == entry, "the shell never called exec"
+            sp, steps = cpu.sp, 0
+            while cpu.sp <= sp and steps < 5_000_000:
+                c.machine.step()
+                steps += 1
+        return steps
+
+
+def test_an_exec_costs_its_two_lines_and_no_more():
+    """Counted, not timed: 118,130 with the port and 107,904 without, so
+    10,226 for its two lines (docs/phase5b_plan.md §8)."""
+    with_port, without = first_exec_of_echo(True), first_exec_of_echo(False)
+    assert with_port - without < 12_000, \
+        f"logging cost {with_port - without:,} instructions ({with_port:,} against {without:,})"
 
 
 if __name__ == "__main__":

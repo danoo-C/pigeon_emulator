@@ -18,7 +18,13 @@
  * the console's too, so read(STDIN) hands a program a finished line.
  *
  * Nothing is protected: a program can overwrite the kernel.
+ *
+ * What it does is said on the debug port, each line starting "[kernel] "
+ * (docs/phase5b_plan.md step 4): starting, the disk it mounted, every exec
+ * and how each program ended, and a panic. Never through printf, which
+ * would call this kernel's own system calls -- and nothing of the console.
  */
+#include <pigeon/debug.h>
 #include <pigeon/display.h>
 #include <pigeon/fs.h>
 #include <pigeon/input.h>
@@ -35,6 +41,13 @@
 #define MAX_DEPTH     8             /* the kernel, and 7 programs in a chain */
 #define HANDLES       16            /* fs.c has 8; room to spare             */
 #define TIMERS        16u           /* timer ids stopped after a program      */
+
+/* How a program ended, for its line on the debug port. */
+#define K_HOW_RETURN  0u
+#define K_HOW_EXIT    1u
+#define K_HOW_FAULT   2u
+#define K_HOW_BREAK   3u
+#define K_HOW_QUIT    4u
 
 #define K_TIMER_STOP        2u
 #define K_DISPLAY_SET_BASE  2u
@@ -112,6 +125,9 @@ struct proc {
     unsigned save_sp;       /* exec_call's stack pointer and F, for exec_abort */
     unsigned save_f;
     unsigned breaks;        /* 1: Ctrl+C is its break; setbreak turns it off */
+    unsigned how;           /* K_HOW_*: how it ended, set where it did      */
+    unsigned fault_pc;      /* the instruction it faulted on                */
+    char path[256];         /* FS_PATH_MAX + 1: as exec was given it        */
 };
 
 struct proc procs[MAX_DEPTH];
@@ -911,10 +927,12 @@ static unsigned page_wait(void) {
             page_rows = 0u;
             if (ctrl != 0u && procs[depth].breaks != 0u) {
                 con_puts("^C\n");
+                procs[depth].how = K_HOW_BREAK;
                 ((abort_fn)&exec_abort)(ENDED_BREAK, &procs[depth].save_sp);
             }
             if ((unsigned)depth > page_owner) {
                 depth = (int)page_owner + 1;
+                procs[depth].how = K_HOW_QUIT;
                 ((abort_fn)&exec_abort)(ENDED_QUIT, &procs[depth].save_sp);
             }
             k_break(procs[depth].breaks);
@@ -1238,7 +1256,24 @@ static void k_tidy(void) {
     con_redraw();
 }
 
-int k_exec(char *path, int argc, char **argv) {
+/* How the program at `depth` ended, on the debug port. */
+static void k_log_end(int status) {
+    struct proc *p = &procs[depth];
+    if (p->how == K_HOW_EXIT) {
+        dbg_printf("[kernel] %s ended: exit %d\n", p->path, status);
+    } else if (p->how == K_HOW_FAULT) {
+        dbg_printf("[kernel] %s ended: %s at 0x%08X\n", p->path, k_strerror(status), p->fault_pc);
+    } else if (p->how == K_HOW_BREAK) {
+        dbg_printf("[kernel] %s ended: Ctrl+C\n", p->path);
+    } else if (p->how == K_HOW_QUIT) {
+        dbg_printf("[kernel] %s ended: q at -- more --\n", p->path);
+    } else {
+        dbg_printf("[kernel] %s ended: %d\n", p->path, status);
+    }
+}
+
+/* exec itself. *ran becomes 1 once the program is called. */
+static int k_run(char *path, int argc, char **argv, unsigned *ran) {
     unsigned base;
     unsigned *header;
     unsigned size;
@@ -1287,10 +1322,16 @@ int k_exec(char *path, int argc, char **argv) {
     procs[depth].base = base;
     procs[depth].heap_ptr_at = base + header[6];
     procs[depth].breaks = 1u;
+    procs[depth].how = K_HOW_RETURN;
+    strlcpy(procs[depth].path, path, FS_PATH_MAX + 1u);
+    dbg_printf("[kernel] exec %s at 0x%08X, depth %d\n", path, base, depth);
     started = 1u;
+    *ran = 1u;
     k_break(1u);
     status = ((call4_fn)&exec_call)(base + header[3], argc, argv, &procs[depth].save_sp);
     k_break(0u);
+    started = 1u;                           /* a program it ran may have failed to start */
+    k_log_end(status);
     if (page_owner >= (unsigned)depth) page_owner = 0u;     /* paging ends with its program */
     k_tidy();
     depth--;
@@ -1298,7 +1339,18 @@ int k_exec(char *path, int argc, char **argv) {
     return status;
 }
 
+/* exec, as the system call and main call it: a line on the debug port when
+ * the program couldn't even start. */
+int k_exec(char *path, int argc, char **argv) {
+    unsigned ran = 0u;
+    int status;
+    status = k_run(path, argc, argv, &ran);
+    if (ran == 0u) dbg_printf("[kernel] exec %s: %s\n", path, k_strerror(status));
+    return status;
+}
+
 void k_exit(int code) {
+    procs[depth].how = K_HOW_EXIT;
     ((abort_fn)&exec_abort)(code, &procs[depth].save_sp);
 }
 
@@ -1310,6 +1362,7 @@ void k_fault(unsigned vector, unsigned pc) {
     if (vector == VEC_BAD_OPCODE) status = ENDED_BAD_OPCODE;
     if (vector == VEC_BAD_FETCH) status = ENDED_BAD_FETCH;
     if (depth == 0 || kernel != 0u) {
+        dbg_printf("[kernel] panic: %s at 0x%08X\n", k_strerror(status), pc);
         con_puts("\nkernel panic: ");
         con_puts(k_strerror(status));
         con_puts(" at 0x");
@@ -1317,7 +1370,12 @@ void k_fault(unsigned vector, unsigned pc) {
         con_put('\n');
         ((void_fn)&khalt)();
     }
-    if (status == ENDED_BREAK) con_puts("^C\n");
+    procs[depth].how = K_HOW_FAULT;
+    procs[depth].fault_pc = pc;
+    if (status == ENDED_BREAK) {
+        con_puts("^C\n");
+        procs[depth].how = K_HOW_BREAK;
+    }
     ((abort_fn)&exec_abort)(status, &procs[depth].save_sp);
 }
 
@@ -1353,6 +1411,27 @@ static void k_tables(void) {
     ((void_fn)&kinit)();
 }
 
+/* The first line on the debug port. Booted from a disk, bios2 left that
+ * disk's block 0 at BOOT_LOAD_ADDR, and its boot record holds the size of
+ * /boot.bin, which is this kernel. Put in RAM any other way, it can't know. */
+static void k_log_start(unsigned channel) {
+    unsigned *record = (unsigned *)(BOOT_LOAD_ADDR + BOOT_RECORD);
+    if ((channel == CH_HDD || channel == CH_CD) && record[0] == BOOT_SIGNATURE) {
+        dbg_printf("[kernel] started, %u bytes at 0x%08X\n", record[2], PROGRAM_LOAD_ADDR);
+    } else {
+        dbg_printf("[kernel] started at 0x%08X\n", PROGRAM_LOAD_ADDR);
+    }
+}
+
+static void k_log_mount(unsigned channel) {
+    fs_volinfo vi;
+    if (fs_statvfs(channel, &vi) >= 0 && vi.label[0] != 0) {
+        dbg_printf("[kernel] mounted channel %u, %s\n", channel, vi.label);
+    } else {
+        dbg_printf("[kernel] mounted channel %u\n", channel);
+    }
+}
+
 int main(void) {
     char *shell_argv[2];
     unsigned channel;
@@ -1368,9 +1447,11 @@ int main(void) {
 
     /* The disk it booted from (Q8): bios2 leaves the channel. */
     channel = *(unsigned *)BOOT_CHANNEL;
+    k_log_start(channel);
     if (channel != CH_HDD && channel != CH_CD) channel = CH_HDD;
     status = fs_mount(channel);
     if (status < 0) {
+        dbg_printf("[kernel] cannot mount channel %u: %s\n", channel, fs_strerror(status));
         con_puts("cannot mount disk ");
         con_number(channel, 10u);
         con_puts(": ");
@@ -1379,12 +1460,14 @@ int main(void) {
         return status;
     }
     mounted = channel;
+    k_log_mount(channel);
 
     shell_argv[0] = "sh";
     shell_argv[1] = (char *)0;
     while (1) {
         status = k_exec(SHELL, 1, shell_argv);
         if (started == 0u) {
+            dbg_printf("[kernel] cannot start %s: %s\n", SHELL, k_strerror(status));
             con_puts("cannot start ");
             con_puts(SHELL);
             con_puts(": ");
@@ -1392,6 +1475,7 @@ int main(void) {
             con_put('\n');
             return status;
         }
+        dbg_print("[kernel] the shell ended; starting it again\n");
         con_puts("shell ended, starting it again\n");
     }
     return 0;

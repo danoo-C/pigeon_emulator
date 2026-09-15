@@ -1309,7 +1309,11 @@ form.
    `exec` logged to it ([phase5_plan.md](phase5_plan.md)). Swapped with the
    boot screen. ***Part 5a is built:*** the port on IO channel 8,
    `<pigeon/debug.h>`, `printf` with no kernel writing to it, `--serial`,
-   `--serial-log` and `/serial`.
+   `--serial-log` and `/serial`. ***So is 5b*** ([phase5b_plan.md](phase5b_plan.md)):
+   stage 1, bios2 and the installer say where they've got to, and the kernel
+   logs starting, its disk, every `exec` and how each program ended, and a
+   panic. `k_exec` also sets `started` again after a program, so `exit`
+   after a command that couldn't start restarts the shell.
 6. **A boot screen and a startup script,** from `/etc/boot.conf`
    ([phase4_plan.md §11](phase4_plan.md#11-later-phases)).
 7. **The launcher, `config.json`, and the docs.**

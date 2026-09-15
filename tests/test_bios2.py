@@ -167,7 +167,8 @@ def boot(program=None, bios2=None, fakes=None, max_steps=8_000_000):
                 a=machine.cpu.reg.read(0), sent=sent,
                 registered=CH_BIOS2 in machine.io_controller.channels,
                 at_bios2=bytes(mem[BIOS2_LOAD_ADDR:BIOS2_LOAD_ADDR + len(bios2 or b"")]),
-                at_program=bytes(mem[PROGRAM_LOAD_ADDR:PROGRAM_LOAD_ADDR + len(program or b"")]))
+                at_program=bytes(mem[PROGRAM_LOAD_ADDR:PROGRAM_LOAD_ADDR + len(program or b"")]),
+                serial=machine.debug.since(0).data)
         finally:
             machine.close()
 
@@ -221,6 +222,17 @@ def test_a_bios2_that_cannot_be_trusted_falls_back_to_channel_1(label, fake, sen
     r = boot(program=program, bios2=image(10, STAGE2), fakes={CH_BIOS2: fake})
     assert r.a == PROGRAM, f"{label}: A={r.a:#x}, want {PROGRAM:#x}"
     assert r.sent == sent, f"{label}: channel 7 got {r.sent}, want {sent}"
+    assert r.serial == b"", f"{label}: stage 1 said {r.serial!r} for a bios2 it didn't run"
+
+
+def test_stage_1_says_on_the_debug_port_that_it_hands_over_to_bios2():
+    """docs/phase5b_plan.md step 1: the one line a kilobyte has room for,
+    taken by WRITE_DMA straight from the BIOS's own bytes. Without a bios2
+    the BIOS boots channel 1 as before, and says nothing."""
+    r = boot(bios2=image(10, STAGE2))
+    assert r.a == STAGE2 and r.serial == b"[bios] bios2\n", r.serial
+    r = boot(program=image(10, PROGRAM))
+    assert r.a == PROGRAM and r.serial == b"", r.serial
 
 
 def test_the_bios_still_fits_in_its_kilobyte():
@@ -518,6 +530,105 @@ def test_a_program_that_arrives_short_is_not_run_and_the_menu_says_so(label, fak
                      keys=[ENTER]) as p:
         assert p.run_until(status_is("Program: load failed")), f"{label}: {p.rows()}"
         assert not p.run(300_000), f"{label}: halted -- the program ran"
+
+
+# --- bios2 on the debug port: docs/phase5b_plan.md step 2 -------------------------
+
+def serial(p):
+    """What stage 1 and bios2 wrote to the debug port, a line each."""
+    return p.machine.debug.since(0).data.decode().splitlines()
+
+
+COUNTING = f"[bios2] counting down {COUNTDOWN_MS // 1000} s to"
+
+
+def test_bios2_logs_the_devices_the_countdown_and_the_hand_over():
+    with tempfile.TemporaryDirectory() as t, \
+            power_on(t, program=image(100, PROGRAM), keys=[ENTER]) as p:
+        assert p.run() and p.a == PROGRAM, "never booted"
+        assert serial(p) == [
+            "[bios] bios2",
+            "[bios2] Program: 816 bytes, bootable",
+            "[bios2] Hard disk: no boot sector",
+            "[bios2] CD: no disc",
+            f"{COUNTING} Program",
+            "[bios2] Enter: booting Program",
+            "[bios2] Program: 816 bytes, at 0x00020000",
+        ], serial(p)
+
+
+def test_the_countdown_running_out_is_logged_as_time():
+    with tempfile.TemporaryDirectory() as t, power_on(t, program=image(10, PROGRAM)) as p:
+        assert p.run() and p.a == PROGRAM, "never booted"
+        assert serial(p)[-3:] == [f"{COUNTING} Program", "[bios2] time: booting Program",
+                                  "[bios2] Program: 96 bytes, at 0x00020000"], serial(p)
+
+
+def test_esc_the_menu_and_its_choice_are_logged():
+    with tempfile.TemporaryDirectory() as t:
+        disk = bootable_image(Path(t) / "disk.img")
+        with power_on(t, program=image(10, PROGRAM), disk=disk, keys=[ESC]) as p:
+            assert p.run_until(lambda rows: rows[R_STATUS] == "BOOT MENU"), p.rows()
+            assert not p.press(DOWN)
+            assert p.press(ENTER) and p.a == SECTOR + CH_HDD, "the disk did not boot"
+            assert serial(p) == [
+                "[bios] bios2",
+                "[bios2] Program: 96 bytes, bootable",
+                "[bios2] Hard disk: PIGEONOS, bootable",
+                "[bios2] CD: no disc",
+                f"{COUNTING} Program",
+                "[bios2] Esc: the menu",
+                "[bios2] menu: Hard disk",
+                "[bios2] Hard disk: its boot sector, at 0x00015898",
+            ], serial(p)
+
+
+def test_a_disc_counted_down_to_is_logged_with_its_label():
+    with tempfile.TemporaryDirectory() as t:
+        disc = bootable_image(Path(t) / "disc.img", label="INSTALL")
+        with power_on(t, disc=disc, keys=[ENTER]) as p:
+            assert p.run() and p.a == SECTOR + CH_CD, "the disc did not boot"
+            assert serial(p)[1:] == [
+                "[bios2] Program: none",
+                "[bios2] Hard disk: no boot sector",
+                "[bios2] CD: INSTALL, bootable",
+                f"{COUNTING} CD",
+                "[bios2] Enter: booting CD",
+                "[bios2] CD: its boot sector, at 0x00015898",
+            ], serial(p)
+
+
+def test_a_boot_that_fails_says_why_and_the_devices_are_checked_again():
+    with tempfile.TemporaryDirectory() as t, \
+            power_on(t, program=image(10, PROGRAM), fakes={CH_USERPROG: reports_moved(lambda n: n - 4)},
+                     keys=[ENTER]) as p:
+        assert p.run_until(status_is("Program: load failed")), p.rows()
+        assert serial(p)[5:] == [
+            "[bios2] Enter: booting Program",
+            "[bios2] Program: load failed",
+            "[bios2] Program: 96 bytes, bootable",
+            "[bios2] Hard disk: no boot sector",
+            "[bios2] CD: no disc",
+        ], serial(p)
+
+
+def test_nothing_to_boot_and_a_device_that_cannot_boot_are_logged():
+    with tempfile.TemporaryDirectory() as t, power_on(t, keys=[ENTER]) as p:
+        assert p.run_until(status_is("Program: can't boot")), p.rows()
+        assert serial(p)[4:] == ["[bios2] nothing to boot: the menu", "[bios2] menu: Program",
+                                 "[bios2] Program: can't boot"], serial(p)
+
+
+def test_a_disc_going_in_is_logged_when_the_menu_notices():
+    with tempfile.TemporaryDirectory() as t:
+        disc = bootable_image(Path(t) / "disc.img", label="INSTALL")
+        with power_on(t) as p:
+            assert p.run_until(status_is("Nothing to boot")), p.rows()
+            before = len(serial(p))
+            p.machine.cd.root = None
+            p.machine.cd.insert(disc)
+            assert p.run_until(lambda rows: rows[R_CD] == "> CD         INSTALL"), p.rows()
+            assert serial(p)[before:] == ["[bios2] CD: INSTALL, bootable"], serial(p)
 
 
 # --- the firmware device -------------------------------------------------------

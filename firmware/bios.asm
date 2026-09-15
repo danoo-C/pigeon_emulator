@@ -51,6 +51,7 @@ IO_PROG_CHANEL = CH_USERPROG
 HDD_GET_SIZE = 1
 HDD_READ = 2
 HDD_READ_DMA = 6
+DEBUG_WRITE_DMA = 2                 ; CH_DEBUG's, emulator/devices/debug_port.py
 
 ; BIOS scratch, in the heap region. The CPU has six registers and the
 ; copy loop needs five, so the loop counters that must survive a chunk
@@ -98,6 +99,19 @@ START:
     MRW B A                         ; bytes moved, or 0xFFFFFFFF if refused
     CMP B C
     JNZ LOAD_PROGRAM                ; short or refused: don't run half of it
+
+    ; Say so on the debug port (docs/phase5b_plan.md step 1). WRITE_DMA
+    ; takes the text straight out of this ROM: R/W is still 0 and LENGTH
+    ; still 8 from the READ_DMA, and A still points at the window. Nothing
+    ; to check -- a machine without the port answers 0xFFFFFFFF, and bios2
+    ; runs the same either way.
+    MWW A #BIOS2_MESSAGE
+    ADD A A #4
+    MWW A #13                       ; the text's length
+    MOV A #IO_POINTER + #IO_COMMAND
+    MWW A #DEBUG_WRITE_DMA
+    MOV A #IO_POINTER
+    MWW A #CH_DEBUG                 ; fire it
     JMP #BIOS2_LOAD_ADDR
 
 ; -------------------------------------------------------------- program
@@ -228,3 +242,9 @@ CLEAR_L:
     JNZ CLEAR_L
 
     JMP #PROGRAM_LOAD_ADDR
+
+; ----------------------------------------------------------------- text
+; After the last instruction, so it is never run. With it the BIOS is 1,013
+; of its 1,024 bytes.
+BIOS2_MESSAGE:
+    .ascii "[bios] bios2\n"

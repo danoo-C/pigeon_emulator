@@ -44,6 +44,12 @@ DISC = build_disc(read_project(EXAMPLE), Path(_BUILD.name) / "pigeonos.img",
                   Path(_BUILD.name) / "build", quiet)
 
 
+def serial(p, prefix=""):
+    """The lines on the debug port that start with `prefix`."""
+    return [line for line in p.machine.debug.since(0).data.decode().splitlines()
+            if line.startswith(prefix)]
+
+
 def keys_row(text):
     return lambda rows: rows[11] == text
 
@@ -89,6 +95,22 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_she
             assert disk.read_bytes()[BOOT_CODE:BOOT_BLOCK] == \
                 DISC.read_bytes()[BOOT_CODE:BOOT_BLOCK], "not the disc's boot sector"
 
+            # what it said on the debug port (docs/phase5b_plan.md step 3)
+            said = serial(p, "[installer]")
+            assert said[:5] == [
+                "[installer] disc on channel 6: PigeonOS 0.1",
+                "[installer] hard disk: 4096 K",
+                f"[installer] {len(INSTALLED)} files to copy; /boot.bin will boot",
+                "[installer] Enter: installing",
+                "[installer] formatting the hard disk as PIGEONOS",
+            ], said
+            copied = [line.removeprefix("[installer] copying ") for line in said[5:-2]]
+            assert copied[0] == "/boot.bin" and sorted(copied) == sorted(INSTALLED), said
+            assert said[-2:] == [
+                f"[installer] boot record: /boot.bin, block {boot.first}, {boot.size} bytes",
+                f"[installer] installed {len(INSTALLED)} files; Enter restarts",
+            ], said
+
             # restart: bios2 again, and the hard disk now comes first
             p.key(ENTER)
             assert p.run_until(lambda rows: rows[4] == "  Hard disk  PIGEONOS"
@@ -109,6 +131,13 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_she
             # first, then its first, which starts with a blank line
             shell = Console.on(p.machine)
             assert shell.ready(), shell.rows()
+            everything = serial(p)
+            assert everything.count("[bios] bios2") == 2 and "[installer] restarting" in everything
+            assert serial(p, "[kernel]")[:3] == [
+                f"[kernel] started, {len(kernel)} bytes at 0x00020000",
+                "[kernel] mounted channel 2, PIGEONOS",
+                "[kernel] exec /bin/sh.bin at 0x01000000, depth 1",
+            ], everything
             assert shell.rows()[:3] == ["PigeonOS", "|-(PGS)-[2:/]-(0)", "|-> _"], shell.rows()
             fb = p.machine.display_io.snapshot()
             for col, ink in ((0, GREEN), (3, BLUE), (9, INK), (15, WHITE)):    # ``CSTATUS``: 0 in white
@@ -136,6 +165,9 @@ def test_esc_cancels_and_leaves_the_hard_disk_as_it_was():
             p.key(ESC)
             assert p.run(steps=3_000_000), "the installer did not stop"
             assert p.rows()[9] == "Cancelled: nothing was changed.", p.rows()
+            said = serial(p, "[installer]")
+            assert said[-1] == "[installer] Esc: cancelled, nothing written", said
+            assert not any("formatting" in line or "copying" in line for line in said), said
         assert disk.read_bytes() == before, "cancelling changed the hard disk"
 
 
@@ -151,6 +183,10 @@ def test_a_hard_disk_too_small_is_reported():
             p.key(ENTER)
             assert p.run(steps=80_000_000), f"the installer did not stop: {p.rows()}"
             assert p.rows()[9] == "The install failed:", p.rows()
+            said = serial(p, "[installer]")
+            assert said[-1] == f"[installer] failed: {p.rows()[10]}", said
+            assert said[-2].endswith(f": {p.rows()[10]}") and said[-2].split()[1].startswith("/"), \
+                "the file that didn't fit is not named"
 
 
 if __name__ == "__main__":
