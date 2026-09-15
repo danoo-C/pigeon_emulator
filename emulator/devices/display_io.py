@@ -51,6 +51,7 @@ from typing import Optional
 from ..memory_map import (
     DISPLAY_START, DISPLAY_SIZE, DISPLAY_W, DISPLAY_H, IO_START, IOHeader, PROGRAM_LOAD_ADDR,
 )
+from .debug_port import serial_reply
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +100,9 @@ class DisplayIO:
         # Both are set by Machine.start_servers, so config.json stays the
         # single source of truth for ports and index.html hardcodes none.
         self.cd_url: Optional[str] = None
+        # The debug port /serial reads, set there too: the page polls it on
+        # its own origin (docs/phase5_plan.md §4.4).
+        self.debug_port = None
 
     # --- the framebuffer ---------------------------------------------------
 
@@ -255,7 +259,7 @@ class DisplayIO:
         # the daemon thread below is swallowed, leaving the emulator running
         # with no display and no explanation.
         try:
-            from fastapi import FastAPI, Response
+            from fastapi import FastAPI, Query, Response
             from fastapi.responses import HTMLResponse
             from fastapi.middleware.cors import CORSMiddleware
             import uvicorn
@@ -287,6 +291,10 @@ class DisplayIO:
                 return {"w": DISPLAY_W, "h": DISPLAY_H, "size": self.display_size,
                         "scanout": self.scanout_base, "hid_url": self.hid_url,
                         "cd_url": self.cd_url}
+
+            @app.get("/serial")
+            async def serial(offset: int = Query(0, alias="from")):
+                return serial_reply(self.debug_port, offset)
 
             if serve_frontend:
                 @app.get("/", response_class=HTMLResponse)

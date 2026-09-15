@@ -113,6 +113,9 @@ transaction, disk read and key event), `--headless` (bind no ports) and
 `--disasm-bios`. `--bios2 PATH` boots through a second-stage BIOS other than
 the one the launcher builds, used as it is ([docs/os_cd.md](docs/os_cd.md)).
 `--cd PATH` puts a disc in the CD drive before power-on, so bios2 can boot it.
+`--serial` prints what the machine writes to its debug port in this terminal,
+each line with the time since power-on, and `--serial-log PATH` writes the same
+lines to a file, started fresh each run ([docs/phase5_plan.md](docs/phase5_plan.md)).
 
 An installation disc is a project file away:
 
@@ -172,6 +175,8 @@ partial or missing file is fine.
 | `cd_upload_dir` | where a browser upload is written before it is inserted. Keep it inside `cd_dirs`, or an uploaded disc will not appear in the picker afterwards |
 | `cd_max_upload` | the ceiling on an upload — the one path here that writes to the host disk. `"64M"`, `"512K"` or a byte count |
 | `cd` | a disc to put in the drive before the machine starts, so bios2 can boot it: a path, or `null` for an empty drive. `--cd PATH` is the same for one run ([docs/os_cd.md](docs/os_cd.md)) |
+| `serial` | print what the machine writes to its debug port, IO channel 8, in the launcher's terminal, each line with the time since power-on. `--serial` is the same for one run ([docs/phase5_plan.md](docs/phase5_plan.md)) |
+| `serial_log` | a file to write those lines to as well, started fresh each run with its date and time as the first line: a path, or `null` for none. `--serial-log PATH` is the same for one run |
 
 Relative paths are resolved against the repo root, so the file means the same
 thing whichever directory you run from. A malformed value is reported with the
@@ -368,6 +373,7 @@ that fires the command.
 | 5 `CH_DISPLAY` | framebuffer | `1` INFO → `(w, h, size)` `2` SET_BASE (page flip, ADDRESS = the buffer to scan out) `3` GET_BASE `4` FILL (ADDRESS = destination, colour in the data window) `5` COPY (ADDRESS = a buffer, `[to, from, count]` offsets in the data window, R/W 0 so 1 moved or 0 refused comes back) |
 | 6 `CH_CD` | removable disc | `0`-`5` as HDD, but **read-only**: WRITE and TRUNCATE are refused · `8` MEDIA → `(magic, present, generation, size, name[32])` · `9` EJECT → `(ejected, generation)` |
 | 7 `CH_BIOS2` | firmware | the second-stage BIOS ([docs/os_cd.md](docs/os_cd.md)). As HDD, but **read-only**: WRITE, TRUNCATE and anything sent with R/W 1 get 0 bytes, WRITE_DMA gets `0xFFFFFFFF`. Registered only when there is a bios2; `fs.c` and `cd.c` never send it anything |
+| 8 `CH_DEBUG` | debug port | **write-only**, and never on the screen: `0` NOP → 4 zero bytes · `1` WRITE, R/W 1: the text in the window, up to 4 KB, and RETURN_DATA is the bytes taken · `2` WRITE_DMA, R/W 0: `[address, count]` in the window, anywhere in RAM, up to 64 KB, and the count or `0xFFFFFFFF` comes back. The host keeps the last 64 KB, with the time each line started, for `--serial`, `--serial-log` and `GET /serial` ([docs/phase5_plan.md](docs/phase5_plan.md)) |
 
 Input comes in **two buffers**, because guest code asks two different questions.
 The FIFOs answer *"what happened, in order"* — a key pressed and released

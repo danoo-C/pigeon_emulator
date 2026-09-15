@@ -15,13 +15,14 @@ from .bios import BIOS
 from .cpu import _HANDLERS, _UNPACK, CPU
 from .instruction_set import INSTR_SIZE
 from .devices.cd import CD
+from .devices.debug_port import DebugPort
 from .devices.display_io import DisplayIO
 from .devices.hdd import HDD
 from .devices.hid import HID
 from .devices.timer import Timer
 from .io_controller import IOChannel, IOController
 from .memory_map import (
-    BIOS2_MAX, CH_BIOS2, CH_CD, CH_DISPLAY, CH_HDD, CH_HID, CH_TIMER, CH_USERPROG,
+    BIOS2_MAX, CH_BIOS2, CH_CD, CH_DEBUG, CH_DISPLAY, CH_HDD, CH_HID, CH_TIMER, CH_USERPROG,
     RAM_SIZE, REGISTER_COUNT, VEC_BREAK, VEC_TIMER,
 )
 from .ram import RAM
@@ -78,12 +79,17 @@ class Machine:
         # the bus now (scanout base, framebuffer fill), not only the thing
         # that serves frames over HTTP.
         self.display_io = DisplayIO(self.ram)
+        # The debug port, always there as the CD drive is: a program asks
+        # it once whether it exists, and <pigeon/debug.h> answers -1 at
+        # once on a machine without it (docs/phase5_plan.md §4.1).
+        self.debug = DebugPort(self.ram)
         for channel_id, device, name in (
             (CH_HDD, self.hdd, "HDD"),
             (CH_HID, self.hid, "HID"),
             (CH_TIMER, self.timer, "TIMER"),
             (CH_DISPLAY, self.display_io, "DISPLAY"),
             (CH_CD, self.cd, "CD"),
+            (CH_DEBUG, self.debug, "DEBUG"),
         ):
             self.io_controller.register_channel(
                 channel_id, IOChannel(device.callback, name=name))
@@ -129,6 +135,7 @@ class Machine:
         network."""
         self.display_io.hid_url = f"http://{host}:{hid_port}"
         self.display_io.cd_url = f"http://{host}:{cd_port}"
+        self.display_io.debug_port = self.debug
         self.display_io.start_fastapi(host=host, port=display_port)
         # The browser front end is served from the display port and posts
         # input to the HID port, so the display origin has to be on the HID

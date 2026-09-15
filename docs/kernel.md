@@ -1305,10 +1305,13 @@ form.
      - the pygame client sending a press without where it was.
    - **The full suite passes: 1,284 tests**, the 1,262 from before and 22
      new.
-5. **A boot screen and a startup script,** from `/etc/boot.conf`
+5. **The serial debug port,** with a panel beside the screen, and boot and
+   `exec` logged to it ([phase5_plan.md](phase5_plan.md)). Swapped with the
+   boot screen. ***Part 5a is built:*** the port on IO channel 8,
+   `<pigeon/debug.h>`, `printf` with no kernel writing to it, `--serial`,
+   `--serial-log` and `/serial`.
+6. **A boot screen and a startup script,** from `/etc/boot.conf`
    ([phase4_plan.md §11](phase4_plan.md#11-later-phases)).
-6. **The serial debug port,** with a panel beside the screen (the same
-   section).
 7. **The launcher, `config.json`, and the docs.**
 
 Also done, out of order: ~~**the sector-booting BIOS, stage 1, and `pfs.py

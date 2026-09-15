@@ -607,7 +607,11 @@ each gets a plan like this one when its turn comes. kernel.md §17 numbers
 the older items differently (its item 5, booting from disk, is done), and
 step 11 renumbers that list to match this one.
 
-### Phase 5: a boot screen and a startup script
+**Renumbered on 2026-09-15:** the serial debug port became phase 5, planned
+in full in [phase5_plan.md](phase5_plan.md), and the boot screen and startup
+script phase 6.
+
+### Phase 6: a boot screen and a startup script
 
 **`/etc/boot.conf`**, read by the kernel at boot if it's there:
 
@@ -660,7 +664,7 @@ cd /docs
 - **A line that fails is reported, and the rest still run.** `#` starts a
   comment.
 
-### Phase 6: the serial debug port, and a panel for it
+### Phase 5: the serial debug port, and a panel for it
 
 Your idea: the machine's serial line, shown in a panel on the left of the
 display, **closable and expandable, like VS Code's explorer panel.**
@@ -698,7 +702,7 @@ program ever wants to read the serial line.
 
 ### Phase 7: the launcher
 
-kernel.md §17's item 6. For example `python3 start_emulator.py pigeonos`:
+kernel.md §17's item 7. For example `python3 start_emulator.py pigeonos`:
 it rebuilds the disc if it's out of date, installs it onto a disk image if
 the disk has no system yet, and boots the installed disk.
 

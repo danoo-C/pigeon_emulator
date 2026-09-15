@@ -71,6 +71,14 @@ DEFAULTS = {
     # it at power-on (docs/os_cd.md): a path, or null for an empty drive.
     # --cd PATH does the same for one run.
     "cd": None,
+
+    # --- the debug port (docs/phase5_plan.md) ---
+    # Print what the machine writes to its debug port in this terminal, each
+    # line with the time since power-on. --serial does the same for one run.
+    "serial": False,
+    # A file to write those lines to as well, started fresh each run: a
+    # path, or null for none. --serial-log PATH does the same for one run.
+    "serial_log": None,
 }
 
 
@@ -97,6 +105,8 @@ class Config:
     bios2_source: Path
     bios2_binary: Path
     auto_build: bool
+    serial: bool = False
+    serial_log: Optional[Path] = None
     source_path: Optional[Path] = None   # which config.json this came from
     unknown_keys: List[str] = field(default_factory=list)
 
@@ -117,7 +127,7 @@ class Config:
         given = {k: v for k, v in kwargs.items() if v is not None}
         for key in ("program_dirs", "build_dir", "disk", "bios_source", "bios_binary",
                     "bios2_source", "bios2_binary", "cd_dirs", "cd_upload_dir",
-                    "cd_root", "cd"):
+                    "cd_root", "cd", "serial_log"):
             if key in given:
                 given[key] = ([_resolve(p) for p in given[key]]
                               if key in ("program_dirs", "cd_dirs")
@@ -220,6 +230,12 @@ def load_config(path: Optional[Path] = None) -> Config:
     if cd_root is not None and not isinstance(cd_root, str):
         raise ConfigError("cd_root must be a folder name, or null for anywhere -- "
                           f"got {cd_root!r}")
+    if not isinstance(settings["serial"], bool):
+        raise ConfigError(f"serial must be true or false, got {settings['serial']!r}")
+    serial_log = settings["serial_log"]
+    if serial_log is not None and not isinstance(serial_log, str):
+        raise ConfigError("serial_log must be the path of a file to write, or null for "
+                          f"none -- got {serial_log!r}")
     disc = settings["cd"]
     if disc is not None and not isinstance(disc, str):
         raise ConfigError("cd must be the path of a disc image, or null for an empty "
@@ -243,6 +259,8 @@ def load_config(path: Optional[Path] = None) -> Config:
         bios2_source=_resolve(settings["bios2_source"]),
         bios2_binary=_resolve(settings["bios2_binary"]),
         auto_build=bool(settings["auto_build"]),
+        serial=settings["serial"],
+        serial_log=None if serial_log is None else _resolve(serial_log),
         source_path=path if path.exists() else None,
         unknown_keys=unknown,
     )

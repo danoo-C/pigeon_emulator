@@ -162,9 +162,13 @@ Decided 2026-09-14, left to me. Each is recorded where the question was asked.
    ([phase4b_plan.md](phase4b_plan.md)): fast scrolling, line editing and
    history, Tab completion, scrollback with the mouse wheel, break per
    program, `more`, and `edit`, a mini nano.
-5. **A boot screen and a startup script,** from `/etc/boot.conf`.
-6. **The serial debug port,** with a panel beside the screen.
+5. **The serial debug port,** with a panel beside the screen, and boot and
+   `exec` logged to it ([phase5_plan.md](phase5_plan.md)). Part 5a is built:
+   the port, `<pigeon/debug.h>`, `printf` with no kernel writing to it,
+   `--serial`, `--serial-log` and `/serial`.
+6. **A boot screen and a startup script,** from `/etc/boot.conf`.
 7. **The launcher.**
 
-Phases 5 to 7 are sketched in [phase4_plan.md §11](phase4_plan.md#11-later-phases).
+Phases 6 and 7 are sketched in [phase4_plan.md §11](phase4_plan.md#11-later-phases),
+which numbered the first two the other way round.
 Multitasking stays optional.

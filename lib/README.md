@@ -1,15 +1,16 @@
 # The C libraries
 
-Ten headers, compiled by `pigeon-cc` and covered by execution tests in
+Eleven headers, compiled by `pigeon-cc` and covered by execution tests in
 `tests/test_libs.py`, `tests/test_fs.py`, `tests/test_cdlib.py`, `tests/test_stdio.py`,
-`tests/test_compiler.py` and `tests/test_kernel.py`. Every test compiles the C and
+`tests/test_debug_port.py`, `tests/test_compiler.py` and `tests/test_kernel.py`. Every test compiles the C and
 *runs* it.
 
 | Header | What it gives you |
 |---|---|
 | `<pigeon/mem.h>` | `memcpy` `memmove` `memset` `memcmp`, `malloc` `calloc` `free`, `heap_used` |
 | `<pigeon/string.h>` | `strlen` `strcmp` `strlcpy` `strlcat` `strchr` …, numbers as text (`utoa` `itoa` `strtou` `atoi`), `isdigit` and friends |
-| `<pigeon/stdio.h>` | `snprintf` `vsnprintf`, and through the kernel `printf` `vprintf` `puts` `putchar` |
+| `<pigeon/stdio.h>` | `snprintf` `vsnprintf`, and `printf` `vprintf` `puts` `putchar`: through the kernel, or with no kernel to the debug port |
+| `<pigeon/debug.h>` | `dbg_write` `dbg_print` `dbg_printf`: lines to the debug port, which never reach the screen |
 | `<pigeon/stdarg.h>` | `va_list` `va_start` `va_arg` `va_copy` `va_end`, for a function of your own that takes `...` |
 | `<pigeon/fs.h>` | files and directories on the HDD channels: `fs_open`/`read`/`write`/`seek`, `fs_mkdir`/`readdir`/`rename`, `fs_load`/`fs_save`, a current directory |
 | `<pigeon/cd.h>` | the CD drive: `cd_info`, `cd_read`, `cd_has_fs`/`cd_label` for a disc that carries a filesystem, `cd_save` to copy a disc onto the current volume, and `cd_eject` |
@@ -296,11 +297,12 @@ n = snprintf(line, sizeof(line), "%-12s %5u", name, size);
 ```
 
 **`snprintf` and `vsnprintf` work in any program.** `printf`, `vprintf`,
-`puts` and `putchar` write to `STDOUT` through the kernel, so only a program
-the kernel runs prints with them. **Without a kernel they print nothing and
-return -1:** they find `write`'s slot in the system-call table holding 0, and
-never call through it to address 0. A program with no kernel formats with
-`snprintf` and draws the text where it likes, with `disp_text`.
+`puts` and `putchar` write to `STDOUT` through the kernel. **Without a kernel
+they write to the debug port** ([debug](#debug), below): they find `write`'s
+slot in the system-call table holding 0, never call through it to address 0,
+and send the text to the port instead. They return -1 only when there's no
+port either, as on a bare CPU. To put text on the screen with no kernel, a
+program formats with `snprintf` and draws it where it likes, with `disp_text`.
 
 **`snprintf` returns the length it wanted,** as C's does, and always
 terminates what it kept, so a result `>= size` means the text was cut short.
@@ -315,8 +317,37 @@ error.
 them each time they fill.
 
 **Each program carries its own copy,** with `string.c`, since there is no
-shared library: `mkdir.bin`, which uses `printf`, is 26,392 bytes, and
-`clear.bin`, which only calls `print`, is 5,872.
+shared library: `mkdir.bin`, which uses `printf`, is 30,712 bytes, `debug.c`
+included, and `clear.bin`, which only calls `print`, is 6,576.
+
+## debug
+
+Lines to the debug port, IO channel 8, which never reach the machine's
+screen. The host shows them in the launcher's terminal with `--serial`, in a
+file with `--serial-log PATH`, and in the front ends' Serial panel, each with
+the time since power-on ([docs/phase5_plan.md](../docs/phase5_plan.md)).
+
+```c
+dbg_print("[demo] started\n");
+dbg_printf("[demo] %d files in %s\n", count, dir);
+```
+
+**It works in any program,** the kernel and bios2 included. The first call
+asks whether there's a port, as `display.c` asks about the display. On a bare
+CPU, or a machine without the port, every call returns -1 at once, and
+`dbg_printf` doesn't format.
+
+**The library adds nothing to a line:** no prefix and no time. A program says
+who it is itself, as in `[demo] ` above.
+
+**`dbg_printf` formats straight into the IO data window,** so a line needs no
+buffer and is never copied: a 41-byte line costs 6,179 instructions and 232
+bytes of frame stack. So don't call it between firing a command and reading
+its reply. A line over 255 bytes is cut short. It uses `vsnprintf`, so it
+brings `stdio.c` and `sys.c` along.
+
+**`dbg_write` takes any length,** 4 KB at a time, and returns how many bytes
+the port took. With `n` 0 it only asks whether there's a port.
 
 ## stdarg
 

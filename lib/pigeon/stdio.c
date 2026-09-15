@@ -2,12 +2,14 @@
  *
  * One formatter does all of it, writing a character at a time to an
  * output: a buffer that keeps what fits, for snprintf, or a small chunk
- * flushed to STDOUT whenever it fills, for printf, so a long printf needs
- * no big buffer. Either way it counts every character it produced, which
+ * flushed whenever it fills, for printf -- to STDOUT through the kernel,
+ * or with no kernel to the debug port -- so a long printf needs no big
+ * buffer. Either way it counts every character it produced, which
  * is what snprintf returns when it had to cut.
  *
  * There is no switch in pigeon-cc, so the conversions are an if-chain.
  */
+#include <pigeon/debug.h>
 #include <pigeon/stdio.h>
 #include <pigeon/string.h>
 #include <pigeon/sys.h>
@@ -19,15 +21,21 @@ struct __stdio_out {
     unsigned size;      /* bytes in buf                                  */
     unsigned len;       /* characters produced, kept or not              */
     unsigned used;      /* printf: characters waiting in buf             */
-    int console;        /* 1: flush buf to STDOUT as it fills            */
+    int console;        /* flush buf as it fills: 1 to STDOUT, 2 to the
+                           debug port; 0 keep it, for snprintf           */
 };
+
+static void __stdio_send(struct __stdio_out *o) {
+    if (o->console == 1) write(STDOUT, o->buf, o->used);
+    else dbg_write(o->buf, o->used);
+}
 
 static void __stdio_put(struct __stdio_out *o, int c) {
     if (o->console) {
         o->buf[o->used] = (char)c;
         o->used++;
         if (o->used == o->size) {
-            write(STDOUT, o->buf, o->used);
+            __stdio_send(o);
             o->used = 0u;
         }
     } else if (o->len + 1u < o->size) {
@@ -166,7 +174,9 @@ int snprintf(char *buf, unsigned size, char *format, ...) {
 }
 
 /* Whether a kernel filled in the system-call table: without one, write's
- * slot is 0, and calling through it would jump to address 0. */
+ * slot is 0, and calling through it would jump to address 0. Then the
+ * console calls write to the debug port instead, and return -1 only when
+ * there is none either. */
 static int __stdio_kernel(void) {
     return *(unsigned *)(SYSCALL_TABLE + SYS_WRITE * 4u) != 0u;
 }
@@ -174,14 +184,17 @@ static int __stdio_kernel(void) {
 int vprintf(char *format, va_list ap) {
     char chunk[STDIO_CHUNK];
     struct __stdio_out o;
-    if (!__stdio_kernel()) return -1;
+    o.console = 1;
+    if (!__stdio_kernel()) {
+        if (dbg_write(chunk, 0u) < 0) return -1;
+        o.console = 2;
+    }
     o.buf = chunk;
     o.size = STDIO_CHUNK;
     o.len = 0u;
     o.used = 0u;
-    o.console = 1;
     __stdio_format(&o, format, ap);
-    if (o.used > 0u) write(STDOUT, chunk, o.used);
+    if (o.used > 0u) __stdio_send(&o);
     return (int)o.len;
 }
 
@@ -195,7 +208,11 @@ int printf(char *format, ...) {
 }
 
 int puts(char *s) {
-    if (!__stdio_kernel()) return -1;
+    if (!__stdio_kernel()) {
+        if (dbg_print(s) < 0) return -1;
+        dbg_write("\n", 1u);
+        return 0;
+    }
     print(s);
     print("\n");
     return 0;
@@ -203,8 +220,11 @@ int puts(char *s) {
 
 int putchar(int c) {
     char one[1];
-    if (!__stdio_kernel()) return -1;
     one[0] = (char)c;
+    if (!__stdio_kernel()) {
+        if (dbg_write(one, 1u) < 0) return -1;
+        return c & 255;
+    }
     write(STDOUT, one, 1u);
     return c & 255;
 }

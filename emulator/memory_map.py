@@ -158,8 +158,9 @@ CH_TIMER    = 4   # wall-clock countdown timers
 CH_DISPLAY  = 5   # framebuffer: scanout base, block fill
 CH_CD       = 6   # removable read-only disc, swapped from the host
 CH_BIOS2    = 7   # read-only firmware: the second-stage BIOS (docs/os_cd.md)
-# 8 is free. <pigeon/cd.h> takes a channel, so a second drive is a
-# one-line change here and nowhere else.
+CH_DEBUG    = 8   # write-only debug port, shown as "Serial" (docs/phase5_plan.md)
+# <pigeon/cd.h> takes a channel, so a second drive is a one-line change
+# here and nowhere else.
 
 
 def symbols():

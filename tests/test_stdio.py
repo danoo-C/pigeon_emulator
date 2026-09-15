@@ -127,5 +127,27 @@ def test_with_no_kernel_printf_puts_and_putchar_return_minus_one():
     assert cpu.reg.read(0) == 111
 
 
+def test_with_no_kernel_on_a_machine_they_write_to_the_debug_port():
+    """docs/phase5_plan.md step 3: a Machine has the port, so printf, puts
+    and putchar reach it. The printf is longer than its 64-byte chunk, so
+    the formatter's own flush goes there too."""
+    from test_debug_port import guest
+    long_line = "a line longer than the sixty-four bytes printf keeps on its frame"
+    assert len(long_line) > 64
+    with guest(
+        "#include <pigeon/stdio.h>\n"
+        "int a; int b; int c;\n"
+        "int main(void) {\n"
+        f"    a = printf(\"%s, %d\\n\", \"{long_line}\", 42);\n"
+        "    b = puts(\"puts\");\n"
+        "    c = putchar('!');\n"
+        "    return 0;\n"
+        "}\n") as g:
+        g.run()
+        printed = f"{long_line}, 42\n"
+        assert g.text() == (printed + "puts\n!").encode()
+        assert (g.signed("a"), g.signed("b"), g.signed("c")) == (len(printed), 0, ord("!"))
+
+
 if __name__ == "__main__":
     raise SystemExit(run_module(dict(globals()), "printf and friends"))

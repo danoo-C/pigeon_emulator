@@ -5,9 +5,9 @@
  *
  * snprintf and vsnprintf format into a buffer, and work in any program.
  * printf, vprintf, puts and putchar write to STDOUT through the kernel
- * (<pigeon/sys.h>), so only a program the kernel runs prints with them.
- * With no kernel they print nothing and return -1, rather than calling
- * through an empty system-call table (docs/phase4_plan.md, step 2).
+ * (<pigeon/sys.h>). With no kernel they write to the debug port instead
+ * (<pigeon/debug.h>), never calling through the empty system-call table,
+ * and return -1 only when there is no port either (docs/phase5_plan.md).
  *
  * Conversions: %d %i %u %x %X %o %c %s %p %%, the flags '-' (to the left)
  * and '0' (zeros), a width, and for %s a precision: %.5s. No floating
