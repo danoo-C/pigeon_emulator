@@ -1,8 +1,8 @@
 # The C libraries
 
-Eleven headers, compiled by `pigeon-cc` and covered by execution tests in
+Twelve headers, compiled by `pigeon-cc` and covered by execution tests in
 `tests/test_libs.py`, `tests/test_fs.py`, `tests/test_cdlib.py`, `tests/test_stdio.py`,
-`tests/test_debug_port.py`, `tests/test_compiler.py` and `tests/test_kernel.py`. Every test compiles the C and
+`tests/test_debug_port.py`, `tests/test_bmp.py`, `tests/test_compiler.py` and `tests/test_kernel.py`. Every test compiles the C and
 *runs* it.
 
 | Header | What it gives you |
@@ -15,6 +15,7 @@ Eleven headers, compiled by `pigeon-cc` and covered by execution tests in
 | `<pigeon/fs.h>` | files and directories on the HDD channels: `fs_open`/`read`/`write`/`seek`, `fs_mkdir`/`readdir`/`rename`, `fs_load`/`fs_save`, a current directory |
 | `<pigeon/cd.h>` | the CD drive: `cd_info`, `cd_read`, `cd_has_fs`/`cd_label` for a disc that carries a filesystem, `cd_save` to copy a disc onto the current volume, and `cd_eject` |
 | `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped — and `disp_scroll` |
+| `<pigeon/bmp.h>` | `bmp_load` `bmp_decode` `bmp_info`: 24- and 32-bit BMP images, cropped or stretched to the size asked for, in the screen's own pixels |
 | `<pigeon/input.h>` | mouse position/buttons/edges and wheel notches, keyboard characters, key edges, held-key state |
 | `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
 | `<pigeon/sys.h>` | for a program the kernel runs: `write` `read` `open` `close`, `opendir` `readdir` `stat`, `mkdir` `rmdir` `remove` `rename`, `chdir` `getcwd`, `exec` `exit` `getkey`, `setcomplete` `setbreak` `paging`, `print`, `sys_strerror` |
@@ -93,6 +94,47 @@ and clears the rows left behind: a console's scroll. The display device's
 so a whole screen scrolls in 7,121 instructions. Without the device it falls
 back to `memmove`, which took 674,955 (both measured; docs/phase4b_plan.md
 step 1).
+
+## bmp
+
+24- and 32-bit BMP images, decoded to the screen's own pixels at the size
+asked for ([docs/bmp_plan.md](../docs/bmp_plan.md)).
+
+```c
+unsigned *pixels = bmp_load("/etc/bmp/pigeon.bmp", DISP_W, DISP_H, BMP_CROP);
+if (pixels == NULL) {
+    print(bmp_strerror(bmp_error()));
+    return 1;
+}
+memcpy((void *)DISP_BASE, pixels, DISP_W * DISP_H * 4u);
+free(pixels);
+```
+
+**What comes back** is `w × h` words from `malloc`, row by row from the top
+left, each `0xFFRRGGBB`: the screen's own format, so a screenful copies
+straight in. Free it when done. It's `unsigned *`, the same bits as
+`color_t`, so `bmp.h` doesn't bring the display library along.
+
+**Three modes:** `BMP_CROP`, the middle of the image at its own size;
+`BMP_CROP_TOP_LEFT`, its top-left corner; and `BMP_STRETCH`, all of it scaled
+to `w × h` with the nearest pixel, not keeping the aspect. Where a cropped
+image is smaller than `w × h`, the rest is black.
+
+**Files:** 24- and 32-bit uncompressed BMPs, stored bottom-up or top-down,
+and 32-bit ones saved with the usual bit fields. A 32-bit file's alpha is
+dropped. Images up to 8,192 × 8,192, results up to 4,096 × 4,096.
+
+**`bmp_load` and `bmp_info` read through the kernel.** With no kernel they
+fail with `BMP_ENOKERNEL`, and a program loads the file itself with
+`fs_load_alloc` and hands it to `bmp_decode`. `bmp_info` gives an image's own
+width and height without decoding it.
+
+**A failure** is `NULL`, or a negative from `bmp_info`, and `bmp_error()` says
+why; `bmp_strerror` names a file error as `sys_strerror` does.
+
+**About 42 instructions a pixel:** each pixel is read as one word, since a
+BMP's B, G, R bytes are already `0x..RRGGBB` read that way. A screen is under
+900,000 instructions, plus reading the file.
 
 ## input
 
