@@ -1,8 +1,10 @@
 # Phase 4: `printf`, a fuller shell, and tools for working with files
 
-> **Status: final plan, 2026-09-15. 4a is built** (§4): steps 1, 2, 3, 5,
-> 6, 7 and 10, with step 11 for them, as kernel.md §17 records. **4b is
-> next:** steps 4, 8 and 9, planned in detail in
+> **Status: built, 2026-09-15.** Every step is done: 4a first, then 4b,
+> as [phase4b_plan.md](phase4b_plan.md) planned it. The plan as it stood
+> when 4a was built follows. **4a was built** (§4): steps 1, 2, 3, 5,
+> 6, 7 and 10, with step 11 for them, as kernel.md §17 records; 4b,
+> steps 4, 8 and 9, followed, planned in detail in
 > [phase4b_plan.md](phase4b_plan.md). The stage after
 > [kernel.md](kernel.md)'s phase 3, which built the kernel, its console, a
 > simple shell, and `ls`, `cat` and `echo`. It follows kernel.md §17's

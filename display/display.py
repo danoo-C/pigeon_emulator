@@ -407,6 +407,18 @@ class DisplayClient:
         except Exception:
             self._set_hid_connected(False)
 
+    def _forward_press(self, event):
+        """A press on the screen, to HID: where the pointer is, then the
+        button, as the browser sends them. Positions otherwise go out at most
+        MOUSE_POS_RATE_LIMIT times a second, so a quick click could be read
+        where the pointer was a moment before -- which for edit's click is
+        another character (docs/phase4b_plan.md step 7)."""
+        hid_button = MOUSE_BUTTON_MAP.get(event.button)
+        if hid_button is None:
+            return
+        self._send_mouse_pos(*event.pos)
+        self._send_mouse_button(hid_button, True)
+
     def _send_key(self, key_code: int, pressed: bool = True):
         """Forward one key transition. `key_code` must already be a pigeon
         keycode -- see to_pigeon_key(); raw pygame codes are rejected by
@@ -753,9 +765,7 @@ class DisplayClient:
                                     break
                         self._toolbar_drag = True
                     else:
-                        hid_button = MOUSE_BUTTON_MAP.get(event.button)
-                        if hid_button is not None:
-                            self._send_mouse_button(hid_button, True)
+                        self._forward_press(event)
                 elif event.type == pygame.MOUSEBUTTONUP:
                     # Release the press we actually forwarded, and only that.
                     if self._toolbar_drag:

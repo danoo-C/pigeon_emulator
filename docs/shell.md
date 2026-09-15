@@ -141,7 +141,8 @@ as in your example is the ASCII version.
   python3 tools/pfs.py put --image disks/hdd.img shell_header.conf /etc/shell_header.conf
   ```
 
-- **On the machine itself:** not yet, as there is no text editor.
+- **On the machine itself:** `edit /etc/shell_header.conf`, save with ^O,
+  then `exit`, and the shell starts again with the new prompt (§7).
 
 ---
 
@@ -226,3 +227,43 @@ the bottom row and waits:
 The paging is the console's, not `more`'s, so it works for any command:
 `more` turns it on for itself and whatever it runs, and it ends when `more`
 ends.
+
+---
+
+## 7. Editing a file: `edit`
+
+*Built in phase 4b.3* ([phase4b_plan.md](phase4b_plan.md) step 7). A small
+nano, for the 32×12 screen:
+
+```
+ edit /etc/shell_header.conf    Modified     <- title bar
+"\n``GREEN``|-(``BLUE``PGS``GR...
+...                                          <- 9 rows of text
+      [ Wrote 2 lines ]                      <- messages
+^O Save ^X Exit ^K Cut ^W Find               <- shortcuts
+```
+
+| Key | Does |
+|---|---|
+| arrows, Home, End | move; Ctrl+A and Ctrl+E are Home and End |
+| PgUp, PgDn, or ^Y, ^V | a screen up or down |
+| Backspace, Delete, Enter, Tab | as you'd expect; Tab adds spaces to the next multiple of 4 |
+| ^O or ^S | save |
+| ^X | leave, asking `Save modified buffer? Y N` first if the text changed: Y saves, N doesn't, ^C stays |
+| ^K | cut the cursor's line; several ^K in a row gather the lines |
+| ^U | paste what was cut, above the cursor's line |
+| ^W | find: type the text, then Enter; it wraps round at the end; ^C cancels |
+| ^C | where the cursor is: `[ line 2 of 4, col 3 ]` |
+| ^G | the keys, until any key |
+| the mouse wheel | scroll the text |
+| a click | put the cursor there |
+
+- **Saving is safe:** it writes `FILE~` first, then puts it in the file's
+  place, so a full disk says `[ Not saved: disk full ]` and leaves the old
+  file as it was.
+- **A new name** is a new file, made on the first save.
+- **Refused:** a directory, a file over 64 KB, and a file holding a zero
+  byte, which isn't text.
+- **A line longer than the screen** moves sideways while the cursor is on
+  it, with `$` in its first cell.
+- **Leaving clears the screen,** and the prompt starts at the top.

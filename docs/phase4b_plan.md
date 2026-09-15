@@ -1,9 +1,9 @@
 # Phase 4b: line editing, Tab completion, scrollback, `more` and `edit`
 
 > **Status: final plan, 2026-09-15; every question is decided (§9 and §10).
-> 4b.1 and 4b.2 are built** (steps 1–6), as kernel.md §17 records, with
-> four corrections to this plan in [§11](#11-corrections-while-building).
-> **4b.3, `edit`, is next.** The second half of
+> 4b is built:** 4b.1 (steps 1–4), 4b.2 (steps 5 and 6) and 4b.3 (step
+> 7), as kernel.md §17 records, with five corrections to this plan in
+> [§11](#11-corrections-while-building). The second half of
 > [phase4_plan.md](phase4_plan.md) §4, its steps 4, 8 and 9, planned against
 > the code as 4a left it. What they do was decided there; this plan adds how,
 > one step phase 4 didn't foresee (step 1), and two things you added: Tab
@@ -580,3 +580,6 @@ Found while building 4b.1, on 2026-09-15:
    About 14 KB is history, scrollback and Tab's names, which live in the
    image as globals; the rest is the code for editing, Tab and looking back.
    At 204,316 bytes it is still far under the 1 MB the boot sector loads.
+5. **`edit` is 81,172 bytes, not 50–70 KB** (step 7's estimate). Its
+   drawing is within the plan: a key typed in the middle of a line costs
+   142,567 instructions *(measured)*, against §6's 160,000.

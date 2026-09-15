@@ -27,6 +27,7 @@ system    = kernel.c            # what the installed hard disk boots: the kernel
 /bin/cp.bin      = bin/cp.c
 /bin/clear.bin   = bin/clear.c
 /bin/more.bin    = bin/more.c
+/bin/edit.bin    = bin/edit.c
 /bin/graph.bin   = ../graph.c   # the graphing calculator; Esc goes back to the shell
 /bin/cube.bin    = ../cube.c
 /bin/files.bin   = ../files.c

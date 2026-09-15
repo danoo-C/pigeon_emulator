@@ -12,6 +12,7 @@ Try, at the prompt:
   cp /docs/readme.txt /notes
   cat /notes/readme.txt
   more ls -l /bin
+  edit /notes/readme.txt
   graph     (Esc comes back)
   cube      (Esc comes back)
   files     (Esc comes back)

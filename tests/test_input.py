@@ -521,6 +521,21 @@ def test_the_pygame_client_turns_the_wheel_into_notches():
         "pygame's legacy wheel buttons would send every notch twice"
 
 
+def test_the_pygame_client_sends_where_a_click_is_before_the_click():
+    client = _pygame_client()
+    if client is None:
+        print("      (pygame not installed -- pygame client not checked)")
+        return
+    import pygame
+    sent = []
+    display = object.__new__(client.DisplayClient)
+    display._send_mouse_pos = lambda x, y: sent.append(("position", x, y))
+    display._send_mouse_button = lambda button, pressed: sent.append(("button", button, pressed))
+    display._forward_press(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(120, 300)))
+    display._forward_press(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=4, pos=(1, 1)))
+    assert sent == [("position", 120, 300), ("button", 0, True)], sent
+
+
 def test_the_pygame_client_repeats_a_held_key():
     source = (REPO_ROOT / "display" / "display.py").read_text()
     assert "pygame.key.set_repeat(KEY_REPEAT_DELAY, KEY_REPEAT_INTERVAL)" in source

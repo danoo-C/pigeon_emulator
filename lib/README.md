@@ -272,6 +272,7 @@ a program that never calls it gets file names completed only.
 full-screen program can use it; `setbreak(1)` turns the break back on, and
 both return what it was. Each program starts with break on, whatever its
 parent chose, and its parent gets its own setting back when it ends.
+`/bin/edit` turns it off, so ^C is its own key.
 
 **`paging(1)` pages your output,** and that of the programs you run: after a
 screen, the console shows `-- more --` and waits inside `write`. If the

@@ -30,7 +30,7 @@
 | **bios2** (`firmware/bios2.c`) | `0x07000000` | Screen, countdown, menu; boots channel 1, or a boot sector from the hard disk or the CD | 46,068 bytes, built, with the display, input, mem and string libraries |
 | **Firmware device** | channel 7 | A read-only HDD holding `build/bios2.bin` | — |
 | **Boot sector** (`firmware/boot.asm`) | `0x15898` | Loads the file its boot record names into `0x20000`, and jumps; returns to bios2 if it can't | 376 of 384 bytes, built |
-| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | built; the example disc is 985.0 KiB |
+| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | built; the example disc is 1.0 MiB |
 | **Installer** (`user/os/installer.c`) | `0x20000` | Formats the hard disk, copies the disc onto it, makes it boot `/boot.bin`, and restarts | 143,212 bytes, built |
 
 ---
@@ -319,6 +319,7 @@ bootsector = boot.asm           # optional: firmware/boot.asm when left out
 /bin/cp.bin      = bin/cp.c
 /bin/clear.bin   = bin/clear.c
 /bin/more.bin    = bin/more.c
+/bin/edit.bin    = bin/edit.c
 /bin/graph.bin   = ../graph.c
 /bin/cube.bin    = ../cube.c
 /bin/files.bin   = ../files.c
@@ -355,7 +356,7 @@ writes `build/pigeonos.img`:
 
 As run on the example, since the kernel's phase 3 made `/boot.bin` the
 kernel and put its shell in `/bin`, phase 4a added the file commands and
-the prompt, 4b.1 the console's scrolling and line editing, and 4b.2 `more`:
+the prompt, 4b.1 the console's scrolling and line editing, 4b.2 `more`, and 4b.3 `edit`:
 
 ```
 PigeonOS 0.1, from user/os/pigeon_compiler_init.txt
@@ -373,12 +374,13 @@ PigeonOS 0.1, from user/os/pigeon_compiler_init.txt
   /bin/cp.bin                 30,524 B   user/os/bin/cp.c
   /bin/clear.bin               6,576 B   user/os/bin/clear.c
   /bin/more.bin               31,068 B   user/os/bin/more.c
+  /bin/edit.bin               81,172 B   user/os/bin/edit.c
   /bin/graph.bin             124,996 B   user/os/../graph.c
   /bin/cube.bin               45,972 B   user/os/../cube.c
   /bin/files.bin             186,192 B   user/os/../files.c
-  /docs/readme.txt               413 B   user/os/readme.txt
+  /docs/readme.txt               438 B   user/os/readme.txt
   /etc/shell_header.conf         222 B   user/os/etc/shell_header.conf
-build/pigeonos.img: 985.0 KiB, label PIGEONOS, boots /install.bin
+build/pigeonos.img: 1.0 MiB, label PIGEONOS, boots /install.bin
 ```
 
 **The launcher's `--cd PATH`, or `"cd"` in `config.json`**, puts a disc in

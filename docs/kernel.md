@@ -989,9 +989,8 @@ form.
      - bios2 leaving `BOOT_CHANNEL` alone for channel 1.
    - **The full suite passes: 1,140 tests.**
 4. **`printf`, a fuller shell, and tools for working with files,** planned in
-   [phase4_plan.md](phase4_plan.md), in two halves. ***4a, 4b.1 and 4b.2 are
-   done*** ([phase4b_plan.md](phase4b_plan.md)); 4b.3, `edit`, a mini nano,
-   is next.
+   [phase4_plan.md](phase4_plan.md), in two halves. ***Done:*** 4a, then 4b.1,
+   4b.2 and 4b.3 ([phase4b_plan.md](phase4b_plan.md)).
    - **What 4a built:**
      - **Variadic functions** (step 1). The parser records `...` on a
        function and on a function-pointer type, and refuses it with no named
@@ -1239,6 +1238,72 @@ form.
      - The first run missed three of them because its test filter left out
        the test that covers them; run with it, each failed.
    - **The full suite passes: 1,262 tests**, the 1,250 from before and 12
+     new.
+   - **4b.3, built** (phase4b_plan.md step 7): **`/bin/edit`, a mini nano.**
+     - **The screen:** the title bar on row 0, saying `Modified` once the
+       text changes, and the shortcuts on row 11, both inverse; the text on
+       rows 1–9, set as a scroll region; messages and questions on row 10.
+       It draws through the console's escape codes, gathered and written
+       once a key, and draws only what a key changed.
+     - **The keys,** nano's: ^O or ^S save, ^X exit (asking `Save modified
+       buffer? Y N` when the text changed), ^K cut a line (several in a row
+       gather), ^U paste above the cursor's line, ^W find (forward, wrapping,
+       ^C cancels), ^C where the cursor is, ^G the keys, ^Y and ^V or PgUp and
+       PgDn a screen, Tab spaces to the next multiple of 4, and the arrows,
+       Home, End, Backspace, Delete and Enter.
+     - **The mouse:** a wheel notch scrolls the text 3 rows, taking the
+       cursor along when it would leave the screen; a left click puts the
+       cursor on the character it lands on, at the end of that line, or on
+       the last line below it. The pygame client now sends where a press
+       is before the press, as the browser does.
+     - **The text** is one gap buffer, grown by copying. Saving writes
+       `FILE~`, removes `FILE` and renames `FILE~` to it, so a full disk
+       leaves the old file whole. A file over 64 KB, or holding a zero byte,
+       is refused. `edit` turns break off with `setbreak`, so ^C is its own.
+   - **Decided while building:**
+     - a line longer than the screen moves sideways 24 columns at a time,
+       with `$` in its first cell, while the cursor is on it; other lines
+       are cut at the edge;
+     - leaving clears the screen, so the prompt starts at the top: the
+       console keeps no second screen to put the shell's back;
+     - messages are centred on row 10 and last until the next key; ^W takes
+       up to 20 characters, and "not found" shows 14 of them;
+     - a character outside printable ASCII shows as `?`, one cell; a tab in
+       a file is one cell too;
+     - the text stays under 64 KB while editing, not only when opened; a
+       line cut from the end of a file without a line break gets one.
+   - **Measured:** a key typed in the middle of a line draws in 142,567
+     instructions, where drawing all nine rows would cost about 1.4 million.
+   - **Sizes:** `edit` is 81,172 bytes, where the plan guessed 50–70 KB; the
+     example disc is 1.0 MiB.
+   - **Tests, 22 new:**
+     - **`test_edit.py`, 21:** opening, moving, typing in the middle of a
+       line, saving and leaving, checked against the disk image; ^X with
+       changes answered Y, N and ^C; ^K twice and ^U; a new file made on its
+       first save; a save onto a full disk leaving the old file; ^W forward,
+       again, wrapping, not found and cancelled; a long line moving sideways
+       and back; ^C's position and ^G's keys; the wheel both ways; a click in
+       a line, past its end, below the text and on both bars; a directory, a
+       zero byte, over 64 KB and no name refused; and one key's drawing
+       counted in instructions.
+     - **`test_input.py`, 1:** the pygame client sending a press's position
+       before the press.
+   - **Twenty-six deliberate breakages each failed the tests:**
+     - saving without the text before the cursor, or with the gap in place
+       of the text after it; `FILE~` left behind by a failed save; a short
+       write taken as saved; still `Modified` after a save;
+     - ^X not asking, or N saving anyway; ^K's cuts not gathering; Enter
+       typing no line break;
+     - find never wrapping, or finding what's under the cursor;
+     - a long line never moving sideways, or left moved when the cursor goes;
+       every key redrawing every row;
+     - the wheel the wrong way, or leaving the cursor off the screen; a click
+       ignoring the column, ignored below the text, or taken on the bars;
+     - ^C a line off; ^G not waiting for a key; a zero byte, or a file over
+       64 KB, opened; Ctrl+C left as the break; the screen left behind when
+       `edit` ends;
+     - the pygame client sending a press without where it was.
+   - **The full suite passes: 1,284 tests**, the 1,262 from before and 22
      new.
 5. **A boot screen and a startup script,** from `/etc/boot.conf`
    ([phase4_plan.md §11](phase4_plan.md#11-later-phases)).

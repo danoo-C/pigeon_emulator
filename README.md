@@ -221,7 +221,7 @@ firmware/bios2.c      second-stage BIOS, built for 0x07000000: boot screen, coun
 firmware/boot.asm     boot sector: the code in block 0 of a bootable disk
 user/                 example programs (.asm and .c alike)
 user/os/              PigeonOS: the disc's project file, the installer, the kernel
-user/os/bin/          the shell and its programs: sh, ls, cat, echo, mkdir, rmdir, rm, mv, cp, clear, more
+user/os/bin/          the shell and its programs: sh, ls, cat, echo, mkdir, rmdir, rm, mv, cp, clear, more, edit
 user/os/etc/          the installed system's settings: shell_header.conf, the prompt
 lib/pigeon/           the C libraries: mem, string, stdio, stdarg, fs, cd, display, input, math, sys
 compiler/             pigeon-cc: C -> assembly
@@ -401,6 +401,7 @@ python3 tests/test_relocatable.py # program files the kernel loads anywhere: cc.
 python3 tests/test_interrupts.py  # interrupts, faults, GETSP/SETSP, the timer's TICK and break
 python3 tests/test_kernel.py      # the kernel and its shell, booted from a test disk
 python3 tests/test_stdio.py       # printf's conversions, checked against Python's %
+python3 tests/test_edit.py        # edit, the mini nano, driven through the kernel
 python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
 python3 tests/test_fs.py          # PigeonFS on the guest, checked against pfs.py
 python3 -m pytest                 # all of them, in parallel: pip install -r requirements-dev.txt
