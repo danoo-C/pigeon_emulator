@@ -154,6 +154,63 @@ int main(int argc, char **argv) {
     return 0;
 }
 ''',
+    "nobreak": r"""#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+static void wait_c(char *said) {
+    int k;
+    print(said);
+    while (1) {
+        k = getkey();
+        if (k == 'c' || k == 'C') break;
+    }
+}
+int main(int argc, char **argv) {
+    char line[16];
+    char *a[2];
+    char m;
+    int status;
+    m = 'a';
+    if (argc > 1) m = argv[1][0];
+    printf("was %d\n", setbreak(0));
+    if (m == 'l') {
+        print("line? ");
+        read(STDIN, line, 15u);
+    }
+    wait_c("press\n");
+    print("got c\n");
+    if (m == 'c') {
+        a[0] = "spin";
+        a[1] = (char *)0;
+        status = exec("/bin/spin.bin", 1, a);
+        printf("child: %s\n", sys_strerror(status));
+        wait_c("again\n");
+        print("got c again\n");
+    }
+    return setbreak(1);
+}
+""",
+    "writer": r"""#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+int main(void) {
+    int fd;
+    int i;
+    fd = open("/docs/deep.txt", O_WRITE | O_CREATE);
+    write(fd, "deep", 4u);
+    for (i = 1; i <= 30; i++) printf("deep %d\n", i);
+    close(fd);
+    return 0;
+}
+""",
+    "spawn": r"""#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+int main(void) {
+    char *a[2];
+    a[0] = "writer";
+    a[1] = (char *)0;
+    printf("spawn got %d\n", exec("/bin/writer.bin", 1, a));
+    return 0;
+}
+""",
     "ask": r'''#include <pigeon/sys.h>
 int main(void) {
     char line[256];
@@ -1003,6 +1060,144 @@ def test_esc_bracket_2_j_keeps_the_scrollback_and_clear_empties_it():
         assert c.run_until(lambda rows: rows[0] == "top" and PROMPT.match(last_row(rows))), c.rows()
         c.press(KEY_PGUP)
         assert c.run_until(lambda rows: rows[11] == "top" and rows[0] != ""), c.rows()
+
+
+# --- break per program: docs/phase4b_plan.md step 5 -------------------------------
+
+@cases(("straight after setbreak", "nobreak", False),
+       ("after reading a line, which used to turn break back on", "nobreak line", True))
+def test_a_program_that_turns_break_off_gets_ctrl_c_as_a_key(label, command, reads):
+    """nobreak waits for Ctrl+C with getkey, which reads characters; the
+    same keys stay in the event queue, where read() would find them. So
+    each case presses Ctrl+C once, after anything that reads a line."""
+    with booted(extra=[("/bin/nobreak.bin", standin("nobreak"))]) as c:
+        assert c.ready(), c.rows()
+        c.type(command + "\n")
+        if reads:
+            assert c.run_until(lambda rows: last_row(rows) == "line? _"), f"{label}: {c.rows()}"
+            c.type("x\n")
+        assert c.run_until(lambda rows: last_row(rows) == "press"), f"{label}: {c.rows()}"
+        c.press(*ctrl("c"))
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+        shown = lines(c.rows())
+        assert "was 1" in shown and "got c" in shown, shown
+        assert not any("stopped" in line for line in shown), shown
+
+
+def test_break_is_on_for_a_child_and_off_again_for_its_parent():
+    extra = [("/bin/nobreak.bin", standin("nobreak")), ("/bin/spin.bin", standin("spin"))]
+    with booted(extra=extra) as c:
+        assert c.ready(), c.rows()
+        c.type("nobreak child\n")
+        assert c.run_until(lambda rows: last_row(rows) == "press"), c.rows()
+        c.press(*ctrl("c"))
+        assert c.run_until(lambda rows: last_row(rows) == "spinning"), c.rows()
+        c.press(*ctrl("c"))                        # the child: break is on
+        assert c.run_until(lambda rows: last_row(rows) == "again"), c.rows()
+        assert "child: stopped" in lines(c.rows()), c.rows()
+        c.press(*ctrl("c"))                        # the parent again: a key
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+        assert "got c again" in lines(c.rows()), c.rows()
+        c.type("spin\n")                           # the next program: break on
+        assert c.run_until(lambda rows: last_row(rows) == "spinning"), c.rows()
+        c.press(*ctrl("c"))
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+        assert "spin: stopped" in lines(c.rows()), c.rows()
+
+
+# --- paging and more: docs/phase4b_plan.md step 6 ---------------------------------
+
+def inverse_cell(fb, row, col):
+    lit = sum(1 for dy in range(ROW_H) for dx in range(6)
+              if fb[((row * ROW_H + dy) * DISPLAY_W + col * 6 + dx) * 4 + 2] == 216)
+    return lit > 30
+
+
+def paused(c):
+    """-- more --: ten inverse cells starting the bottom row."""
+    fb = c.machine.display_io.snapshot()
+    return all(inverse_cell(fb, 11, col) for col in range(10))
+
+
+def with_more(*extra):
+    return [("/bin/more.bin", shell_program("more"))] + list(extra)
+
+
+def test_more_pages_a_file_with_space_enter_and_q():
+    text = "".join(f"row {i}\n" for i in range(1, 31)).encode()
+    with booted(extra=with_more(("/docs/long.txt", text))) as c:
+        assert c.ready(), c.rows()
+        c.type("more /docs/long.txt\n")
+        assert c.run_until(lambda rows: rows[0] == "row 1" and rows[10] == "row 11" and paused(c)), c.rows()
+        c.type(" ")
+        assert c.run_until(lambda rows: rows[10] == "row 22" and paused(c)), c.rows()
+        c.press(ENTER)
+        assert c.run_until(lambda rows: rows[10] == "row 23" and paused(c)), c.rows()
+        c.type("q")
+        assert c.run_until(lambda rows: rows[10] == "row 23" and rows[11] == "2:/> _"), c.rows()
+
+
+def test_more_pages_a_command_with_more_entries_than_fit():
+    extra = with_more(("/bin/lines.bin", standin("lines")), ("/bin/term.bin", standin("term")))
+    with booted(extra=extra + with_commands()) as c:
+        assert c.ready(), c.rows()
+        c.type("more ls /bin\n")
+        assert c.run_until(lambda rows: rows[0] == "cat.bin" and rows[10] == "rmdir.bin" and paused(c)), \
+            c.rows()
+        c.type(" ")
+        assert c.run_until(lambda rows: rows[9:12] == ["sh.bin", "term.bin", "2:/> _"]), c.rows()
+
+
+def test_pgup_looks_back_while_more_waits():
+    with booted(extra=with_more(("/bin/lines.bin", standin("lines")))) as c:
+        assert c.ready(), c.rows()
+        c.type("more lines 30\n")
+        assert c.run_until(lambda rows: rows[10] == "line 11" and paused(c)), c.rows()
+        c.press(KEY_PGUP)                          # two rows are all that scrolled off
+        assert c.run_until(lambda rows: rows[0].startswith("PigeonOS") and shows_marker(c, "-2")), c.rows()
+        c.type(" ")
+        assert c.run_until(lambda rows: rows[10] == "line 22" and paused(c)), c.rows()
+        c.type("q")
+        assert c.run_until(lambda rows: rows[11] == "2:/> _"), c.rows()
+        c.type("lines 15\n")                     # paging ended with more
+        assert c.run_until(lambda rows: rows[10] == "line 15" and rows[11] == "2:/> _"), c.rows()
+
+
+def test_ctrl_c_at_more_stops_the_command_writing():
+    with booted(extra=with_more(("/bin/lines.bin", standin("lines")))) as c:
+        assert c.ready(), c.rows()
+        c.type("more lines 30\n")
+        assert c.run_until(lambda rows: rows[10] == "line 11" and paused(c)), c.rows()
+        c.press(*ctrl("c"))
+        assert c.run_until(lambda rows: rows[11] == "2:/> _"), c.rows()
+        shown = lines(c.rows())
+        assert shown[-4:-1] == ["^C", "more: lines: stopped", "more: exit 1"], shown
+
+
+def test_q_ends_the_command_and_what_it_ran_and_closes_their_files():
+    """spawn runs writer, which opens a file and prints; q ends both, and
+    the kernel keeps no file open for either."""
+    handles = kernel_symbols()["__g_handle_depth"]
+    extra = with_more(("/bin/spawn.bin", standin("spawn")), ("/bin/writer.bin", standin("writer")))
+    with booted(extra=extra) as c:
+        assert c.ready(), c.rows()
+        c.type("more spawn\n")
+        assert c.run_until(lambda rows: rows[10] == "deep 11" and paused(c)), c.rows()
+        c.type("q")
+        assert c.run_until(lambda rows: rows[11] == "2:/> _"), c.rows()
+        assert [c.machine.ram.read_word(handles + 4 * i) for i in range(16)] == [0] * 16
+        assert not any("spawn got" in line or "stopped" in line for line in lines(c.rows())), c.rows()
+        assert c.command("echo ok") == ["ok"]
+
+
+@cases(("a file", "more /docs/readme.txt", ["PigeonOS test disk", "second line"]),
+       ("a command", "more echo hi", ["hi"]),
+       ("a word that is neither", "more nosuch", ["more: nosuch: not found", "more: exit 1"]),
+       ("no words", "more", ["usage: more FILE... or more COMMAND ARGS...", "more: exit 1"]))
+def test_more_takes_a_file_as_a_file_and_anything_else_as_a_command(label, line, printed):
+    with booted(extra=with_more()) as c:
+        assert c.ready(), c.rows()
+        assert c.command(line) == printed, f"{label}: {c.rows()}"
 
 
 @cases(("a known one and one ended by ESC \\", "o", ["abc"]),

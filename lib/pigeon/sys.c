@@ -74,6 +74,10 @@ int setcomplete(char *dir, char *builtins) {
     return ((sys_path_path)SYS_SLOT(SYS_SETCOMPLETE))(dir, builtins);
 }
 
+int setbreak(int on) { return ((sys_int)SYS_SLOT(SYS_SETBREAK))(on); }
+
+int paging(int on) { return ((sys_int)SYS_SLOT(SYS_PAGING))(on); }
+
 void print(char *s) {
     unsigned n = 0u;
     while (s[n] != 0) n++;
@@ -99,5 +103,6 @@ char *sys_strerror(int status) {
     if (status == ENDED_BAD_OPCODE) return "ran a bad instruction";
     if (status == ENDED_BAD_FETCH) return "ran off the end of memory";
     if (status == ENDED_BREAK) return "stopped";
+    if (status == E_QUIT || status == ENDED_QUIT) return "stopped";
     return "failed";
 }

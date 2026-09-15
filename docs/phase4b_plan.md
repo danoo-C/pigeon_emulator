@@ -1,9 +1,9 @@
 # Phase 4b: line editing, Tab completion, scrollback, `more` and `edit`
 
 > **Status: final plan, 2026-09-15; every question is decided (§9 and §10).
-> 4b.1 is built** (steps 1–4), as kernel.md §17 records, with four
-> corrections to this plan in [§11](#11-corrections-while-building). **4b.2
-> is next.** The second half of
+> 4b.1 and 4b.2 are built** (steps 1–6), as kernel.md §17 records, with
+> four corrections to this plan in [§11](#11-corrections-while-building).
+> **4b.3, `edit`, is next.** The second half of
 > [phase4_plan.md](phase4_plan.md) §4, its steps 4, 8 and 9, planned against
 > the code as 4a left it. What they do was decided there; this plan adds how,
 > one step phase 4 didn't foresee (step 1), and two things you added: Tab

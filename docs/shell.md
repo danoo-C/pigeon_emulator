@@ -199,3 +199,30 @@ same keys, not only the shell.
   characters.
 - **Keys typed while a program runs are thrown away when it ends,** so the
   Esc that closes `graph` never reaches the prompt.
+
+---
+
+## 6. A screen at a time: `more`
+
+*Built in phase 4b.2* ([phase4b_plan.md](phase4b_plan.md) step 6).
+
+```
+more /docs/readme.txt       a file, or several, one after another
+more ls -l /bin             a command, with its output paged
+```
+
+A first word that names a file means files; anything else is found as the
+shell finds a program, `/bin` first. After a screen, `-- more --` shows on
+the bottom row and waits:
+
+| Key | Does |
+|---|---|
+| Space | the next screen |
+| Enter | one more row |
+| PgUp, PgDn, the mouse wheel | look back |
+| q | stop: the command, and anything it ran, or the files |
+| Ctrl+C | stop the program that is writing, as it would without `more` |
+
+The paging is the console's, not `more`'s, so it works for any command:
+`more` turns it on for itself and whatever it runs, and it ends when `more`
+ends.

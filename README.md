@@ -221,7 +221,7 @@ firmware/bios2.c      second-stage BIOS, built for 0x07000000: boot screen, coun
 firmware/boot.asm     boot sector: the code in block 0 of a bootable disk
 user/                 example programs (.asm and .c alike)
 user/os/              PigeonOS: the disc's project file, the installer, the kernel
-user/os/bin/          the shell and its programs: sh, ls, cat, echo, mkdir, rmdir, rm, mv, cp, clear
+user/os/bin/          the shell and its programs: sh, ls, cat, echo, mkdir, rmdir, rm, mv, cp, clear, more
 user/os/etc/          the installed system's settings: shell_header.conf, the prompt
 lib/pigeon/           the C libraries: mem, string, stdio, stdarg, fs, cd, display, input, math, sys
 compiler/             pigeon-cc: C -> assembly

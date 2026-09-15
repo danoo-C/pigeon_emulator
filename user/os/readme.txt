@@ -11,6 +11,7 @@ Try, at the prompt:
   mkdir /notes
   cp /docs/readme.txt /notes
   cat /notes/readme.txt
+  more ls -l /bin
   graph     (Esc comes back)
   cube      (Esc comes back)
   files     (Esc comes back)

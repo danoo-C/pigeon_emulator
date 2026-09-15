@@ -16,7 +16,7 @@ Ten headers, compiled by `pigeon-cc` and covered by execution tests in
 | `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped — and `disp_scroll` |
 | `<pigeon/input.h>` | mouse position/buttons/edges and wheel notches, keyboard characters, key edges, held-key state |
 | `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
-| `<pigeon/sys.h>` | for a program the kernel runs: `write` `read` `open` `close`, `opendir` `readdir` `stat`, `mkdir` `rmdir` `remove` `rename`, `chdir` `getcwd`, `exec` `exit` `getkey`, `setcomplete`, `print`, `sys_strerror` |
+| `<pigeon/sys.h>` | for a program the kernel runs: `write` `read` `open` `close`, `opendir` `readdir` `stat`, `mkdir` `rmdir` `remove` `rename`, `chdir` `getcwd`, `exec` `exit` `getkey`, `setcomplete` `setbreak` `paging`, `print`, `sys_strerror` |
 
 There is no linker: units are compiled together, so pass the library
 sources on the command line.
@@ -267,6 +267,22 @@ first word of a line your program reads: the `.bin` files in `dir`, and the
 built-ins in `builtins`, between spaces. The shell calls
 `setcomplete("/bin", "cd exit help")`. It lasts until the program ends, and
 a program that never calls it gets file names completed only.
+
+**`setbreak(0)` makes Ctrl+C an ordinary key for your program,** so a
+full-screen program can use it; `setbreak(1)` turns the break back on, and
+both return what it was. Each program starts with break on, whatever its
+parent chose, and its parent gets its own setting back when it ends.
+
+**`paging(1)` pages your output,** and that of the programs you run: after a
+screen, the console shows `-- more --` and waits inside `write`. If the
+person presses `q`, a program you ran ends with `ENDED_QUIT`, and your own
+`write` returns `E_QUIT`; stop writing then. Paging ends when your program
+does. `/bin/more` is the example.
+
+**Don't mix `getkey` with `read(STDIN)`.** `getkey` takes characters from one
+queue, and typing a line takes key presses from another, so a key your
+program took with `getkey` is still waiting for its next `read`. A Ctrl+C
+taken with `getkey` while break was off ends that line as soon as it starts.
 
 ## stdio
 

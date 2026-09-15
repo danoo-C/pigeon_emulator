@@ -451,7 +451,9 @@ kernel, and a crash still ends the emulator.
 
 A first set of calls is in kernel_exec.md §8. Phase 4a added `mkdir`,
 `rmdir`, `remove` and `rename`, slots 13 to 16, each passing straight to
-`fs.c` ([phase4_plan.md](phase4_plan.md) step 6).
+`fs.c` ([phase4_plan.md](phase4_plan.md) step 6). Phase 4b added
+`setcomplete`, `setbreak` and `paging`, slots 17 to 19
+([phase4b_plan.md](phase4b_plan.md) steps 3, 5 and 6).
 
 ---
 
@@ -515,6 +517,10 @@ phase 1, on 2026-09-14.
   moves pixels with the display's `COPY`, 13,731 instructions a line where
   redrawing the screen cost up to a million, and `ESC [ t ; b r`, `S` and `T`
   scroll only some rows.
+- **Paging, built in phase 4b.2** ([phase4b_plan.md](phase4b_plan.md) step
+  6): after `paging(1)`, a screen of the program's output, or of the
+  programs it runs, ends in `-- more --`, and the console waits inside
+  `write`. `/bin/more` turns it on for a file or a command.
 - Commands, argument splitting and program lookup are in kernel_exec.md §3.
 
 ---
@@ -983,9 +989,9 @@ form.
      - bios2 leaving `BOOT_CHANNEL` alone for channel 1.
    - **The full suite passes: 1,140 tests.**
 4. **`printf`, a fuller shell, and tools for working with files,** planned in
-   [phase4_plan.md](phase4_plan.md), in two halves. ***4a is done, and so is
-   4b.1*** ([phase4b_plan.md](phase4b_plan.md)); 4b.2, `more`, and 4b.3,
-   `edit`, a mini nano, are next.
+   [phase4_plan.md](phase4_plan.md), in two halves. ***4a, 4b.1 and 4b.2 are
+   done*** ([phase4b_plan.md](phase4b_plan.md)); 4b.3, `edit`, a mini nano,
+   is next.
    - **What 4a built:**
      - **Variadic functions** (step 1). The parser records `...` on a
        function and on a function-pointer type, and refuses it with no named
@@ -1179,6 +1185,60 @@ form.
        and a key brings the view back whether PgUp moved it or not. It now
        reads how many rows the scrollback holds from the kernel's memory.
    - **The full suite passes: 1,250 tests**, the 1,187 from before and 63
+     new.
+   - **4b.2, built** (phase4b_plan.md steps 5 and 6):
+     - **Break per program.** A new system call, `setbreak`, slot 18, turns
+       Ctrl+C as the break off or on for the program calling, and returns
+       what it was. The kernel keeps the setting with each program: `exec`
+       starts a program with break on, its parent's setting comes back when
+       it ends, and line input puts back the setting it found instead of
+       turning break on.
+     - **Paging:** `paging`, slot 19. After 11 rows of the program's output,
+       or of the programs it runs, the console shows `-- more --` in inverse
+       on the bottom row and waits inside `write`. Space shows another
+       screen, Enter one more row, and PgUp, PgDn and the wheel look back.
+       `q` ends the programs `more` ran, coming back to its `exec` as
+       `ENDED_QUIT`, or makes `write` return `E_QUIT` for `more`'s own
+       output. Tidying closes the files of every program `q` ended, and
+       paging ends with the program that turned it on.
+     - **`/bin/more`:** `more FILE…` or `more COMMAND ARGS…`; a first word
+       that names a file means files.
+   - **Decided while building:**
+     - Ctrl+C at `-- more --` stops the program that is writing, as it would
+       without paging, and a program with break off takes it as `q`;
+     - `-- more --` takes the first ten cells of the row the output goes on
+       next;
+     - several files are paged one after another, with nothing between them;
+     - found while testing, and left as it is: `getkey` reads HID's
+       character queue and line input its event queue, so keys a program
+       took with `getkey` are still there for its next `read`, which takes a
+       Ctrl+C among them as Ctrl+C at the line. `lib/README.md` warns about
+       it.
+   - **Sizes:** the kernel is 209,528 bytes, up from 204,316; `more` is
+     31,068; a program with `sys.c` grew by 516 bytes for the two new calls.
+     The example disc is 985.0 KiB, up from 943.5.
+   - **Tests, 12 new, in `test_kernel.py`:** a program with break off getting
+     Ctrl+C as a key, at once and after reading a line; break on for its
+     child, off again for it, and on for the shell's next program; a file
+     paged with Space, Enter and `q`; `more ls /bin` with more entries than
+     fit; PgUp while waiting, and paging ending with `more`; `q` ending a
+     command and the program it ran, with their files closed; Ctrl+C at
+     `-- more --`; and `more` given a file, a command, neither, and nothing.
+     `test_install.py` and `test_project.py` count `more` on the disc.
+   - **Nineteen deliberate breakages each failed the tests:**
+     - a program starting without break on; the parent getting break back
+       on; line input turning break on; `setbreak` not acting at once, or
+       returning the new setting;
+     - never waiting, or rows not counted; Enter letting a whole screen
+       through; no `-- more --`, or one left behind; `q` unwinding `more`'s
+       own output, or ending only the program writing; Ctrl+C ignored at
+       `-- more --`; tidying only the last program's files; paging outliving
+       `more`;
+     - `more` reporting `q` as a failure, taking every word as a file,
+       reading on after `q`, or turning no paging on.
+     - The first run missed three of them because its test filter left out
+       the test that covers them; run with it, each failed.
+   - **The full suite passes: 1,262 tests**, the 1,250 from before and 12
      new.
 5. **A boot screen and a startup script,** from `/etc/boot.conf`
    ([phase4_plan.md §11](phase4_plan.md#11-later-phases)).

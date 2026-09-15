@@ -97,6 +97,8 @@ extern int w_rmdir;
 extern int w_remove;
 extern int w_rename;
 extern int w_setcomplete;
+extern int w_setbreak;
+extern int w_paging;
 extern int kswallow;
 extern int fault_div;
 extern int fault_opcode;
@@ -109,6 +111,7 @@ struct proc {
     unsigned heap_ptr_at;   /* its __heap_ptr: how far its heap has grown */
     unsigned save_sp;       /* exec_call's stack pointer and F, for exec_abort */
     unsigned save_f;
+    unsigned breaks;        /* 1: Ctrl+C is its break; setbreak turns it off */
 };
 
 struct proc procs[MAX_DEPTH];
@@ -155,6 +158,10 @@ char back_look[3200];           /* a ring with back_next where the next one goes
 unsigned back_count;
 unsigned back_next;
 unsigned view_back;             /* rows the view is scrolled back; 0 is the screen    */
+
+unsigned page_owner;            /* the program that turned paging on; 0 none */
+unsigned page_rows;             /* rows the output moved down since the last wait */
+unsigned page_counting;         /* 1 while a write's rows count              */
 
 /* Inks 0 to 7 are the ANSI colors, in ANSI's order; 8 is the console's own. */
 color_t con_palette[9] = {BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, CON_INK};
@@ -287,6 +294,7 @@ static void con_scroll(unsigned top, unsigned bottom, unsigned n, unsigned up) {
 /* The next row: on the scrolling rows' last one, they scroll; below them,
  * on the screen's last row, the cursor stays, as on a terminal. */
 static void con_newline(void) {
+    if (page_counting != 0u) page_rows++;
     con_col = 0u;
     if (con_row == con_bottom) {
         con_scroll(con_top, con_bottom, 1u, 1u);
@@ -838,6 +846,87 @@ static void view_by(int delta, unsigned cur) {
     if (view_back == 0u) line_cursor(cur, 1u);
 }
 
+/* --- paging (docs/phase4b_plan.md step 6) ----------------------------------- */
+
+/* -- more --, in inverse at the start of the row the output goes on next,
+ * or taken away again. */
+static void page_mark(unsigned on) {
+    char *text = "-- more --";
+    unsigned i;
+    for (i = 0u; i < 10u; i++) {
+        con_grid[con_row * CON_COLS + i] = on != 0u ? text[i] : ' ';
+        con_look[con_row * CON_COLS + i] = (char)(on != 0u ? CON_DEFAULT | CON_INVERSE : CON_DEFAULT);
+        con_cell(con_row, i);
+    }
+}
+
+/* A screen of output shown with paging on: the console waits, inside
+ * write. Space lets another screen through and Enter one more row; PgUp,
+ * PgDn and the wheel look back. q stops. Output from a program that more
+ * ran ends that program, and everything it ran, coming back to more's exec
+ * as ENDED_QUIT; for more's own output this returns 1, and write returns
+ * E_QUIT. Ctrl+C is the break for the program writing, as it would be
+ * without paging; a program with break off takes it as q. */
+static unsigned page_wait(void) {
+    unsigned event;
+    unsigned code;
+    unsigned wheel;
+    unsigned ctrl = 0u;
+    page_mark(1u);
+    k_break(0u);
+    while (1) {
+        wheel = mouse_event();
+        if (wheel != 0u && ME_PRESSED(wheel) != 0u) {
+            if (ME_BUTTON(wheel) == ME_WHEEL_UP) view_move(view_back + WHEEL_ROWS);
+            if (ME_BUTTON(wheel) == ME_WHEEL_DOWN) view_move(view_back > WHEEL_ROWS ? view_back - WHEEL_ROWS : 0u);
+        }
+        event = key_event();
+        if (event == 0u) continue;
+        code = KE_CODE(event);
+        if (code == K_KEY_LCTRL || code == K_KEY_RCTRL) {
+            ctrl = KE_PRESSED(event) != 0u;
+            continue;
+        }
+        if (KE_PRESSED(event) == 0u) continue;
+        if (code == KEY_PGUP) {
+            view_move(view_back + PAGE_ROWS);
+            continue;
+        }
+        if (code == KEY_PGDN) {
+            view_move(view_back > PAGE_ROWS ? view_back - PAGE_ROWS : 0u);
+            continue;
+        }
+        if (view_back > 0u) view_move(0u);  /* any other key: back to the bottom */
+        if (code == ' ') {
+            page_rows = 0u;
+            break;
+        }
+        if (code == KEY_ENTER) {
+            page_rows = PAGE_ROWS - 1u;
+            break;
+        }
+        if (code == 'q' || code == 'Q' || (ctrl != 0u && (code == 'c' || code == 'C'))) {
+            page_mark(0u);
+            while (key_read() >= 0) { }
+            page_rows = 0u;
+            if (ctrl != 0u && procs[depth].breaks != 0u) {
+                con_puts("^C\n");
+                ((abort_fn)&exec_abort)(ENDED_BREAK, &procs[depth].save_sp);
+            }
+            if ((unsigned)depth > page_owner) {
+                depth = (int)page_owner + 1;
+                ((abort_fn)&exec_abort)(ENDED_QUIT, &procs[depth].save_sp);
+            }
+            k_break(procs[depth].breaks);
+            return 1u;
+        }
+    }
+    page_mark(0u);
+    while (key_read() >= 0) { }
+    k_break(procs[depth].breaks);
+    return 0u;
+}
+
 /* A typed line into buf, '\n' included and not NUL-terminated, as read()
  * returns it, of up to LINE_MAX characters. Waits: this is the kernel,
  * interrupts off, until Enter.
@@ -875,6 +964,7 @@ static int con_read_line(char *buf, unsigned size) {
     max = size - 2u;
     if (max > LINE_MAX) max = LINE_MAX;
     k_break(0u);
+    page_rows = 0u;                         /* reading a line starts the count again */
     if (con_col == CON_COLS) con_newline();
     line_row = con_row;
     line_col = con_col;
@@ -984,7 +1074,7 @@ static int con_read_line(char *buf, unsigned size) {
     buf[n] = '\n';
     while (key_read() >= 0) { }
     con_marked = 0u;                        /* a mark counts for one line */
-    k_break(1u);                            /* a program is reading this line */
+    k_break(procs[depth].breaks);           /* as the program reading had it */
     return (int)(n + 1u);
 }
 
@@ -996,6 +1086,7 @@ static char *k_strerror(int status) {
     if (status == ENDED_BAD_OPCODE) return "ran a bad instruction";
     if (status == ENDED_BAD_FETCH) return "ran off the end of memory";
     if (status == ENDED_BREAK) return "stopped";
+    if (status == E_QUIT || status == ENDED_QUIT) return "stopped";
     return fs_strerror(status);
 }
 
@@ -1004,7 +1095,16 @@ static char *k_strerror(int status) {
 int k_write(int fd, char *buf, unsigned n) {
     unsigned i;
     if (fd == STDOUT || fd == STDERR) {
-        for (i = 0u; i < n; i++) con_put((int)buf[i]);
+        page_counting = page_owner != 0u ? 1u : 0u;
+        for (i = 0u; i < n; i++) {
+            if (page_counting != 0u && page_rows >= PAGE_ROWS && con_esc == CON_ESC_NONE) {
+                page_counting = 0u;
+                if (page_wait() != 0u) return E_QUIT;
+                page_counting = 1u;
+            }
+            con_put((int)buf[i]);
+        }
+        page_counting = 0u;
         return (int)n;
     }
     if (fd < 3) return E_BADF;
@@ -1080,6 +1180,28 @@ int k_setcomplete(char *dir, char *builtins) {
     return 0;
 }
 
+/* Ctrl+C as the break, on or off, for the program calling: what it was.
+ * It lasts until the program ends, and a program it runs starts with break
+ * on (docs/phase4b_plan.md step 5). */
+int k_setbreak(int on) {
+    unsigned was = procs[depth].breaks;
+    procs[depth].breaks = on != 0 ? 1u : 0u;
+    k_break(procs[depth].breaks);
+    return (int)was;
+}
+
+/* Paging on or off for the calling program's output and that of the
+ * programs it runs, until it ends (page_wait). */
+int k_paging(int on) {
+    if (on != 0) {
+        page_owner = (unsigned)depth;
+        page_rows = 0u;
+    } else if (page_owner == (unsigned)depth) {
+        page_owner = 0u;
+    }
+    return 0;
+}
+
 /* --- running programs ------------------------------------------------------ */
 
 /* Put back what a program may have left behind: files open, timers
@@ -1092,7 +1214,7 @@ static void k_tidy(void) {
     char cwd[FS_PATH_MAX + 8];
     int n;
     for (h = 0; h < HANDLES; h++) {
-        if (handle_depth[h] == depth) {
+        if (handle_depth[h] >= depth) {     /* and programs it ran that q ended */
             if (handle_dir[h] != 0u) fs_closedir(h);
             else fs_close(h);
             handle_depth[h] = 0;
@@ -1164,13 +1286,15 @@ int k_exec(char *path, int argc, char **argv) {
     complete_builtins[(unsigned)depth * COMPLETE_TEXT] = 0;
     procs[depth].base = base;
     procs[depth].heap_ptr_at = base + header[6];
+    procs[depth].breaks = 1u;
     started = 1u;
     k_break(1u);
     status = ((call4_fn)&exec_call)(base + header[3], argc, argv, &procs[depth].save_sp);
     k_break(0u);
+    if (page_owner >= (unsigned)depth) page_owner = 0u;     /* paging ends with its program */
     k_tidy();
     depth--;
-    if (depth > 0) k_break(1u);             /* its parent runs again */
+    if (depth > 0) k_break(procs[depth].breaks);            /* its parent runs again, as it had it */
     return status;
 }
 
@@ -1219,6 +1343,8 @@ static void k_tables(void) {
     table[SYS_REMOVE] = (unsigned)&w_remove;
     table[SYS_RENAME] = (unsigned)&w_rename;
     table[SYS_SETCOMPLETE] = (unsigned)&w_setcomplete;
+    table[SYS_SETBREAK] = (unsigned)&w_setbreak;
+    table[SYS_PAGING] = (unsigned)&w_paging;
     vectors[VEC_DIV_ZERO] = (unsigned)&fault_div;
     vectors[VEC_BAD_OPCODE] = (unsigned)&fault_opcode;
     vectors[VEC_BAD_FETCH] = (unsigned)&fault_fetch;

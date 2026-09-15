@@ -28,7 +28,9 @@
 #define SYS_REMOVE   15
 #define SYS_RENAME   16
 #define SYS_SETCOMPLETE 17
-#define SYS_COUNT    18
+#define SYS_SETBREAK 18
+#define SYS_PAGING   19
+#define SYS_COUNT    20
 
 /* --- the console: every program starts with these; open() gives 3 up -- */
 #define STDIN  0
@@ -55,11 +57,13 @@ typedef struct { char name[32]; unsigned type; unsigned size; } sys_stat_t;
 #define E_NOTPROG (-20)     /* not a program file, or a damaged one */
 #define E_NOMEM   (-21)     /* no room above the programs running   */
 #define E_DEPTH   (-22)     /* programs running programs too deep   */
+#define E_QUIT    (-23)     /* write: q at -- more -- (paging)      */
 
 /* --- how exec() says a program did not return -------------------------- */
 #define ENDED_DIV_ZERO   (-100)     /* it divided by zero        */
 #define ENDED_BAD_OPCODE (-101)     /* it ran a bad instruction  */
 #define ENDED_BAD_FETCH  (-102)     /* it ran off the end of memory */
 #define ENDED_BREAK      (-103)     /* Ctrl+C stopped it         */
+#define ENDED_QUIT       (-104)     /* q at -- more -- stopped it */
 
 #endif

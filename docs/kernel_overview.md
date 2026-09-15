@@ -2,8 +2,9 @@
 
 > **Status: the short version. Steps 1 to 3 of §7 are built: relocatable
 > programs, the CPU's interrupts and faults, and the kernel with a console
-> and a simple shell. So is the first half of step 4:** `printf`, colors,
-> the prompt file and the file commands. The detail is in
+> and a simple shell. So is most of step 4:** `printf`, colors, the prompt
+> file and the file commands, then line editing, Tab completion,
+> scrollback and `more`; `edit` is left. The detail is in
 > [kernel.md](kernel.md), [kernel_exec.md](kernel_exec.md) and
 > [kernel_changes.md](kernel_changes.md), and every question in them is now
 > decided (§6). Booting from disk is already built ([os_cd.md](os_cd.md)).
@@ -157,9 +158,10 @@ Decided 2026-09-14, left to me. Each is recorded where the question was asked.
    `printf`; colors and cursor codes in the console; the prompt from
    `/etc/shell_header.conf` ([shell.md](shell.md)); `mkdir`, `rmdir`, `rm`,
    `mv`, `cp` and `clear`; a sorted `ls` with `-l`; and Ctrl+C only while a
-   program runs. 4b.1 is built too ([phase4b_plan.md](phase4b_plan.md)): fast
-   scrolling, line editing and history, Tab completion, and scrollback with
-   the mouse wheel. Next are 4b.2, `more`, and 4b.3, `edit`, a mini nano.
+   program runs. 4b.1 and 4b.2 are built too
+   ([phase4b_plan.md](phase4b_plan.md)): fast scrolling, line editing and
+   history, Tab completion, scrollback with the mouse wheel, break per
+   program, and `more`. Next is 4b.3, `edit`, a mini nano.
 5. **A boot screen and a startup script,** from `/etc/boot.conf`.
 6. **The serial debug port,** with a panel beside the screen.
 7. **The launcher.**

@@ -36,7 +36,7 @@ MiB = 1 << 20
 PROMPT = "ENTER install   ESC cancel"
 INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt", "/etc/shell_header.conf"] + [
     f"/bin/{name}.bin" for name in ("sh", "ls", "cat", "echo", "mkdir", "rmdir", "rm", "mv",
-                                    "cp", "clear", "graph", "cube", "files")]
+                                    "cp", "clear", "more", "graph", "cube", "files")]
 
 # The example disc, built once for the whole file.
 _BUILD = tempfile.TemporaryDirectory()

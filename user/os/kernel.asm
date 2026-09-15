@@ -234,6 +234,26 @@ w_setcomplete:
     EI
     RET
 
+w_setbreak:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_setbreak
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
+w_paging:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_paging
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
 w_exit:
     DI
     MOV C, #__g_in_kernel

@@ -45,6 +45,11 @@ int  getkey(void);                          /* a key, or -1; never waits   */
 int  setcomplete(char *dir, char *builtins);  /* Tab's commands: a directory of
                                                .bin files, and built-ins
                                                between spaces; 63 bytes each */
+int  setbreak(int on);                      /* Ctrl+C as the break for this
+                                               program, or a key: what it was */
+int  paging(int on);                        /* -- more -- after each screen of
+                                               this program's output and its
+                                               children's, until it ends     */
 
 /* --- for people ---------------------------------------------------------- */
 void  print(char *s);                       /* a string to STDOUT          */
