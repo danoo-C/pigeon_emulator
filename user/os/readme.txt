@@ -1,6 +1,26 @@
 PigeonOS 0.1
 
-cc.py --project put this file on the disc, from the [files] section of
-user/os/pigeon_compiler_init.txt. The installer copies it to the hard
-disk with everything else on the disc, and makes the disk boot /boot.bin:
-the graphing calculator.
+The installer copied this from
+the disc with everything else,
+and the hard disk now boots
+/boot.bin: the kernel, which
+runs what /etc/boot.conf
+names: a splash screen, then
+the shell.
+
+Try, at the prompt:
+  ls -l /bin
+  mkdir /notes
+  cp /docs/readme.txt /notes
+  cat /notes/readme.txt
+  more ls -l /bin
+  edit /notes/readme.txt
+  graph     (Esc comes back)
+  cube      (Esc comes back)
+  files     (Esc comes back)
+  img /etc/bmp/pigeon.bmp
+            (Esc comes back)
+  help
+
+The prompt is the file
+/etc/shell_header.conf.

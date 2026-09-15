@@ -1345,8 +1345,10 @@ static void on_key(int c) {
     if (c == KEY_HOME)  { caret = 0; scroll_fix(); dirty = 1; return; }
     if (c == KEY_END)   { caret = text_len; scroll_fix(); dirty = 1; return; }
 
-    if (c == KEY_UP   || c == KEY_PGUP) { zoom_by(1); return; }
-    if (c == KEY_DOWN || c == KEY_PGDN) { zoom_by(0); return; }
+    // if (c == ME_WHEEL_UP   || c == KEY_PGUP) { zoom_by(1); return; }
+    // if (c == ME_WHEEL_DOWN || c == KEY_PGDN) { zoom_by(0); return; }
+    if (c == ME_WHEEL_UP   || c == KEY_PGUP) { zoom_by(1); return; }
+    if (c == ME_WHEEL_DOWN || c == KEY_PGDN) { zoom_by(0); return; }
     if (c == KEY_F1)    { view_reset(); return; }
     if (c == KEY_ENTER) { fit_y(); return; }
 
@@ -1380,6 +1382,12 @@ static void handle_mouse(void) {
                 }
             } else if (ME_BUTTON(ev) == 1) {
                 view_reset();
+            }
+            else if (ME_BUTTON(ev) == ME_WHEEL_UP) {
+                zoom_by(1);
+            }
+            else if (ME_BUTTON(ev) == ME_WHEEL_DOWN) {
+                zoom_by(0);
             }
         } else if (ME_BUTTON(ev) == 0) {
             drag_on = 0;

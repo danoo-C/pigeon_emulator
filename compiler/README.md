@@ -18,6 +18,7 @@ python3 compiler/cc.py user/demo.c lib/pigeon/display.c lib/pigeon/input.c \
         lib/pigeon/mem.c -o build/demo.bin
 python3 compiler/cc.py program.c -S -o program.asm    # stop at assembly
 python3 compiler/cc.py firmware/bios2.c --org BIOS2_LOAD_ADDR -o build/bios2.bin
+python3 compiler/cc.py program.c lib/pigeon/mem.c --relocatable -o build/program.bin
 ```
 
 Every program is built for `PROGRAM_LOAD_ADDR` unless `--org` names another
@@ -25,6 +26,24 @@ address: a number, or a name from `emulator/memory_map.py`. Only the code and
 data move — the frame stack and heap stay at `HEAP_START`, so a program built
 for elsewhere must not reach into them. The second-stage BIOS is built this
 way, for `BIOS2_LOAD_ADDR` ([docs/os_cd.md](../docs/os_cd.md)).
+
+`--relocatable` builds a **program file** instead, which the kernel can load
+at any address ([docs/kernel.md](../docs/kernel.md) §8): a 32-byte header,
+the image, and the offset of every word in the image that holds an address.
+`program_file.py` finds those words by assembling the program twice, at two
+addresses, and comparing; a word that differs by anything but the distance
+was computed from an address, and the build is refused. The startup code is
+called as `entry(argc, argv)` and returns `main`'s value instead of halting,
+and the frame stack and heap follow the image wherever it is loaded.
+`--project` builds every `.c` in `[files]` this way.
+
+**`#asm "file.asm"`** pulls hand-written assembly into a C program, for what
+C can't express, such as a kernel's `exec_call`, which needs `GETSP`. The
+compiler places the file among the compiled functions, so the two share
+labels: C reaches a routine as `extern int name;` cast to a function, and the
+routine reaches a C global as `__g_name` and a C function by its name. The
+path is relative to the file that names it, a file named twice is placed
+once, and editing it rebuilds the program.
 
 `--project FILE` builds an installation disc instead. It reads a project
 file, builds the installer, the system the installed disk boots, and the
@@ -75,13 +94,20 @@ pointers, arrays, structs, `->`, string literals, function pointers. These are
 the next stage.
 
 **Not supported by design**: floating point (no FP hardware), `goto`, `switch`,
-varargs, `long long`. Each is rejected by name with a reason.
+`long long`. Each is rejected by name with a reason.
+
+**Variadic functions**, since the kernel's phase 4: `int printf(char *format,
+...)` takes up to 8 word-sized arguments after its named ones, and
+`<pigeon/stdarg.h>` walks them. The frame is in
+[design/03-abi.md](design/03-abi.md#variadic-functions).
 
 ## The one thing worth knowing
 
-The stack pointer **cannot be read** on this machine — no instruction moves SP
-into a register. So locals cannot live at SP-relative addresses, and there is no
-conventional C stack frame.
+The stack pointer **could not be read** on this machine when the compiler was
+designed — no instruction moved SP into a register. So locals cannot live at
+SP-relative addresses, and there is no conventional C stack frame. `GETSP` and
+`SETSP` exist since the kernel's phase 2 ([docs/kernel.md](../docs/kernel.md)
+§13), for a kernel's `exit()`; the compiler doesn't use them.
 
 Instead there are two stacks:
 
@@ -109,3 +135,5 @@ Full reasoning in [design/03-abi.md](design/03-abi.md).
 | `analyzer.py` | name resolution, type checking, frame-slot assignment |
 | `codegen.py` | AST → assembly |
 | `cc.py` | the driver |
+| `program_file.py` | program files: two builds compared, the header, and `relocate()` for the host |
+| `project.py` | `--project`: a project file in, an installation disc out |

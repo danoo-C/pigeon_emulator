@@ -15,6 +15,22 @@
     #cd-status { color:#888; font-size:12px; margin-left:4px }
     #cd-status.bad { color:#e08070 }
     #cd-list { margin-right:8px; max-width:22em }
+    #main { display:flex; align-items:flex-start; max-width:100% }
+    #stage { display:flex; flex-direction:column; align-items:center; margin-left:12px }
+    #serial { display:flex; flex-direction:column; position:relative; flex:none;
+              background:#15171c; border:1px solid #444; box-sizing:border-box }
+    #serial[hidden] { display:none }
+    #serial-head { display:flex; align-items:center; gap:6px; padding:3px 6px;
+                   background:#2a2d35; font-size:12px }
+    #serial-head .title { flex:1; font-weight:bold }
+    #serial-head button { margin:0; padding:0 6px }
+    #serial-text { flex:1; margin:0; padding:4px 6px; overflow:auto; white-space:pre-wrap;
+                   word-break:break-all; color:#d8dee9;
+                   font:12px/1.35 ui-monospace, Menlo, Consolas, monospace }
+    #serial-text .time { color:#6a7284 }
+    #serial-text.no-times .time { display:none }
+    #serial-edge { position:absolute; top:0; right:-5px; width:9px; height:100%; cursor:ew-resize }
+    #serial-button.on { background:#3a5a80; color:#fff }
   </style>
 </head>
 <body>
@@ -22,6 +38,7 @@
     <button id="clear">Clear</button>
     <label>Scale: <input id="scale" type="number" value="4" min="1" max="16" /></label>
     <label><input id="running" type="checkbox" checked/> Live</label>
+    <button id="serial-button" title="What the machine writes to its debug port">Serial</button>
   </div>
   <div id="cd">
     <button id="cd-server">Load from server</button>
@@ -35,10 +52,97 @@
     <button id="cd-eject">Eject</button>
     <span id="cd-status">no drive</span>
   </div>
-  <canvas id="screen" tabindex="0"></canvas>
-  <p id="hint">Click the canvas to give it focus, then use the mouse and keyboard.</p>
+  <div id="main">
+    <!-- The debug port's lines (docs/phase5c_plan.md). Opened by the Serial
+         button; nothing done in here reaches the guest. -->
+    <aside id="serial" hidden>
+      <div id="serial-head">
+        <span class="title">Serial</span>
+        <label><input id="serial-times" type="checkbox" checked/> times</label>
+        <button id="serial-clear" title="Empty this view; the machine keeps its log">Clear</button>
+        <button id="serial-close" title="Close">&times;</button>
+      </div>
+      <pre id="serial-text"></pre>
+      <div id="serial-edge" title="Drag to resize"></div>
+    </aside>
+    <div id="stage">
+      <canvas id="screen" tabindex="0"></canvas>
+      <p id="hint">Click the canvas to give it focus, then use the mouse and keyboard.</p>
+    </div>
+  </div>
 
   <script>
+    // ---- the Serial panel's logic ------------------------------------------
+    // Plain functions with no DOM, which tests/test_serial_panel.py lifts out
+    // and runs under node. /serial answers text, with the index and time of
+    // each line that starts in it (emulator/devices/debug_port.py).
+    const SERIAL_MIN_WIDTH = 160;
+    const SERIAL_MAX_SHARE = 0.7;               // of the window
+    const SERIAL_MAX_LINES = 2000;
+    const SERIAL_DEFAULTS = {open: true, width: 320, times: true};
+
+    function serialView(){
+      return {lines: [], open: false, next: 0};  // open: the last line has no newline yet
+    }
+
+    function serialAppend(view, reply){
+      if (reply.start < view.next){              // a new machine: its log starts again
+        view.lines = [];
+        view.open = false;
+      }
+      if (reply.lost > 0){
+        view.lines.push({t: null, text: '(' + reply.lost + ' bytes lost)'});
+        view.open = false;
+      }
+      const times = new Map(reply.stamps.map(stamp => [stamp[0], stamp[1]]));
+      const text = reply.text;
+      let i = 0;
+      while (i < text.length){
+        if (!view.open){
+          view.lines.push({t: times.has(i) ? times.get(i) : null, text: ''});
+          view.open = true;
+        }
+        const newline = text.indexOf('\n', i);
+        const end = newline === -1 ? text.length : newline;
+        view.lines[view.lines.length - 1].text += text.slice(i, end);
+        if (newline === -1) break;
+        view.open = false;
+        i = newline + 1;
+      }
+      if (view.lines.length > SERIAL_MAX_LINES)
+        view.lines.splice(0, view.lines.length - SERIAL_MAX_LINES);
+      view.next = reply.next;
+      return view;
+    }
+
+    // As the launcher's terminal shows it: "[   1.234] ", or as wide and blank.
+    function serialTime(t){
+      return t === null ? ' '.repeat(11) : '[' + t.toFixed(3).padStart(8) + '] ';
+    }
+
+    // Following new lines, unless the view was scrolled up off the end.
+    function serialFollows(scrollTop, clientHeight, scrollHeight){
+      return scrollHeight - scrollTop - clientHeight < 4;
+    }
+
+    function serialClampWidth(width, windowWidth){
+      return Math.round(Math.max(SERIAL_MIN_WIDTH, Math.min(width, windowWidth * SERIAL_MAX_SHARE)));
+    }
+
+    // localStorage's entry, or the defaults for a missing or damaged one.
+    function serialPrefs(raw){
+      let saved = null;
+      try { saved = JSON.parse(raw); } catch (e) { saved = null; }
+      const prefs = Object.assign({}, SERIAL_DEFAULTS);
+      if (saved && typeof saved === 'object'){
+        if (typeof saved.open === 'boolean') prefs.open = saved.open;
+        if (typeof saved.times === 'boolean') prefs.times = saved.times;
+        if (typeof saved.width === 'number' && isFinite(saved.width)) prefs.width = saved.width;
+      }
+      return prefs;
+    }
+    // ---- end of the Serial panel's logic ---------------------------------------
+
     // ---- input -----------------------------------------------------------
     // The HID server is a separate port from the one serving this page; it
     // comes from /hidinfo so config.json stays the single source of truth.
@@ -245,6 +349,25 @@
         .finally(()=>{ sending = false; drain(); });
     }
 
+    // The mouse wheel, as HID wants it: a notch is a press and a release of
+    // button 5 (up) or 6 (down). Browsers report a distance instead, and a
+    // trackpad a stream of small ones, so the distance is added up and a
+    // notch sent for every 100 pixels, 3 lines or page (deltaMode 0, 1, 2).
+    // Turning the other way starts the count again.
+    let wheelTotal = 0;
+    function wheelNotches(deltaY, deltaMode){
+      if (!deltaY) return [];
+      const size = deltaMode === 1 ? 3 : deltaMode === 2 ? 1 : 100;
+      if ((wheelTotal < 0) !== (deltaY < 0)) wheelTotal = 0;
+      wheelTotal += deltaY;
+      const notches = [];
+      while (Math.abs(wheelTotal) >= size){
+        notches.push(wheelTotal < 0 ? 5 : 6);      // a negative deltaY is up
+        wheelTotal -= Math.sign(wheelTotal) * size;
+      }
+      return notches;
+    }
+
     // No default geometry on purpose. /info is the only source of it,
     // and guessing wrong is invisible: every frame then fails the
     // length check below and is dropped, so the screen just stays
@@ -276,12 +399,14 @@
       off.width = W; off.height = H;
       canvas.width = W * Number(scaleInput.value || 4);
       canvas.height = H * Number(scaleInput.value || 4);
+      wireSerial();
       loop();
     }
 
     scaleInput.addEventListener('change', ()=>{
       canvas.width = W * Number(scaleInput.value || 4);
       canvas.height = H * Number(scaleInput.value || 4);
+      serialFit();
     });
 
     clearBtn.addEventListener('click', async ()=>{
@@ -347,6 +472,7 @@
       // did the opposite -- it held the newest position back for up to a
       // frame, which is how a stale position ended up under a click.
       window.addEventListener('mousemove', e => {
+        if (serialResizing) return;               // the Serial panel's edge, not the guest's pointer
         if (held || overCanvas(e)) post('/mouse_pos', toDisplayXY(e));
       });
 
@@ -362,13 +488,26 @@
         post('/mouse_pos', toDisplayXY(e));
         post('/mouse_event', {button: BTN[e.button], pressed: true});
       });
+      // Only a button pressed on the screen is released to the guest: a click
+      // on the controls or in the Serial panel went down somewhere else, and
+      // the guest never saw it go down.
       window.addEventListener('mouseup', e => {
         if (BTN[e.button] === undefined) return;
+        if (!(held & (1 << e.button))) return;
         held &= ~(1 << e.button);
         post('/mouse_pos', toDisplayXY(e));
         post('/mouse_event', {button: BTN[e.button], pressed: false});
       });
       canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+      // Not passive, so the page itself doesn't scroll under the screen.
+      canvas.addEventListener('wheel', e => {
+        e.preventDefault();
+        for (const button of wheelNotches(e.deltaY, e.deltaMode)){
+          post('/mouse_event', {button, pressed: true});
+          post('/mouse_event', {button, pressed: false});
+        }
+      }, {passive: false});
 
       canvas.addEventListener('keydown', e => {
         const c = toPigeonKey(e);
@@ -384,6 +523,113 @@
         for (const code of new Set(Object.values(KEYS))) post('/key', {code, pressed:false});
       });
     }
+
+    // ---- the Serial panel -------------------------------------------------
+    // What the machine writes to its debug port (docs/phase5c_plan.md). Its
+    // clicks, drags and wheel stay on the page: nothing here posts to HID.
+    const serialPanel  = document.getElementById('serial');
+    const serialText   = document.getElementById('serial-text');
+    const serialButton = document.getElementById('serial-button');
+    const serialTimes  = document.getElementById('serial-times');
+    const SERIAL_KEY = 'pigeon.serial';
+    let serialResizing = false;
+    let serialFit = () => {};
+
+    function wireSerial(){
+      let prefs;
+      try { prefs = serialPrefs(localStorage.getItem(SERIAL_KEY)); }
+      catch (e) { prefs = serialPrefs(null); }  // storage blocked: defaults, kept for this visit
+      const view = serialView();
+      let polling = false;
+      let pollTimer = null;
+
+      function save(){
+        try { localStorage.setItem(SERIAL_KEY, JSON.stringify(prefs)); } catch (e) { /* not kept */ }
+      }
+
+      function fit(){
+        prefs.width = serialClampWidth(prefs.width, window.innerWidth);
+        serialPanel.style.width = prefs.width + 'px';
+        serialPanel.style.height = canvas.height + 'px';
+      }
+
+      function render(){
+        const follow = serialFollows(serialText.scrollTop, serialText.clientHeight,
+                                     serialText.scrollHeight);
+        const out = document.createDocumentFragment();
+        for (const line of view.lines){
+          const time = document.createElement('span');
+          time.className = 'time';
+          time.textContent = serialTime(line.t);
+          out.appendChild(time);
+          out.appendChild(document.createTextNode(line.text + '\n'));
+        }
+        serialText.replaceChildren(out);
+        if (follow) serialText.scrollTop = serialText.scrollHeight;
+      }
+
+      async function poll(){
+        if (polling || serialPanel.hidden) return;
+        polling = true;
+        try {
+          const reply = await fetch('/serial?from=' + view.next).then(r => r.json());
+          const before = view.next;
+          serialAppend(view, reply);
+          if (reply.next !== before || reply.lost || reply.start < before) render();
+        } catch (e) { /* the emulator is away; ask again */ }
+        polling = false;
+        if (!serialPanel.hidden) pollTimer = setTimeout(poll, 250);
+      }
+
+      function show(open){
+        prefs.open = open;
+        serialPanel.hidden = !open;
+        serialButton.classList.toggle('on', open);
+        save();
+        clearTimeout(pollTimer);
+        if (open){
+          fit();
+          render();
+          poll();
+        }
+      }
+
+      document.getElementById('serial-edge').addEventListener('mousedown', e => {
+        e.preventDefault();
+        serialResizing = true;
+        const left = serialPanel.getBoundingClientRect().left;
+        function move(ev){
+          prefs.width = serialClampWidth(ev.clientX - left, window.innerWidth);
+          serialPanel.style.width = prefs.width + 'px';
+        }
+        function up(){
+          serialResizing = false;
+          window.removeEventListener('mousemove', move);
+          window.removeEventListener('mouseup', up);
+          save();
+        }
+        window.addEventListener('mousemove', move);
+        window.addEventListener('mouseup', up);
+      });
+      serialButton.addEventListener('click', () => show(serialPanel.hidden));
+      document.getElementById('serial-close').addEventListener('click', () => show(false));
+      document.getElementById('serial-clear').addEventListener('click', () => {
+        view.lines = [];
+        view.open = false;
+        render();
+      });
+      serialTimes.checked = prefs.times;
+      serialText.classList.toggle('no-times', !prefs.times);
+      serialTimes.addEventListener('change', () => {
+        prefs.times = serialTimes.checked;
+        serialText.classList.toggle('no-times', !prefs.times);
+        save();
+      });
+      window.addEventListener('resize', () => { if (!serialPanel.hidden) fit(); });
+      serialFit = () => { if (!serialPanel.hidden) fit(); };
+      show(prefs.open);
+    }
+    // ---- end of the Serial panel ------------------------------------------------
 
     init();
   </script>

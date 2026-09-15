@@ -7,8 +7,10 @@
 ## Why this is unusual
 
 The stack pointer cannot be read ([01-overview.md](01-overview.md) §2). Nothing
-in the ISA moves `SP` into a register, so no SP-relative address can be formed,
-so the ordinary C stack frame is impossible.
+in the ISA moved `SP` into a register, so no SP-relative address could be
+formed, so the ordinary C stack frame was impossible. `GETSP` came later, for
+the kernel ([docs/kernel.md](../../docs/kernel.md) §13), and the frame stack
+stays.
 
 Two stacks, with different jobs:
 
@@ -99,6 +101,42 @@ size, which the callee does not know (and which differs per call site). The
 caller does know it — it is a constant of the calling function. So the
 adjustment has to happen on the caller's side.
 
+## Variadic functions
+
+Added for `printf`, in the kernel's phase 4
+([docs/phase4_plan.md](../../docs/phase4_plan.md) step 1). A function declared
+with `...` has eight more slots, straight after its named parameters:
+
+```
+F + 0 … F + 4*(n-1)       the n named parameters
+F + 4*n … F + 4*(n+7)     eight slots for extra arguments
+F + 4*(n+8)               local 0
+```
+
+- **The calling convention doesn't change.** The caller writes argument *i* at
+  `F + S + 4i` whatever it calls, so an extra argument lands in the slot after
+  the last named one.
+- **`frame_size` counts all eight slots,** whether a call fills them or not,
+  so the function's own calls never write over them, and `frame_size` stays a
+  constant.
+- **Every extra argument is one word:** an integer, a `char`, a pointer or a
+  function. A struct is refused at the call, and so is a ninth extra
+  argument.
+- **`...` needs a named parameter before it,** since the extra slots are
+  found by that parameter's address.
+- **A call through a function pointer** to a variadic type works the same.
+
+`<pigeon/stdarg.h>` is macros, with no `.c`:
+
+```c
+typedef unsigned *va_list;
+#define va_start(ap, last) ((ap) = (unsigned *)&(last) + 1)
+#define va_arg(ap, type)   ((type)*(ap)++)
+```
+
+Nothing tells the callee how many arguments came: as in C, a count or a
+format string says. A slot the call didn't fill holds whatever was there.
+
 ## Memory layout
 
 ```
@@ -117,6 +155,16 @@ All four symbols are emitted by the compiler and are also usable from hand-
 written assembly. The frame stack is a fixed 256 KB by default
 (`-fframe-size=N` to change it), giving roughly 8,000 frames of eight slots.
 
+`__heap_limit`, the word the compiler emits after `__heap_ptr`, is how far
+the heap may grow. The kernel writes it for each program it runs
+([docs/kernel.md](../../docs/kernel.md) Q7). Left at 0, as every image
+starts, `mem.c` stops a megabyte below the top of RAM.
+
+A **relocatable** program (`cc.py --relocatable`) has the same regions,
+moved: its frame stack starts at `__image_end`, straight after its code and
+data, and its heap follows the frame stack. The assembler settles
+`__frame_base = __image_end` once labels have addresses.
+
 **Frame-stack overflow is not detected by default.** Growing `F` past
 `__frame_limit` walks into the malloc heap and corrupts it silently. `-fstack-
 check` emits a compare against `__frame_limit` in every non-leaf prologue, at
@@ -129,11 +177,34 @@ three instructions per call. Recommended while developing.
 __start:
     MOV  F, #__frame_base       ; establish the frame pointer, once
     MOV  C, #__heap_ptr         ; heap allocator init
-    MWW  C, #__heap_base
-    ADD  F, F, #0               ; main's caller frame size is 0
+    MOV  A, #__heap_base
+    MWW  C, A
     CALL main
     HALT                        ; exit status left in A
 ```
+
+A relocatable program is called like any function, as `entry(argc, argv)`,
+so its startup takes its arguments from the caller's frame and returns:
+
+```asm
+__start:
+    MRW  A, F                   ; argc, in the caller's frame
+    ADD  C, F, #4
+    MRW  B, C                   ; argv
+    PUSH F                      ; the caller's frame pointer
+    MOV  F, #__frame_base       ; its own frame stack: __image_end
+    MWW  F, A                   ; main's argc
+    ADD  C, F, #4
+    MWW  C, B                   ; main's argv
+    MOV  C, #__heap_ptr
+    MOV  A, #__heap_base
+    MWW  C, A
+    CALL main
+    POP  F                      ; the caller gets its F back
+    RET                         ; main's value is in A
+```
+
+A `main(void)` never reads the two slots: they are where its locals start.
 
 ## The verified listing
 

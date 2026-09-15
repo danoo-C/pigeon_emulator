@@ -15,14 +15,15 @@ from .bios import BIOS
 from .cpu import _HANDLERS, _UNPACK, CPU
 from .instruction_set import INSTR_SIZE
 from .devices.cd import CD
+from .devices.debug_port import DebugPort
 from .devices.display_io import DisplayIO
 from .devices.hdd import HDD
 from .devices.hid import HID
 from .devices.timer import Timer
 from .io_controller import IOChannel, IOController
 from .memory_map import (
-    BIOS2_MAX, CH_BIOS2, CH_CD, CH_DISPLAY, CH_HDD, CH_HID, CH_TIMER, CH_USERPROG,
-    RAM_SIZE, REGISTER_COUNT,
+    BIOS2_MAX, CH_BIOS2, CH_CD, CH_DEBUG, CH_DISPLAY, CH_HDD, CH_HID, CH_TIMER, CH_USERPROG,
+    RAM_SIZE, REGISTER_COUNT, VEC_BREAK, VEC_TIMER,
 )
 from .ram import RAM
 
@@ -32,7 +33,9 @@ DISPLAY_FPS = 30
 
 # Instructions between clock reads. Small enough that a 30 FPS frame
 # deadline is never overshot (at ~2.4M IPS this is ~4 ms), large enough
-# that time.time() costs nothing measurable per instruction.
+# that time.time() costs nothing measurable per instruction. The devices
+# are asked for interrupts as often, so a timer tick or a Ctrl+C waits at
+# most this many instructions.
 CLOCK_SAMPLE_INTERVAL = 10_000
 
 
@@ -76,12 +79,17 @@ class Machine:
         # the bus now (scanout base, framebuffer fill), not only the thing
         # that serves frames over HTTP.
         self.display_io = DisplayIO(self.ram)
+        # The debug port, always there as the CD drive is: a program asks
+        # it once whether it exists, and <pigeon/debug.h> answers -1 at
+        # once on a machine without it (docs/phase5_plan.md §4.1).
+        self.debug = DebugPort(self.ram)
         for channel_id, device, name in (
             (CH_HDD, self.hdd, "HDD"),
             (CH_HID, self.hid, "HID"),
             (CH_TIMER, self.timer, "TIMER"),
             (CH_DISPLAY, self.display_io, "DISPLAY"),
             (CH_CD, self.cd, "CD"),
+            (CH_DEBUG, self.debug, "DEBUG"),
         ):
             self.io_controller.register_channel(
                 channel_id, IOChannel(device.callback, name=name))
@@ -113,6 +121,10 @@ class Machine:
         self.instruction_count = 0
         self.total_instructions = 0
         self.last_ips = 0.0
+        # Instructions until the devices are next asked for interrupts. One
+        # countdown for step() and run() both, so a program takes its
+        # interrupts at the same instructions whichever of the two runs it.
+        self._countdown = CLOCK_SAMPLE_INTERVAL
 
     # --- lifecycle --------------------------------------------------------
 
@@ -123,6 +135,7 @@ class Machine:
         network."""
         self.display_io.hid_url = f"http://{host}:{hid_port}"
         self.display_io.cd_url = f"http://{host}:{cd_port}"
+        self.display_io.debug_port = self.debug
         self.display_io.start_fastapi(host=host, port=display_port)
         # The browser front end is served from the display port and posts
         # input to the HID port, so the display origin has to be on the HID
@@ -155,7 +168,8 @@ class Machine:
     # --- execution --------------------------------------------------------
 
     def step(self):
-        """Execute one instruction and service any IO it triggered.
+        """Execute one instruction, taking a pending interrupt first, and
+        service any IO it triggered.
 
         Returns 1 once the CPU has halted, else 0.
         """
@@ -163,7 +177,21 @@ class Machine:
             return 1
         if self.ram.io_pending:
             self.io_controller.update()
+        self._countdown -= 1
+        if not self._countdown:
+            self._countdown = CLOCK_SAMPLE_INTERVAL
+            self.poll_devices()
         return 0
+
+    def poll_devices(self):
+        """Turn what the devices raised into pending interrupts: a ticking
+        timer come due, and Ctrl+C with break on. step() and run() call this
+        every CLOCK_SAMPLE_INTERVAL instructions, and the CPU takes the
+        interrupt before its next instruction with interrupts on."""
+        if self.timer.poll():
+            self.cpu.interrupt(VEC_TIMER)
+        if self.hid.take_break():
+            self.cpu.interrupt(VEC_BREAK)
 
     def run(self, on_frame=None, report_ips=None, deadline=None):
         """Run until HALT.
@@ -178,7 +206,10 @@ class Machine:
         now = time.time()
         last_frame = last_ips = now
         self.instruction_count = 0
-        countdown = CLOCK_SAMPLE_INTERVAL
+        # Carried on from where step() or the last run() left it, and the
+        # window it counts down is how many instructions the next sample
+        # point adds to the totals.
+        countdown = window = self._countdown
 
         # step() is inlined below rather than called. At a couple of million
         # instructions a second, a method call that does one `if` is about
@@ -200,59 +231,64 @@ class Machine:
         # of the handlers.
         executed = 0
 
-        while True:
-            if cpu.halted:
-                break
+        try:
+            while True:
+                if cpu.halted:
+                    break
+                # Before every instruction, as CPU.run() does (docs/kernel.md Q5).
+                if cpu.pending and cpu.ie:
+                    cpu.take_interrupt()
 
-            pc = cpu.pc
-            # try:
-            opcode, dst, src1, src2, imm = unpack(memory, pc)
-            # except struct.error:
-            #     raise RuntimeError(f"Fetch past end of memory at PC={pc:#06x}") from None
-            cpu.pc = pc + instruction_size
+                pc = cpu.pc
+                # A try costs nothing until it catches, on Python 3.11 and up.
+                try:
+                    opcode, dst, src1, src2, imm = unpack(memory, pc)
+                except struct.error:
+                    cpu.fetch_fault(pc)
+                else:
+                    cpu.pc = pc + instruction_size
+                    # An opcode with no instruction has the bad-opcode fault here.
+                    handlers[opcode](cpu, dst, src1, src2, imm)
 
-            handler = handlers[opcode]
-            if handler is None:
-                raise RuntimeError(f"Unknown opcode {opcode} at PC={pc:#06x}")
-            handler(cpu, dst, src1, src2, imm)
+                if ram.io_pending:
+                    controller.update()
 
-            if ram.io_pending:
-                controller.update()
+                # Reading the clock costs more than executing an instruction, so
+                # do it once per CLOCK_SAMPLE_INTERVAL rather than twice per
+                # instruction. A countdown beats a modulo on this path.
+                countdown -= 1
+                if countdown:
+                    continue
+                executed += window
+                self.instruction_count += window
+                self.total_instructions += window
+                window = countdown = CLOCK_SAMPLE_INTERVAL
+                self.poll_devices()
 
-            # Reading the clock costs more than executing an instruction, so
-            # do it once per CLOCK_SAMPLE_INTERVAL rather than twice per
-            # instruction. A countdown beats a modulo on this path.
-            countdown -= 1
-            if countdown:
-                continue
-            executed += CLOCK_SAMPLE_INTERVAL
-            self.instruction_count += CLOCK_SAMPLE_INTERVAL
-            self.total_instructions += CLOCK_SAMPLE_INTERVAL
-            countdown = CLOCK_SAMPLE_INTERVAL
+                now = time.time()
+                if now - last_frame >= frame_interval:
+                    self.display_io.update()
+                    if on_frame is not None:
+                        on_frame()
+                    last_frame = now
 
-            now = time.time()
-            if now - last_frame >= frame_interval:
-                self.display_io.update()
-                if on_frame is not None:
-                    on_frame()
-                last_frame = now
+                if deadline is not None and now >= deadline:
+                    break
 
-            if deadline is not None and now >= deadline:
-                break
-
-            elapsed = now - last_ips
-            if elapsed >= 1.0:
-                self.last_ips = self.instruction_count / elapsed
-                if report_ips is not None:
-                    report_ips(self.last_ips)
-                self.instruction_count = 0
-                last_ips = now
-
-        # Count the partial window the loop ended in, so the totals are
-        # exact rather than rounded down to the last sample point.
-        remainder = CLOCK_SAMPLE_INTERVAL - countdown
-        self.instruction_count += remainder
-        self.total_instructions += remainder
+                elapsed = now - last_ips
+                if elapsed >= 1.0:
+                    self.last_ips = self.instruction_count / elapsed
+                    if report_ips is not None:
+                        report_ips(self.last_ips)
+                    self.instruction_count = 0
+                    last_ips = now
+        finally:
+            # Count the partial window the loop ended in, so the totals are
+            # exact rather than rounded down to the last sample point.
+            remainder = window - countdown
+            self.instruction_count += remainder
+            self.total_instructions += remainder
+            self._countdown = countdown
 
     def dump_ram_to(self, path):
         """Write the whole address space out for debugging."""

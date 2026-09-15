@@ -187,6 +187,7 @@ class FunctionDef(Node):
     params: List[Param] = field(default_factory=list)
     body: Optional[Block] = None
     is_static: bool = False
+    variadic: bool = False         # `...` after the named parameters
     frame_size: int = 0            # filled in by the analyser
     label: str = ""                # assembly label (may be mangled)
     locals: list = field(default_factory=list)

@@ -121,6 +121,10 @@ def test_urls():
     ({"display_port": "8000"}, "whole number"),
     ({"display_port": True}, "whole number"),
     ({"auto_build": "yes"}, "true or false"),
+    ({"serial": "yes"}, "true or false"),
+    ({"serial": True, "serial_log": "build/serial.log"}, None),
+    ({"serial_log": 7}, "path of a file"),
+    ({"serial_log": None}, None),
     ({"program_dirs": [1, 2]}, "list of folder names"),
     ("{bad json,}", "not valid JSON"),
     ([1, 2, 3], "must contain a JSON object"),
@@ -159,6 +163,26 @@ def test_the_disk_is_not_build_output():
 def test_override_resolves_paths_too():
     config = load_config().override(build_dir="elsewhere")
     assert config.build_dir == REPO_ROOT / "elsewhere"
+
+
+def test_serial_is_off_until_asked_for():
+    assert DEFAULTS["serial"] is False and DEFAULTS["serial_log"] is None
+    config = load_config()
+    assert config.serial is False and config.serial_log is None
+
+
+def test_the_serial_flags_override_the_keys():
+    """--serial and --serial-log PATH, for one run (docs/phase5_plan.md
+    §4.4). Not giving --serial leaves the key as config.json has it."""
+    from emulator.cli import build_parser
+    with tempfile.TemporaryDirectory() as d:
+        on = load_config(write_config(d, {"serial": True}))
+    args = build_parser().parse_args([])
+    assert on.override(serial=args.serial, serial_log=args.serial_log).serial is True
+    args = build_parser().parse_args(["--serial", "--serial-log", "logs/boot.log"])
+    config = load_config().override(serial=args.serial, serial_log=args.serial_log)
+    assert config.serial is True
+    assert config.serial_log == REPO_ROOT / "logs" / "boot.log"
 
 
 # --- program discovery ------------------------------------------------------

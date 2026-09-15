@@ -979,10 +979,11 @@ def test_the_bar_lays_out_without_overlap_at_every_pixel_size():
         c._build_buttons()
 
         assert [b.label for b in c.buttons] == [
-            "Clear", "-", "+", "Load from server", "Load from PC", "Eject"]
+            "Clear", "-", "+", "Serial", "Load from server", "Load from PC", "Eject"]
         for left, right in zip(c.buttons, c.buttons[1:]):
             assert right.rect.left > left.rect.right, f"{left.label} overlaps {right.label}"
         assert c._px_x > c.buttons[2].rect.right, "the px label sits on the + button"
+        assert c.buttons[3].rect.left > c._px_x + c.font.size("px: 16")[0], "Serial sits on the px label"
         assert c._info_x > c.buttons[-1].rect.right, "the disc label sits on Eject"
 
         for px in (module.MIN_PIXEL_SIZE, module.MAX_PIXEL_SIZE):
@@ -1012,11 +1013,13 @@ def test_the_cd_buttons_are_disabled_when_there_is_no_drive():
         c.font = pygame.font.SysFont(None, 22)
         c.cd_url = None
         c._build_buttons()
-        assert not any(b.enabled for b in c.buttons[3:]), "CD buttons live with no drive"
-        assert all(b.enabled for b in c.buttons[:3]), "the other buttons went dead too"
+        by_label = {b.label: b for b in c.buttons}
+        drive = [by_label[name] for name in ("Load from server", "Load from PC", "Eject")]
+        assert not any(b.enabled for b in drive), "CD buttons live with no drive"
+        assert all(b.enabled for b in c.buttons if b not in drive), "the other buttons went dead too"
 
         # A disabled button still owns its click, so it cannot fall through.
-        eject = c.buttons[5]
+        eject = by_label["Eject"]
         called = []
         eject.callback = lambda: called.append(1)
         assert eject.handle_click(eject.rect.center) is True

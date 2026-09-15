@@ -105,6 +105,14 @@ dialog needs tkinter, which is a system package rather than a pip one
 (`sudo apt install python3-tk`); without it that one button says so and
 everything else works.
 
+Both have a **Serial panel** too, left of the screen: what the machine writes
+to its debug port, IO channel 8, each line with the time since power-on
+([docs/phase5c_plan.md](docs/phase5c_plan.md)). The *Serial* button opens and
+closes it, its right edge drags it wider or narrower, and it follows new lines
+unless you scroll up. *Clear* empties the view only, and *times* hides the
+times. The browser remembers it in `localStorage`, and the pygame client in
+`build/display.json`. Nothing done in the panel reaches the machine.
+
 ### Running it
 
 Without `--run` you get a menu (run / single-step debugger / dump RAM / CPU
@@ -113,6 +121,22 @@ transaction, disk read and key event), `--headless` (bind no ports) and
 `--disasm-bios`. `--bios2 PATH` boots through a second-stage BIOS other than
 the one the launcher builds, used as it is ([docs/os_cd.md](docs/os_cd.md)).
 `--cd PATH` puts a disc in the CD drive before power-on, so bios2 can boot it.
+`--serial` prints what the machine writes to its debug port in this terminal,
+each line with the time since power-on, and `--serial-log PATH` writes the same
+lines to a file, started fresh each run ([docs/phase5_plan.md](docs/phase5_plan.md)).
+Booting the installed disk and running `ls` prints lines like these:
+
+```
+[   0.000] [bios] bios2
+[   0.031] [bios2] Hard disk: PIGEONOS, bootable
+[   0.035] [bios2] counting down 5 s to Hard disk
+[   1.920] [bios2] Enter: booting Hard disk
+[   2.104] [kernel] started, 236068 bytes at 0x00020000
+[   2.106] [kernel] mounted channel 2, PIGEONOS
+[   2.210] [kernel] exec /bin/sh.bin at 0x01000000, depth 1
+[   9.873] [kernel] exec /bin/ls.bin at 0x0103C000, depth 2
+[   9.951] [kernel] /bin/ls.bin ended: 0
+```
 
 An installation disc is a project file away:
 
@@ -123,10 +147,16 @@ python3 start_emulator.py --cd build/pigeonos.img --disk disks/os.img --run
 
 With no program picked, bios2 boots the disc into its installer. Enter
 formats the hard disk, copies the disc onto it and makes it boot the
-graphing calculator; Enter again restarts, and the hard disk boots the
-calculator. Installing erases the hard disk, hence `--disk disks/os.img`
-rather than the `disks/hdd.img` your programs save to
-([docs/os_cd.md](docs/os_cd.md) §8).
+kernel. Enter again restarts: the hard disk boots the kernel, which runs
+what `/etc/boot.conf` names: a splash screen, which any key cuts short, then
+the shell ([docs/phase6_plan.md](docs/phase6_plan.md)). `ls /bin` lists what it can run: `mkdir`, `cp`,
+`mv`, `rm` and the other file commands, `graph` — the graphing
+calculator — and `img FILE.bmp`, which shows an image (`-s` stretches it to
+the screen), among them; in both, Esc or Ctrl+C comes back to the prompt
+([docs/kernel.md](docs/kernel.md)). The prompt is the file
+`/etc/shell_header.conf` ([docs/shell.md](docs/shell.md)). Installing erases the hard disk,
+hence `--disk disks/os.img` rather than the `disks/hdd.img` your programs
+save to ([docs/os_cd.md](docs/os_cd.md) §8).
 
 ### config.json
 
@@ -168,6 +198,8 @@ partial or missing file is fine.
 | `cd_upload_dir` | where a browser upload is written before it is inserted. Keep it inside `cd_dirs`, or an uploaded disc will not appear in the picker afterwards |
 | `cd_max_upload` | the ceiling on an upload — the one path here that writes to the host disk. `"64M"`, `"512K"` or a byte count |
 | `cd` | a disc to put in the drive before the machine starts, so bios2 can boot it: a path, or `null` for an empty drive. `--cd PATH` is the same for one run ([docs/os_cd.md](docs/os_cd.md)) |
+| `serial` | print what the machine writes to its debug port, IO channel 8, in the launcher's terminal, each line with the time since power-on. `--serial` is the same for one run ([docs/phase5_plan.md](docs/phase5_plan.md)) |
+| `serial_log` | a file to write those lines to as well, started fresh each run with its date and time as the first line: a path, or `null` for none. `--serial-log PATH` is the same for one run |
 
 Relative paths are resolved against the repo root, so the file means the same
 thing whichever directory you run from. A malformed value is reported with the
@@ -216,8 +248,10 @@ firmware/bios.asm     boot ROM source: loads bios2 from channel 7, else a progra
 firmware/bios2.c      second-stage BIOS, built for 0x07000000: boot screen, countdown, menu
 firmware/boot.asm     boot sector: the code in block 0 of a bootable disk
 user/                 example programs (.asm and .c alike)
-user/os/              an installation disc: its project file and its installer
-lib/pigeon/           the C libraries: mem, string, fs, cd, display, input, math
+user/os/              PigeonOS: the disc's project file, the installer, the kernel
+user/os/bin/          the shell and its programs: sh, ls, cat, echo, mkdir, rmdir, rm, mv, cp, clear, more, edit
+user/os/etc/          the installed system's settings: shell_header.conf, the prompt
+lib/pigeon/           the C libraries: mem, string, stdio, stdarg, fs, cd, display, input, math, sys
 compiler/             pigeon-cc: C -> assembly
 display/              pygame client + browser front-end (talks HTTP only)
 tools/                disasm.py, bench.py, pfs.py (PigeonFS disk images)
@@ -237,7 +271,7 @@ disks/                the channel-2 disk image (gitignored, survives a clean)
    it holds one of at most 15 MB, a single `READ_DMA` copies it to
    `0x07000000` and the BIOS jumps there ([docs/os_cd.md](docs/os_cd.md)).
 3. **bios2** lists what it can boot from — the program on channel 1, the
-   hard disk, the CD — and counts down 2 s to the first that can boot. Enter
+   hard disk, the CD — and counts down 5 s to the first that can boot. Enter
    boots at once; Esc opens a menu. A program is loaded with one more
    `READ_DMA` and called at `0x20000`. A disk or disc whose block 0 carries a
    boot sector has that block copied to `0x15818`, and its code called. The
@@ -295,16 +329,15 @@ byte:  0        1      2       3       4  5  6  7
 An unused operand slot holds `0xFF` (`NONE_REG`). Most instructions accept
 *either* a register *or* an immediate in their last slot.
 
-| Op | | Op | | Op | | Op | |
-|---|---|---|---|---|---|---|---|
-| 0 | `NOP` | 8 | `XOR` | 16 | `JZ` | 24 | `POP` |
-| 1 | `MOV` | 9 | `NOT` | 17 | `JNZ` | 25 | `CALL` |
-| 2 | `ADD` | 10 | `JMP` | 18 | `JL` | 26 | `RET` |
-| 3 | `SUB` | 11 | `MR` | 19 | `JG` | 27 | `SHL` |
-| 4 | `MUL` | 12 | `MW` | 20 | `JLE` | 28 | `SHR` |
-| 5 | `DIV` | 13 | `MRW` | 21 | `JGE` | | |
-| 6 | `OR` | 14 | `MWW` | 22 | `HALT` | | |
-| 7 | `AND` | 15 | `CMP` | 23 | `PUSH` | | |
+| Op | | Op | | Op | | Op | | Op | |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | `NOP` | 7 | `AND` | 14 | `MWW` | 21 | `JGE` | 28 | `SHR` |
+| 1 | `MOV` | 8 | `XOR` | 15 | `CMP` | 22 | `HALT` | 29 | `GETSP` |
+| 2 | `ADD` | 9 | `NOT` | 16 | `JZ` | 23 | `PUSH` | 30 | `SETSP` |
+| 3 | `SUB` | 10 | `JMP` | 17 | `JNZ` | 24 | `POP` | 31 | `EI` |
+| 4 | `MUL` | 11 | `MR` | 18 | `JL` | 25 | `CALL` | 32 | `DI` |
+| 5 | `DIV` | 12 | `MW` | 19 | `JG` | 26 | `RET` | 33 | `IRET` |
+| 6 | `OR` | 13 | `MRW` | 20 | `JLE` | 27 | `SHL` | 34 | `SETIV` |
 
 - `MR`/`MW` move **one byte**; `MRW`/`MWW` a **32-bit word**.
 - `MW`/`MWW` take their *address* from a register: `MWW D, A` writes A to the
@@ -313,6 +346,15 @@ An unused operand slot holds `0xFF` (`NONE_REG`). Most instructions accept
   a borrow, not a sign). Pair it with a `J**`.
 - Registers are unsigned 32-bit and wrap; `SUB` below zero yields a large value.
 - `CALL` pushes the return address, `RET` pops it. Keep the stack balanced.
+- `GETSP r` reads the stack pointer, and `SETSP r` or `SETSP #n` sets it.
+- **Interrupts and faults** ([docs/kernel.md](docs/kernel.md) §13): `SETIV` sets
+  the address of a vector table, one handler address for each `VEC_*` number.
+  To deliver one, the CPU pushes a flags word (`FLAG_ZERO`, `FLAG_LESS`,
+  `FLAG_IE`), then the address to return to, turns interrupts off and jumps to
+  the handler. `IRET` undoes all of that. `EI` and `DI` turn interrupts on and
+  off; faults — `DIV` by zero, an unknown opcode, a fetch past the end of
+  memory — come either way. A fault with no handler stops the emulator, as it
+  always did.
 
 Adding an instruction is one decorated function in `instruction_set.py`:
 
@@ -349,11 +391,12 @@ that fires the command.
 |---|---|---|
 | 1 `CH_USERPROG` | boot disk | as HDD |
 | 2 `CH_HDD` | disk | `0` NOP `1` GET_SIZE `2` READ `3` WRITE `4` TRUNCATE `5` FLUSH · `6` READ_DMA `7` WRITE_DMA — straight to and from RAM, any length, with `[address, count]` in the window and R/W 0 so the count comes back |
-| 3 `CH_HID` | input | **real-time:** `1` mouse pos (x≪16\|y) `2` button mask `6` one key's state `7` 32-byte held-key bitmap · **FIFO:** `3` pop character `4` pop mouse edge `5` pop key edge |
-| 4 `CH_TIMER` | timers | `1` START `2` STOP `4` RESET `5` STATUS → `(status, remaining_ms)` |
-| 5 `CH_DISPLAY` | framebuffer | `1` INFO → `(w, h, size)` `2` SET_BASE (page flip, ADDRESS = the buffer to scan out) `3` GET_BASE `4` FILL (ADDRESS = destination, colour in the data window) |
+| 3 `CH_HID` | input | **real-time:** `1` mouse pos (x≪16\|y) `2` button mask `6` one key's state `7` 32-byte held-key bitmap · **FIFO:** `3` pop character `4` pop mouse edge (a wheel notch: button 5 up or 6 down, pressed then released) `5` pop key edge · **break:** `8` SET_BREAK, ADDRESS 1 on or 0 off: Ctrl+C raises `VEC_BREAK` instead of arriving as a key |
+| 4 `CH_TIMER` | timers | `1` START `2` STOP `4` RESET `5` STATUS → `(status, remaining_ms)` · `6` TICK: raise `VEC_TIMER` every LENGTH ms until STOP |
+| 5 `CH_DISPLAY` | framebuffer | `1` INFO → `(w, h, size)` `2` SET_BASE (page flip, ADDRESS = the buffer to scan out) `3` GET_BASE `4` FILL (ADDRESS = destination, colour in the data window) `5` COPY (ADDRESS = a buffer, `[to, from, count]` offsets in the data window, R/W 0 so 1 moved or 0 refused comes back) |
 | 6 `CH_CD` | removable disc | `0`-`5` as HDD, but **read-only**: WRITE and TRUNCATE are refused · `8` MEDIA → `(magic, present, generation, size, name[32])` · `9` EJECT → `(ejected, generation)` |
 | 7 `CH_BIOS2` | firmware | the second-stage BIOS ([docs/os_cd.md](docs/os_cd.md)). As HDD, but **read-only**: WRITE, TRUNCATE and anything sent with R/W 1 get 0 bytes, WRITE_DMA gets `0xFFFFFFFF`. Registered only when there is a bios2; `fs.c` and `cd.c` never send it anything |
+| 8 `CH_DEBUG` | debug port | **write-only**, and never on the screen: `0` NOP → 4 zero bytes · `1` WRITE, R/W 1: the text in the window, up to 4 KB, and RETURN_DATA is the bytes taken · `2` WRITE_DMA, R/W 0: `[address, count]` in the window, anywhere in RAM, up to 64 KB, and the count or `0xFFFFFFFF` comes back. The host keeps the last 64 KB, with the time each line started, for `--serial`, `--serial-log` and `GET /serial` ([docs/phase5_plan.md](docs/phase5_plan.md)) |
 
 Input comes in **two buffers**, because guest code asks two different questions.
 The FIFOs answer *"what happened, in order"* — a key pressed and released
@@ -383,9 +426,14 @@ python3 tests/test_loader.py      # programs larger than one DMA window
 python3 tests/test_bios2.py       # the two-stage BIOS: stage 1, channel 7, bios2's screen
 python3 tests/test_boot.py        # the boot sector, and pfs.py boot
 python3 tests/test_project.py     # cc.py --project, and the launcher's --cd
+python3 tests/test_relocatable.py # program files the kernel loads anywhere: cc.py --relocatable
+python3 tests/test_interrupts.py  # interrupts, faults, GETSP/SETSP, the timer's TICK and break
+python3 tests/test_kernel.py      # the kernel and its shell, booted from a test disk
+python3 tests/test_stdio.py       # printf's conversions, checked against Python's %
+python3 tests/test_edit.py        # edit, the mini nano, driven through the kernel
 python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
 python3 tests/test_fs.py          # PigeonFS on the guest, checked against pfs.py
-python3 -m pytest tests/          # all 149, if you have pytest
+python3 -m pytest                 # all of them, in parallel: pip install -r requirements-dev.txt
 
 python3 tools/bench.py            # interpreter throughput
 python3 tools/disasm.py build/bios.bin
@@ -395,7 +443,16 @@ python3 tools/pfs.py boot /boot.bin   # make that disk boot a program, through b
 ```
 
 The suite runs without pytest — `tests/_runner.py` provides a minimal runner,
-since this project's environment is PEP 668-managed.
+since this project's environment is PEP 668-managed. With pytest,
+`pytest.ini` runs the tests on one worker per logical CPU: 1,012 tests in a
+minute and a half on 12, against seven and a half minutes in one process.
+`-n 0` runs them in one process.
+
+Either way, each test runs with the timer device on a clock that moves 50 ms
+every time it is read (`tests/_runner.py`). The BIOS's two-second wait costs
+no real time, and a test that stops after a number of instructions doesn't
+pass or fail with the speed of the host. A test that measures real seconds is
+marked `@real_clock`.
 
 `tests/golden/` holds three binaries assembled by the *original* toolchain.
 They are the regression gate: if the assembler's output ever changes, read the

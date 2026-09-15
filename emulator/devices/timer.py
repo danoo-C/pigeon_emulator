@@ -10,11 +10,16 @@ Commands (passed as `command`):
     CMD_START  (1) - start (or restart) the timer at `address`.
                      `length` is the requested duration in milliseconds.
     CMD_STOP   (2) - stop the timer at `address` (freezes it in
-                     STATUS_STOPPED).
+                     STATUS_STOPPED). A ticking timer stops ticking.
     CMD_RESET  (4) - restart the timer at `address` using its last
                      duration.
     CMD_STATUS (5) - read back the current status/remaining time for
                      the timer at `address` without changing it.
+    CMD_TICK   (6) - start the timer at `address` ticking: every `length`
+                     milliseconds, until STOP, it raises the timer
+                     interrupt, VEC_TIMER (docs/kernel.md §13). It reads
+                     as RUNNING, with the time left to its next tick.
+                     START makes it a one-shot timer again.
 
 Status values (returned as the first byte of every response):
     STATUS_NONE    (0) - timer was never started.
@@ -23,8 +28,8 @@ Status values (returned as the first byte of every response):
     STATUS_STOPPED (3) - timer was explicitly stopped.
 
 Return encoding:
-    CMD_START/STOP/RESET/STATUS all return a fixed RESPONSE_LEN bytes
-    (8 by default) as two little-endian 32-bit words, regardless of
+    CMD_START/STOP/RESET/STATUS/TICK all return a fixed RESPONSE_LEN
+    bytes (8 by default) as two little-endian 32-bit words, regardless of
     the requested duration:
         word 0 (bytes 0-3) -> status (one of STATUS_*)
         word 1 (bytes 4-7) -> remaining time in milliseconds
@@ -36,12 +41,20 @@ Return encoding:
     come back as a mostly-zero, multi-KB response. CMD_NOP still
     echoes back `length` zero bytes, matching the original stub.
 
-Timing note: this is wall-clock based (uses time.time()), so it's a
-"real seconds" timer, not tied to emulated CPU cycles.
+Timing note: this is wall-clock based (it reads `clock`, which is
+time.time()), so it's a "real seconds" timer, not tied to emulated CPU
+cycles. A tick is noticed when the machine polls, every
+CLOCK_SAMPLE_INTERVAL instructions (emulator/machine.py), and ticks missed
+in between arrive as one: an interrupt is a single pending bit.
 """
 
 import struct
-import time as t
+import time
+
+# What every timer reads the time from. The tests swap in a clock that steps
+# each time it is read (tests/_runner.py), so a guest waiting on a timer
+# costs them no real seconds.
+clock = time.time
 
 
 CMD_NOP = 0
@@ -49,6 +62,7 @@ CMD_START = 1
 CMD_STOP = 2
 CMD_RESET = 4
 CMD_STATUS = 5
+CMD_TICK = 6
 
 
 STATUS_NONE = 0
@@ -72,10 +86,19 @@ class TI:
         self.status = STATUS_NONE
         self.user_time = 0.0    # requested duration, in seconds
         self.start_time = 0.0
+        self.period = 0.0       # seconds between ticks; 0 for a one-shot timer
 
     def start(self, duration_seconds: float) -> None:
         self.user_time = duration_seconds
-        self.start_time = t.time()
+        self.period = 0.0
+        self.start_time = clock()
+        self.status = STATUS_RUNNING
+
+    def tick(self, period_seconds: float) -> None:
+        """Tick every `period_seconds` until stopped. start_time is the last
+        tick, so the remaining time is the time to the next one."""
+        self.user_time = self.period = period_seconds
+        self.start_time = clock()
         self.status = STATUS_RUNNING
 
     def stop(self) -> None:
@@ -83,23 +106,38 @@ class TI:
 
     def reset(self) -> None:
         """Restart the countdown using the last duration passed to start()."""
-        self.start_time = t.time()
+        self.start_time = clock()
         self.status = STATUS_RUNNING
+
+    @property
+    def ticking(self) -> bool:
+        return self.status == STATUS_RUNNING and self.period > 0
 
     def get(self):
         """Return (status, remaining_seconds).
 
-        Side effect: flips RUNNING -> DONE once time is up.
+        Side effect: flips RUNNING -> DONE once time is up, unless the
+        timer is ticking, which never finishes.
         """
         if self.status != STATUS_RUNNING:
             return (self.status, 0)
 
-        elapsed = t.time() - self.start_time
+        elapsed = clock() - self.start_time
         remaining = self.user_time - elapsed
         if remaining <= 0:
-            self.status = STATUS_DONE
+            if not self.period:
+                self.status = STATUS_DONE
             return (self.status, 0)
         return (self.status, remaining)
+
+    def due(self, now: float) -> bool:
+        """For a ticking timer: whether a tick has come since the last one,
+        moving on to the latest. Several missed ticks count as one."""
+        missed = int((now - self.start_time) / self.period)
+        if missed <= 0:
+            return False
+        self.start_time += missed * self.period
+        return True
 
 
 class Timer:
@@ -113,6 +151,19 @@ class Timer:
             timer = TI(addr)
             self.timers[addr] = timer
         return timer
+
+    def poll(self) -> bool:
+        """Whether any ticking timer has ticked since the last poll: the
+        machine raises the timer interrupt when it has. The clock is read
+        only while a timer is ticking."""
+        due = False
+        now = None
+        for timer in self.timers.values():
+            if timer.ticking:
+                if now is None:
+                    now = clock()
+                due = timer.due(now) or due
+        return due
 
     @staticmethod
     def _encode(status: int, remaining_seconds: float) -> bytes:
@@ -129,7 +180,8 @@ class Timer:
         - `read_write`: 0=read, always read
         - `command`: one of CMD_* constants
         - `length`: for CMD_START, the requested duration in milliseconds;
-          for CMD_NOP, the number of filler bytes to return. Ignored by
+          for CMD_TICK, the milliseconds between ticks; for CMD_NOP, the
+          number of filler bytes to return. Ignored by
           CMD_STOP/CMD_RESET/CMD_STATUS.
         - `address`: timer id
         - `data`: unused
@@ -147,6 +199,12 @@ class Timer:
 
         if cmd == CMD_START:
             timer.start(length / 1000.0)
+            status, remaining = timer.get()
+            return self._encode(status, remaining)
+
+        if cmd == CMD_TICK:
+            # At least a millisecond: a period of 0 would be due at every poll.
+            timer.tick(max(length, 1) / 1000.0)
             status, remaining = timer.get()
             return self._encode(status, remaining)
 

@@ -18,7 +18,12 @@
  *      says where a file's blocks are (docs/filesystem.md, section 3).
  *   5. ENTER restarts, by calling address 0, where the BIOS still is. The
  *      hard disk comes before the CD, so the hard disk is what boots.
+ *
+ * Each step is said on the debug port too, each line starting
+ * "[installer] " (docs/phase5b_plan.md step 3), every file copied and every
+ * failure included.
  */
+#include <pigeon/debug.h>
 #include <pigeon/display.h>
 #include <pigeon/fs.h>
 #include <pigeon/input.h>
@@ -158,6 +163,7 @@ int copy_file(char *path) {
 
     files_done++;
     progress(path);
+    dbg_printf("[installer] copying %s\n", path);
     on(from, disc, path);
     on(to, CH_HDD, path);
     r = fs_stat(from, &st);
@@ -171,6 +177,7 @@ int copy_file(char *path) {
         if (r >= 0 && r != n) r = FS_ENOSPC;
     }
     free(data);
+    if (r < 0) dbg_printf("[installer] %s: %s\n", path, fs_strerror(r));
     return (r < 0) ? r : 0;
 }
 
@@ -270,7 +277,9 @@ int make_bootable(void) {
     for (i = 0u; i < (BOOT_BLOCK - BOOT_CODE) / 4u; i++) WORD(BOOT_CODE / 4u + i) = sector[i];
     write_block(CH_HDD, 0u);
     if (!read_block(CH_HDD, 0u)) return 0;
-    return WORD(BOOT_RECORD / 4u) == BOOT_SIGNATURE && WORD(BOOT_RECORD / 4u + 1u) == first;
+    if (WORD(BOOT_RECORD / 4u) != BOOT_SIGNATURE || WORD(BOOT_RECORD / 4u + 1u) != first) return 0;
+    dbg_printf("[installer] boot record: %s, block %u, %u bytes\n", SYSTEM_PATH, first, size);
+    return 1;
 }
 
 int install(int system) {
@@ -280,6 +289,7 @@ int install(int system) {
     show(R_STATUS, "Formatting the hard disk", INK);
     r = fs_statvfs(disc, &vi);
     if (r < 0) return r;
+    dbg_printf("[installer] formatting the hard disk as %s\n", vi.label);
     r = fs_format(CH_HDD, vi.label, FS_FORMAT_FORCE);
     if (r < 0) return r;
     r = fs_mount(CH_HDD);
@@ -312,6 +322,7 @@ int main(void) {
     disc = *(unsigned *)BOOT_CHANNEL;
     r = fs_mount(disc);
     if (r < 0) {
+        dbg_printf("[installer] cannot mount the disc on channel %u: %s\n", disc, fs_strerror(r));
         disp_text(0u, Y(R_TITLE), "INSTALLER", INK);
         show(R_STATUS, "Boot this from its disc.", WARN);
         show(R_DETAIL, fs_strerror(r), DIM);
@@ -329,9 +340,11 @@ int main(void) {
     }
     disp_text(0u, Y(R_TITLE), line, INK);
     show(R_WHAT, "INSTALLER", DIM);
+    dbg_printf("[installer] disc on channel %u: %s\n", disc, line);
 
     bytes = disk_bytes(CH_HDD);
     if (bytes == 0u) {
+        dbg_print("[installer] no hard disk\n");
         show(R_STATUS, "There is no hard disk.", WARN);
         return FS_ENODEV;
     }
@@ -341,6 +354,7 @@ int main(void) {
     strlcat(line, " K", sizeof(line));
     show(R_DISK, line, INK);
     show(R_ERASE, "Everything on it is erased.", WARN);
+    dbg_printf("[installer] hard disk: %u K\n", bytes / 1024u);
 
     files_total = 0u;
     walk("/", 0u, 0);
@@ -351,19 +365,28 @@ int main(void) {
     system = system_on_disc();
     if (system) show(R_BOOTS, "It will boot /boot.bin", INK);
     else show(R_BOOTS, "Nothing on it will boot", WARN);
+    if (system) dbg_printf("[installer] %u files to copy; %s will boot\n", files_total, SYSTEM_PATH);
+    else dbg_printf("[installer] %u files to copy; nothing on it will boot\n", files_total);
     show(R_KEYS, "ENTER install   ESC cancel", DIM);
 
     if (wait_for(KEY_ENTER, KEY_ESC) == KEY_ESC) {
+        dbg_print("[installer] Esc: cancelled, nothing written\n");
         show(R_STATUS, "Cancelled: nothing was changed.", INK);
         show(R_KEYS, "", DIM);
         return 0;
     }
     show(R_KEYS, "", DIM);
+    dbg_print("[installer] Enter: installing\n");
     r = install(system);
     if (r < 0) {
         show(R_STATUS, "The install failed:", WARN);
-        if (r == NO_BOOT) show(R_DETAIL, "the hard disk would not boot", DIM);
-        else show(R_DETAIL, fs_strerror(r), DIM);
+        if (r == NO_BOOT) {
+            dbg_print("[installer] failed: the hard disk would not boot\n");
+            show(R_DETAIL, "the hard disk would not boot", DIM);
+        } else {
+            dbg_printf("[installer] failed: %s\n", fs_strerror(r));
+            show(R_DETAIL, fs_strerror(r), DIM);
+        }
         return r;
     }
     strlcpy(line, "Installed ", sizeof(line));
@@ -373,8 +396,10 @@ int main(void) {
     show(R_STATUS, line, GOOD);
     if (system) show(R_DETAIL, "The hard disk boots /boot.bin.", DIM);
     else show(R_DETAIL, "", DIM);
+    dbg_printf("[installer] installed %u files; Enter restarts\n", files_done);
     show(R_KEYS, "ENTER restart", DIM);
     wait_for(KEY_ENTER, KEY_ENTER);
+    dbg_print("[installer] restarting\n");
     ((void (*)(void))0)();                  /* the BIOS, still at address 0 */
     return 0;
 }

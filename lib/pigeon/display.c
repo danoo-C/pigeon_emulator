@@ -22,6 +22,7 @@
 #define DISP_CMD_INFO      1
 #define DISP_CMD_SET_BASE  2
 #define DISP_CMD_FILL      4
+#define DISP_CMD_COPY      5
 
 #define DISP_BYTES (DISP_W * DISP_H * 4)
 
@@ -189,6 +190,50 @@ void disp_rect(unsigned x, unsigned y, unsigned w, unsigned h, color_t c) {
     if (x + w > DISP_W) w = DISP_W - x;
     if (y + h > DISP_H) h = DISP_H - y;
     while (row < h) { disp_hline(x, y + row, w, c); row++; }
+}
+
+/* Bytes moved within the draw target by the device: 1 if it moved them.
+ * The reply's length is checked first, because a device without COPY
+ * answers nothing and leaves the arguments sitting in the window. */
+static int disp_copy(unsigned to, unsigned from, unsigned bytes) {
+    if (!disp_have_hw()) return 0;
+    IO_DATAW[0] = to;
+    IO_DATAW[1] = from;
+    IO_DATAW[2] = bytes;
+    disp_call(0u, DISP_CMD_COPY, 4u, disp_target);
+    return IO_RETLEN == 4u && IO_DATAW[0] == 1u;
+}
+
+void disp_scroll(unsigned y, unsigned h, int dy, color_t bg) {
+    unsigned row_bytes = DISP_W * 4u;
+    unsigned n;
+    unsigned kept;
+    unsigned gap;
+    unsigned i;
+    if (y >= DISP_H || h == 0u || dy == 0) return;
+    if (y + h > DISP_H) h = DISP_H - y;
+    n = dy < 0 ? (unsigned)(0 - dy) : (unsigned)dy;
+    if (n >= h) {
+        disp_rect(0u, y, DISP_W, h, bg);
+        return;
+    }
+    kept = h - n;
+    if (dy < 0) {
+        if (!disp_copy(y * row_bytes, (y + n) * row_bytes, kept * row_bytes))
+            memmove((void *)row_ptr(0u, y), (void *)row_ptr(0u, y + n), kept * row_bytes);
+        gap = y + kept;
+    } else {
+        if (!disp_copy((y + n) * row_bytes, y * row_bytes, kept * row_bytes))
+            memmove((void *)row_ptr(0u, y + n), (void *)row_ptr(0u, y), kept * row_bytes);
+        gap = y;
+    }
+    /* The rows left behind: the first drawn, and copied down to the rest,
+     * which is cheaper than drawing them when the device will. */
+    disp_hline(0u, gap, DISP_W, bg);
+    for (i = 1u; i < n; i++) {
+        if (!disp_copy((gap + i) * row_bytes, gap * row_bytes, row_bytes))
+            disp_hline(0u, gap + i, DISP_W, bg);
+    }
 }
 
 void disp_frame(unsigned x, unsigned y, unsigned w, unsigned h, color_t c) {

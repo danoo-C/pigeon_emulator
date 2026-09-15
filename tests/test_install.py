@@ -3,8 +3,9 @@
 docs/os_cd.md, section 8. The example project's disc is built, put in the
 drive, and booted on a Machine with a blank hard disk. The installer asks,
 formats the disk, copies the disc onto it, makes the disk boot /boot.bin --
-the graphing calculator -- and restarts. Then the hard disk boots, and the
-calculator draws its curve.
+the kernel -- and restarts. Then the hard disk boots, the kernel starts
+the shell, and the shell runs the graphing calculator, which draws its
+curve and comes back on Esc.
 
 Everything is driven the way a person would: keys pushed through HID, the
 screen read back as text.
@@ -28,17 +29,27 @@ from emulator.memory_map import BOOT_BLOCK, BOOT_CODE, PROGRAM_LOAD_ADDR  # noqa
 from pfs import PgfsImage                                             # noqa: E402
 from test_bios2 import ENTER, ESC, power_on                           # noqa: E402
 from test_graph import curve_pixels                                   # noqa: E402
+from test_kernel import BG, BLUE, GREEN, INK, WHITE, Console, cell_colors, last_row  # noqa: E402
 from test_project import EXAMPLE, quiet                               # noqa: E402
 
 MiB = 1 << 20
 PROMPT = "ENTER install   ESC cancel"
-INSTALLED = [
-    "/boot.bin", "/pigeon.txt", "/bin/files.bin", "/bin/cube.bin", "/docs/readme.txt"]
+INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt", "/etc/shell_header.conf",
+             "/etc/boot.conf", "/etc/bmp/pigeon.bmp",
+             "/etc/bmp/eye-mask.bmp"] + [
+    f"/bin/{name}.bin" for name in ("sh", "ls", "cat", "echo", "mkdir", "rmdir", "rm", "mv",
+                                    "cp", "clear", "more", "edit", "graph", "cube", "files", "corrupter", "splash", "reboot", "img")]
 
 # The example disc, built once for the whole file.
 _BUILD = tempfile.TemporaryDirectory()
 DISC = build_disc(read_project(EXAMPLE), Path(_BUILD.name) / "pigeonos.img",
                   Path(_BUILD.name) / "build", quiet)
+
+
+def serial(p, prefix=""):
+    """The lines on the debug port that start with `prefix`."""
+    return [line for line in p.machine.debug.since(0).data.decode().splitlines()
+            if line.startswith(prefix)]
 
 
 def keys_row(text):
@@ -56,7 +67,7 @@ def run_to(machine, address, steps):
     return machine.cpu.pc == address
 
 
-def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_calculator():
+def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_shell():
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
         disk = t / "hdd.img"
@@ -71,7 +82,7 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_cal
             assert p.run_until(keys_row("ENTER restart"), steps=80_000_000, every=50_000), \
                 p.rows()
             rows = p.rows()
-            assert rows[9] == "Installed 5 files.", rows
+            assert rows[9] == f"Installed {len(INSTALLED)} files.", rows
             assert rows[10] == "The hard disk boots /boot.bin.", rows
 
             # the hard disk, from the host, while the installer waits
@@ -86,6 +97,22 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_cal
             assert disk.read_bytes()[BOOT_CODE:BOOT_BLOCK] == \
                 DISC.read_bytes()[BOOT_CODE:BOOT_BLOCK], "not the disc's boot sector"
 
+            # what it said on the debug port (docs/phase5b_plan.md step 3)
+            said = serial(p, "[installer]")
+            assert said[:5] == [
+                "[installer] disc on channel 6: PigeonOS 0.1",
+                "[installer] hard disk: 4096 K",
+                f"[installer] {len(INSTALLED)} files to copy; /boot.bin will boot",
+                "[installer] Enter: installing",
+                "[installer] formatting the hard disk as PIGEONOS",
+            ], said
+            copied = [line.removeprefix("[installer] copying ") for line in said[5:-2]]
+            assert copied[0] == "/boot.bin" and sorted(copied) == sorted(INSTALLED), said
+            assert said[-2:] == [
+                f"[installer] boot record: /boot.bin, block {boot.first}, {boot.size} bytes",
+                f"[installer] installed {len(INSTALLED)} files; Enter restarts",
+            ], said
+
             # restart: bios2 again, and the hard disk now comes first
             p.key(ENTER)
             assert p.run_until(lambda rows: rows[4] == "  Hard disk  PIGEONOS"
@@ -96,13 +123,38 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_cal
             # live in its image, so running changes the bytes.
             assert run_to(p.machine, PROGRAM_LOAD_ADDR, steps=6_000_000), \
                 f"the hard disk never handed over: {p.rows()}"
-            calculator = on_disc["/boot.bin"]
+            kernel = on_disc["/boot.bin"]
             mem = p.machine.ram.mem
-            assert bytes(mem[PROGRAM_LOAD_ADDR:PROGRAM_LOAD_ADDR + len(calculator)]) == \
-                calculator, "the hard disk did not load the calculator"
-            p.run(steps=12_000_000)
-            assert curve_pixels(p.machine.display_io.snapshot()) > 200, \
+            assert bytes(mem[PROGRAM_LOAD_ADDR:PROGRAM_LOAD_ADDR + len(kernel)]) == \
+                kernel, "the hard disk did not load the kernel"
+
+            # the kernel starts the shell; the shell runs the calculator
+            # with the disc's prompt, /etc/shell_header.conf: its second line
+            # first, then its first, which starts with a blank line
+            shell = Console.on(p.machine)
+            assert shell.ready(), shell.rows()
+            everything = serial(p)
+            assert everything.count("[bios] bios2") == 2 and "[installer] restarting" in everything
+            assert serial(p, "[kernel]")[:6] == [
+                f"[kernel] started, {len(kernel)} bytes at 0x00020000",
+                "[kernel] mounted channel 2, PIGEONOS",
+                "[kernel] boot.conf: splash /bin/splash.bin for 2500 ms, startup /bin/sh.bin",
+                "[kernel] exec /bin/splash.bin at 0x01000000, depth 1",
+                "[kernel] /bin/splash.bin ended: 0",
+                "[kernel] exec /bin/sh.bin at 0x01000000, depth 1",
+            ], everything
+            assert shell.rows()[:3] == ["PigeonOS", "|-(PGS)-[2:/]-(0)", "|-> _"], shell.rows()
+            fb = p.machine.display_io.snapshot()
+            for col, ink in ((0, GREEN), (3, BLUE), (9, INK), (15, WHITE)):    # ``CSTATUS``: 0 in white
+                assert cell_colors(fb, 1, col) - {BG} == {ink}, (col, cell_colors(fb, 1, col))
+            shell.type("graph\n")
+            assert shell.run_until(
+                lambda rows: curve_pixels(p.machine.display_io.snapshot()) > 200), \
                 "the calculator did not draw its curve"
+            shell.press(ESC)
+            assert shell.run_until(lambda rows: last_row(rows) == "|-> _"), shell.rows()
+            assert shell.rows()[1:6] == ["|-(PGS)-[2:/]-(0)", "|-> graph", "",
+                                         "|-(PGS)-[2:/]-(0)", "|-> _"], shell.rows()
 
 
 def test_esc_cancels_and_leaves_the_hard_disk_as_it_was():
@@ -118,6 +170,9 @@ def test_esc_cancels_and_leaves_the_hard_disk_as_it_was():
             p.key(ESC)
             assert p.run(steps=3_000_000), "the installer did not stop"
             assert p.rows()[9] == "Cancelled: nothing was changed.", p.rows()
+            said = serial(p, "[installer]")
+            assert said[-1] == "[installer] Esc: cancelled, nothing written", said
+            assert not any("formatting" in line or "copying" in line for line in said), said
         assert disk.read_bytes() == before, "cancelling changed the hard disk"
 
 
@@ -133,6 +188,10 @@ def test_a_hard_disk_too_small_is_reported():
             p.key(ENTER)
             assert p.run(steps=80_000_000), f"the installer did not stop: {p.rows()}"
             assert p.rows()[9] == "The install failed:", p.rows()
+            said = serial(p, "[installer]")
+            assert said[-1] == f"[installer] failed: {p.rows()[10]}", said
+            assert said[-2].endswith(f": {p.rows()[10]}") and said[-2].split()[1].startswith("/"), \
+                "the file that didn't fit is not named"
 
 
 if __name__ == "__main__":

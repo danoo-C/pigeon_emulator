@@ -15,15 +15,17 @@
  *   CD         channel 6. BOOT_RECORD. That is the only check; the volume
  *              label is read just to show a name.
  *
- * A two-second countdown boots the first device that can boot. Enter boots
+ * A five-second countdown boots the first device that can boot. Enter boots
  * it at once. Esc opens the menu instead, where the arrow keys choose and
  * Enter boots. With nothing to boot it waits in the menu, watching the CD
  * drive's generation counter, so a disc put in from a front end shows up
  * without a key.
  *
  * Handing over. A program is copied to PROGRAM_LOAD_ADDR with one
- * READ_DMA. A disk's block 0 is copied to BOOT_LOAD_ADDR, the channel is
- * written to BOOT_CHANNEL, and the boot sector's code at BOOT_ENTRY runs.
+ * READ_DMA. A disk's block 0 is copied to BOOT_LOAD_ADDR, and the boot
+ * sector's code at BOOT_ENTRY runs. Either way the channel booted is
+ * written to BOOT_CHANNEL, so a kernel knows which disk it came from
+ * (docs/kernel.md Q8), even when an earlier boot left another there.
  * First, either way, the timer stops, the screen is cleared to 0 and the
  * input queues are emptied, so the program sees none of the keys the menu
  * read. A boot that fails comes back to the menu and says why.
@@ -31,7 +33,13 @@
  * C cannot jump, so the hand-over is a CALL: the program starts a few
  * return addresses down the hardware stack. Nothing expects them back;
  * programs end in HALT.
+ *
+ * What it finds and does is said on the debug port too, each line starting
+ * "[bios2] " (docs/phase5b_plan.md step 2): each device, the countdown and
+ * what ended it, each hand-over, every reason a boot failed, each menu
+ * choice.
  */
+#include <pigeon/debug.h>
 #include <pigeon/display.h>
 #include <pigeon/input.h>
 #include <pigeon/io.h>
@@ -77,7 +85,7 @@
 #define TIMER_STOP    2u
 #define TIMER_STATUS  5u
 #define TIMER_RUNNING 1u
-#define COUNTDOWN_MS  2000u
+#define COUNTDOWN_MS  5000u
 
 #define DEVICES   3
 #define D_PROGRAM 0
@@ -204,10 +212,22 @@ void check_disk(int index) {
     }
 }
 
+/* A device as the port gets it: what it holds, and whether it boots. */
+void log_device(int index) {
+    struct device *d = &devices[index];
+    if (d->bootable && strcmp(d->detail, "bootable") != 0) {
+        dbg_printf("[bios2] %s: %s, bootable\n", d->name, d->detail);
+    } else {
+        dbg_printf("[bios2] %s: %s\n", d->name, d->detail);
+    }
+}
+
 void check_all(void) {
+    int i;
     check_program();
     check_disk(D_DISK);
     check_disk(D_CD);
+    for (i = 0; i < DEVICES; i++) log_device(i);
 }
 
 int first_bootable(void) {
@@ -221,6 +241,7 @@ int first_bootable(void) {
 void say(char *name, char *what) {
     strlcpy(message, name, COLS + 1);
     strlcat(message, what, COLS + 1);
+    dbg_printf("[bios2] %s\n", message);
 }
 
 /* --- the screen ----------------------------------------------------------- */
@@ -307,6 +328,8 @@ void boot(int index) {
             say(d->name, ": load failed");
             return;
         }
+        *(unsigned *)BOOT_CHANNEL = CH_USERPROG;
+        dbg_printf("[bios2] %s: %u bytes, at 0x%08X\n", d->name, d->size, PROGRAM_LOAD_ADDR);
         hand_over(PROGRAM_LOAD_ADDR);
         /* A program ends in HALT; one that returns instead lands here. */
         draw_frame();
@@ -320,6 +343,7 @@ void boot(int index) {
     }
     for (k = 0u; k < BOOT_BLOCK / 4u; k++) ((unsigned *)BOOT_LOAD_ADDR)[k] = IO_DATAW[k];
     *(unsigned *)BOOT_CHANNEL = d->channel;
+    dbg_printf("[bios2] %s: its boot sector, at 0x%08X\n", d->name, BOOT_ENTRY);
     hand_over(BOOT_ENTRY);
     /* A boot sector returns when it cannot load its file (firmware/boot.asm).
      * The screen was cleared for it, so the frame is drawn again. */
@@ -355,6 +379,7 @@ void menu(void) {
             redraw = 1;
         }
         if (key == KEY_ENTER) {
+            dbg_printf("[bios2] menu: %s\n", devices[selected].name);
             if (devices[selected].bootable) {
                 boot(selected);
                 check_all();
@@ -367,6 +392,7 @@ void menu(void) {
         if (now != seen) {
             seen = now;
             check_disk(D_CD);
+            log_device(D_CD);
             message[0] = 0;
             if (!devices[selected].bootable && first_bootable() >= 0) {
                 selected = first_bootable();
@@ -394,6 +420,7 @@ int main(void) {
     check_all();
     first = first_bootable();
     if (first >= 0) {
+        dbg_printf("[bios2] counting down %u s to %s\n", COUNTDOWN_MS / 1000u, devices[first].name);
         timer(TIMER_START, COUNTDOWN_MS);
         shown = 0xFFFFFFFFu;
         for (;;) {
@@ -403,14 +430,21 @@ int main(void) {
                 shown = seconds;
             }
             key = key_read();
-            if (key == KEY_ESC) break;
+            if (key == KEY_ESC) {
+                dbg_print("[bios2] Esc: the menu\n");
+                break;
+            }
             if (key == KEY_ENTER || seconds == 0u) {
+                if (key == KEY_ENTER) dbg_printf("[bios2] Enter: booting %s\n", devices[first].name);
+                else dbg_printf("[bios2] time: booting %s\n", devices[first].name);
                 boot(first);                    /* back here only if that failed */
                 check_all();
                 break;
             }
         }
         timer(TIMER_STOP, 0u);
+    } else {
+        dbg_print("[bios2] nothing to boot: the menu\n");
     }
     menu();
     return 0;

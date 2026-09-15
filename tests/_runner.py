@@ -4,6 +4,7 @@ pytest collects the test_* functions in these modules normally. This lets
 `python3 tests/test_golden.py` do the same on a machine that has no pytest
 (this repo's environment is PEP 668-managed, so there may not be one).
 """
+import contextlib
 import traceback
 
 
@@ -17,7 +18,8 @@ def run_module(namespace, title):
         for args, kwargs in cases:
             label = f"{name}{'[' + '-'.join(map(str, args)) + ']' if args else ''}"
             try:
-                fn(*args, **kwargs)
+                with timer_clock(fn):
+                    fn(*args, **kwargs)
                 print(f"  PASS  {label}")
             except Exception as e:
                 failures.append((label, e, traceback.format_exc()))
@@ -29,6 +31,51 @@ def run_module(namespace, title):
     else:
         print(f"  all {sum(len(getattr(f, '_cases', [1])) for _, f in tests)} passed")
     return 1 if failures else 0
+
+
+STEP = 0.05     # seconds the stepping clock moves per read
+
+
+class SteppingClock:
+    """A clock for the timer device that moves STEP seconds each time it
+    is read, so a two-second wait is 40 looks.
+
+    A guest waiting on a timer polls its status in a loop: the BIOS spins
+    two seconds before it jumps to a program, and bios2 counts down before
+    it boots. On the wall clock that is seconds of CPU in every test that
+    boots, and a test that gives up after a number of instructions passes
+    or fails with the speed of the host (tests/test_display.py's boot()
+    says how)."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        self.now += STEP
+        return self.now
+
+
+def real_clock(fn):
+    """Keep the timer device on the wall clock for this test: one that
+    measures real seconds, or reads a countdown off the screen."""
+    fn._real_clock = True
+    return fn
+
+
+@contextlib.contextmanager
+def timer_clock(fn):
+    """The stepping clock for the length of one test, unless it is
+    @real_clock. run_module uses it, and so does tests/conftest.py."""
+    from emulator.devices import timer
+    if getattr(fn, "_real_clock", False):
+        yield
+        return
+    saved = timer.clock
+    timer.clock = SteppingClock()
+    try:
+        yield
+    finally:
+        timer.clock = saved
 
 
 def cases(*argsets):

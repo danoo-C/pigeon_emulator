@@ -5,7 +5,9 @@ Polls GET /frame for the current RGBA framebuffer and renders it scaled
 by an adjustable pixel size. Includes buttons to clear the display, to
 increase/decrease the pixel size, and to work the CD drive
 (docs/cd-drive.md): load a disc from the emulator's own folders, load one
-from anywhere with a native file dialog, and eject.
+from anywhere with a native file dialog, and eject. A Serial panel beside the
+screen shows what the machine writes to its debug port
+(docs/phase5c_plan.md), with its logic in display/serial_panel.py.
 
 Requires pygame and requests, which the emulator itself does NOT need:
 
@@ -48,6 +50,7 @@ except ImportError as exc:
 # FIFO is one byte wide.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from emulator.devices import keycodes as K          # noqa: E402
+import serial_panel as SP                             # noqa: E402  (beside this file)
 
 PYGAME_TO_PIGEON = {
     pygame.K_LEFT: K.KEY_LEFT,       pygame.K_RIGHT: K.KEY_RIGHT,
@@ -119,6 +122,15 @@ PICKER_ROW_H = 24
 CD_POLL_INTERVAL = 2.0
 CD_TIMEOUT = (0.5, 5.0)
 
+# The Serial panel (docs/phase5c_plan.md). Kept between runs in build/, which
+# a clean deletes -- and then the panel is as it was the first time.
+PREFS_PATH = Path(__file__).resolve().parent.parent / "build" / "display.json"
+PANEL_BG = (21, 23, 28)
+PANEL_HEAD = (42, 45, 53)
+PANEL_TEXT = (216, 222, 233)
+PANEL_TIME = (106, 114, 132)
+EDGE_GUIDE = (80, 140, 210)
+
 
 def _fmt_size(n):
     if n < 1024:
@@ -127,9 +139,28 @@ def _fmt_size(n):
         return f"{n / 1024:.1f} KB"
     return f"{n / (1024 * 1024):.1f} MB"
 
-# pygame button index -> HID button index (4 and 5 are the legacy scroll
-# wheel, which the HID event byte has no encoding for, so they are dropped)
+# pygame button index -> HID button index. 4 and 5 are pygame's legacy wheel
+# buttons, sent alongside MOUSEWHEEL for the same notch, so they are dropped
+# and MOUSEWHEEL alone becomes wheel_edges().
 MOUSE_BUTTON_MAP = {1: 0, 3: 1, 2: 2}
+
+# HID's wheel buttons (emulator/devices/hid.py): a notch is a press and a
+# release of 5 for up, or of 6 for down (docs/phase4b_plan.md step 4).
+WHEEL_UP, WHEEL_DOWN = 5, 6
+
+# A held key repeats after this many milliseconds, then every this many --
+# close to a browser, which repeats keydown on its own.
+KEY_REPEAT_DELAY, KEY_REPEAT_INTERVAL = 400, 40
+
+
+def wheel_edges(y):
+    """A MOUSEWHEEL event's y, in notches, as the HID edges to send: a press
+    and a release of WHEEL_UP for each notch up, of WHEEL_DOWN for each down."""
+    button = WHEEL_UP if y > 0 else WHEEL_DOWN
+    edges = []
+    for _ in range(abs(int(y))):
+        edges += [(button, True), (button, False)]
+    return edges
 
 
 class Button:
@@ -162,6 +193,16 @@ class Button:
 
 
 class DisplayClient:
+    # What __init__ sets, as defaults for a client made without it, as the
+    # tests make one: a screen at x 0 and no panel.
+    serial_open = False
+    serial_width = SP.DEFAULT_WIDTH
+    serial_times = True
+    _screen_x = 0
+    _serial_drag = None             # the pointer's x while the panel's edge is dragged
+    _serial_top = None              # the first row shown; None follows new lines
+    _kept_presses = frozenset()     # buttons pressed on the toolbar or the panel
+
     def __init__(self, host: str, port: int, fps: int, pixel_size: int = 4, hid_host: str = "127.0.0.1", hid_port: int = 8001):
         self.base_url = f"http://{host}:{port}"
         self.hid_url = f"http://{hid_host}:{hid_port}"
@@ -200,9 +241,21 @@ class DisplayClient:
             self._hid_available = False
 
         pygame.init()
+        pygame.key.set_repeat(KEY_REPEAT_DELAY, KEY_REPEAT_INTERVAL)
         pygame.display.set_caption("Pigeon Display")
         self.font = pygame.font.SysFont(None, 22)
+        self.mono = pygame.font.SysFont("monospace", 13)
         self.clock = pygame.time.Clock()
+
+        # The Serial panel as it was last left, and what the machine has
+        # written, which a thread of its own fetches.
+        prefs = SP.load_prefs(PREFS_PATH)
+        self.serial_open, self.serial_width, self.serial_times = (
+            prefs["open"], prefs["width"], prefs["times"])
+        self.serial = SP.Transcript()
+        self._serial_lock = threading.Lock()
+        self._serial_rows = (None, [])      # (what they were built from, the rows)
+        self.serial_session = requests.Session()
 
         self.buttons = []
         self._build_buttons()
@@ -229,9 +282,9 @@ class DisplayClient:
         self._hid_connected_lock = threading.Lock()
         self._last_mouse_pos_time = 0
         self._mouse_pos_interval = 1.0 / MOUSE_POS_RATE_LIMIT
-        # True while a press that started on the toolbar is still held, so
-        # its release is not forwarded to the guest either.
-        self._toolbar_drag = False
+        # The buttons pressed on the toolbar or the Serial panel and still
+        # held, so their releases aren't forwarded to the guest either.
+        self._kept_presses = frozenset()
 
         # Background HID keep-alive thread: periodically checks/reconnects to HID server
         # independently of the render loop, same as display fetch thread
@@ -240,6 +293,9 @@ class DisplayClient:
 
         self._cd_thread = threading.Thread(target=self._cd_poll_loop, daemon=True)
         self._cd_thread.start()
+
+        self._serial_thread = threading.Thread(target=self._serial_poll_loop, daemon=True)
+        self._serial_thread.start()
 
     # --- networking (display server) -------------------------------------------
 
@@ -333,27 +389,11 @@ class DisplayClient:
     # --- HID input (mouse, keyboard) -----
 
     def _window_to_virtual_coords(self, win_x: int, win_y: int) -> tuple:
-        """Convert window coordinates to virtual pixel coordinates.
-        
-        Accounts for:
-        - The button bar at the top (BUTTON_BAR_HEIGHT)
-        - Pixel size magnification (divides by pixel_size)
-        
-        Returns (virt_x, virt_y) clamped to the virtual framebuffer bounds.
-        """
-        # Subtract the button bar offset
-        virt_y = win_y - BUTTON_BAR_HEIGHT
-        virt_x = win_x
-
-        # Scale down by pixel size (map window pixels back to virtual pixels)
-        virt_x = virt_x // self.pixel_size
-        virt_y = virt_y // self.pixel_size
-
-        # Clamp to framebuffer bounds
-        virt_x = max(0, min(virt_x, self.disp_w - 1))
-        virt_y = max(0, min(virt_y, self.disp_h - 1))
-
-        return virt_x, virt_y
+        """A window point as the guest's pointer: measured from the screen's
+        left edge, which the Serial panel moves, and the toolbar's bottom,
+        in the guest's pixels, and clamped onto its screen."""
+        return SP.on_screen(win_x, win_y, self._screen_x, BUTTON_BAR_HEIGHT,
+                            self.pixel_size, self.disp_w, self.disp_h)
 
     def _send_mouse_pos(self, win_x: int, win_y: int):
         """Send current mouse position (in virtual coords) to HID server."""
@@ -386,6 +426,18 @@ class DisplayClient:
             self._set_hid_connected(True)
         except Exception:
             self._set_hid_connected(False)
+
+    def _forward_press(self, event):
+        """A press on the screen, to HID: where the pointer is, then the
+        button, as the browser sends them. Positions otherwise go out at most
+        MOUSE_POS_RATE_LIMIT times a second, so a quick click could be read
+        where the pointer was a moment before -- which for edit's click is
+        another character (docs/phase4b_plan.md step 7)."""
+        hid_button = MOUSE_BUTTON_MAP.get(event.button)
+        if hid_button is None:
+            return
+        self._send_mouse_pos(*event.pos)
+        self._send_mouse_button(hid_button, True)
 
     def _send_key(self, key_code: int, pressed: bool = True):
         """Forward one key transition. `key_code` must already be a pigeon
@@ -440,6 +492,7 @@ class DisplayClient:
         add("+", lambda: self._change_pixel_size(1))
         self._px_x = x + 4
         x = self._px_x + self.font.size("px: 16")[0] + 16
+        self._serial_button = add("Serial", self._toggle_serial)
 
         load_server = add("Load from server", self._load_from_server)
         load_pc = add("Load from PC", self._load_from_pc)
@@ -459,9 +512,152 @@ class DisplayClient:
                                + 12)
 
     def _resize_window(self):
-        width = max(self.disp_w * self.pixel_size, self._bar_min_width)
-        height = self.disp_h * self.pixel_size + BUTTON_BAR_HEIGHT
-        self.screen = pygame.display.set_mode((width, height))
+        screen_w = self.disp_w * self.pixel_size
+        self.serial_width = SP.clamp_width(self.serial_width, screen_w)
+        spot = SP.layout(self.serial_open, self.serial_width, screen_w,
+                         self.disp_h * self.pixel_size, BUTTON_BAR_HEIGHT, self._bar_min_width)
+        self._screen_x = spot["screen_x"]
+        self.screen = pygame.display.set_mode(spot["window"])
+
+    # --- the Serial panel (docs/phase5c_plan.md) ---------------------------------
+
+    def _toggle_serial(self):
+        self.serial_open = not self.serial_open
+        self._resize_window()
+        self._save_serial_prefs()
+
+    def _save_serial_prefs(self):
+        SP.save_prefs(PREFS_PATH, {"open": self.serial_open, "width": self.serial_width,
+                                   "times": self.serial_times})
+
+    def _set_serial_width(self, x):
+        """The edge let go at x: the panel that wide, and the window made again
+        once. set_mode makes a new window each time, and on every motion of a
+        drag that flickers."""
+        self.serial_width = SP.clamp_width(x, self.disp_w * self.pixel_size)
+        self._resize_window()
+        self._save_serial_prefs()
+
+    def _serial_poll_once(self):
+        """Ask /serial for what came after the last offset, and add it."""
+        with self._serial_lock:
+            offset = self.serial.next
+        try:
+            resp = self.serial_session.get(f"{self.base_url}/serial", params={"from": offset},
+                                           timeout=REQUEST_TIMEOUT)
+            reply = SP.check_reply(resp.json()) if resp.ok else None
+        except Exception:
+            return
+        if reply is not None:
+            with self._serial_lock:
+                self.serial.append(reply)
+
+    def _serial_poll_loop(self):
+        while not self._stop_event.is_set():
+            if self.serial_open:
+                self._serial_poll_once()
+            self._stop_event.wait(SP.POLL_INTERVAL)
+
+    def _serial_geometry(self):
+        """(columns, rows shown, a row's height) for the panel's text."""
+        char_w, line_h = self.mono.size("M")
+        cols = max(1, (self.serial_width - 12) // max(1, char_w))
+        shown = max(1, (self.disp_h * self.pixel_size - SP.HEADER_H - 6) // max(1, line_h))
+        return cols, shown, line_h
+
+    def _serial_all_rows(self, cols):
+        with self._serial_lock:
+            key = (self.serial.changed, cols, self.serial_times)
+            if self._serial_rows[0] != key:
+                self._serial_rows = (key, SP.rows(self.serial.lines, cols, self.serial_times))
+            return self._serial_rows[1]
+
+    # --- the mouse: the toolbar, the Serial panel, and the guest's screen ----------
+
+    def _mouse_down(self, event):
+        """A press belongs to what it lands on. The toolbar and the Serial panel
+        keep theirs from the guest, and the release that goes with it: a click
+        on "Clear" used to reach the running program as a click at y 0."""
+        where = SP.region(*event.pos, self.serial_open, self.serial_width, BUTTON_BAR_HEIGHT)
+        if where == "screen":
+            self._forward_press(event)
+            return
+        self._kept_presses = self._kept_presses | {event.button}
+        if event.button != 1:                   # left clicks only, and no legacy wheel
+            return
+        if where == "toolbar":
+            for button in self.buttons:
+                if button.handle_click(event.pos):
+                    break
+        elif where == "edge":
+            self._serial_drag = event.pos[0]
+        else:
+            hit = SP.header_hit(*event.pos, self.serial_width, BUTTON_BAR_HEIGHT)
+            if hit == "clear":
+                with self._serial_lock:
+                    self.serial.clear()
+                self._serial_top = None
+            elif hit == "times":
+                self.serial_times = not self.serial_times
+                self._save_serial_prefs()
+
+    def _mouse_up(self, event):
+        if event.button == 1 and self._serial_drag is not None:
+            self._serial_drag = None
+            self._set_serial_width(event.pos[0])
+        if event.button in self._kept_presses:
+            self._kept_presses = self._kept_presses - {event.button}
+            return
+        hid_button = MOUSE_BUTTON_MAP.get(event.button)
+        if hid_button is not None:
+            self._send_mouse_button(hid_button, False)
+
+    def _mouse_motion(self, event):
+        if self._serial_drag is not None:
+            self._serial_drag = event.pos[0]
+
+    def _wheel(self, event, pos):
+        """MOUSEWHEEL carries no position, so it's judged by the pointer's."""
+        if SP.region(*pos, self.serial_open, self.serial_width, BUTTON_BAR_HEIGHT) in ("panel", "edge"):
+            cols, shown, _ = self._serial_geometry()
+            total = len(self._serial_all_rows(cols))
+            self._serial_top = SP.wheel(total, shown, self._serial_top, event.y)
+            return
+        for button, pressed in wheel_edges(event.y):
+            self._send_mouse_button(button, pressed)
+
+    def _draw_serial(self, mouse_pos):
+        height = self.disp_h * self.pixel_size
+        width = self.serial_width
+        top_y = BUTTON_BAR_HEIGHT
+        pygame.draw.rect(self.screen, PANEL_BG, (0, top_y, width, height))
+        pygame.draw.rect(self.screen, PANEL_HEAD, (0, top_y, width, SP.HEADER_H))
+        self.screen.blit(self.font.render("Serial", True, BUTTON_TEXT_COLOR), (8, top_y + 4))
+        for name, rect in SP.header_buttons(width, BUTTON_BAR_HEIGHT).items():
+            lit = name == "times" and self.serial_times
+            hovered = pygame.Rect(rect).collidepoint(mouse_pos)
+            color = PICKER_SELECTED if lit else (BUTTON_HOVER_COLOR if hovered else BUTTON_COLOR)
+            pygame.draw.rect(self.screen, color, rect, border_radius=3)
+            label = self.mono.render("Times" if name == "times" else "Clear", True, BUTTON_TEXT_COLOR)
+            self.screen.blit(label, label.get_rect(center=pygame.Rect(rect).center))
+
+        cols, shown, line_h = self._serial_geometry()
+        every = self._serial_all_rows(cols)
+        first = SP.visible_top(len(every), shown, self._serial_top)
+        y = top_y + SP.HEADER_H + 3
+        for time_part, text_part in every[first:first + shown]:
+            x = 6
+            if time_part:
+                self.screen.blit(self.mono.render(time_part, True, PANEL_TIME), (x, y))
+                x += self.mono.size(time_part)[0]
+            if text_part:
+                self.screen.blit(self.mono.render(text_part, True, PANEL_TEXT), (x, y))
+            y += line_h
+
+        pygame.draw.line(self.screen, PICKER_BORDER, (width - 1, top_y), (width - 1, top_y + height))
+        if self._serial_drag is not None:
+            guide = SP.clamp_width(self._serial_drag, self.disp_w * self.pixel_size)
+            pygame.draw.line(self.screen, EDGE_GUIDE, (guide, top_y), (guide, top_y + height), 2)
 
     # --- the CD drive ---------------------------------------------------------
 
@@ -709,7 +905,7 @@ class DisplayClient:
 
             # Rate-limited mouse position updates (max 30/sec)
             now = time.time()
-            if now - self._last_mouse_pos_time >= self._mouse_pos_interval:
+            if self._serial_drag is None and now - self._last_mouse_pos_time >= self._mouse_pos_interval:
                 self._send_mouse_pos(mouse_pos[0], mouse_pos[1])
                 self._last_mouse_pos_time = now
 
@@ -722,28 +918,13 @@ class DisplayClient:
                 if self._picker is not None and self._picker_event(event):
                     continue
                 if event.type == pygame.MOUSEBUTTONDOWN:
-                    # A click on the toolbar belongs to the toolbar. It used
-                    # to be forwarded to the guest as well, as a press at a
-                    # coordinate clamped to y=0 -- so pressing "Clear" also
-                    # injected a phantom click into the running program.
-                    if event.pos[1] < BUTTON_BAR_HEIGHT:
-                        if event.button == 1:          # left click only
-                            for button in self.buttons:
-                                if button.handle_click(event.pos):
-                                    break
-                        self._toolbar_drag = True
-                    else:
-                        hid_button = MOUSE_BUTTON_MAP.get(event.button)
-                        if hid_button is not None:
-                            self._send_mouse_button(hid_button, True)
+                    self._mouse_down(event)
                 elif event.type == pygame.MOUSEBUTTONUP:
-                    # Release the press we actually forwarded, and only that.
-                    if self._toolbar_drag:
-                        self._toolbar_drag = False
-                    else:
-                        hid_button = MOUSE_BUTTON_MAP.get(event.button)
-                        if hid_button is not None:
-                            self._send_mouse_button(hid_button, False)
+                    self._mouse_up(event)
+                elif event.type == pygame.MOUSEMOTION:
+                    self._mouse_motion(event)
+                elif event.type == pygame.MOUSEWHEEL:
+                    self._wheel(event, pygame.mouse.get_pos())
                 elif event.type == pygame.KEYDOWN:
                     code = to_pigeon_key(event.key, event.unicode)
                     if code is not None:
@@ -778,10 +959,13 @@ class DisplayClient:
                 surface = pygame.transform.scale(
                     surface, (self.disp_w * self.pixel_size, self.disp_h * self.pixel_size)
                 )
-            self.screen.blit(surface, (0, BUTTON_BAR_HEIGHT))
+            self.screen.blit(surface, (self._screen_x, BUTTON_BAR_HEIGHT))
         except ValueError:
             # Frame size didn't match expected dimensions; skip this frame
             pass
+
+        if self.serial_open:
+            self._draw_serial(mouse_pos)
 
         # Draw button bar
         bar_rect = pygame.Rect(0, 0, self.screen.get_width(), BUTTON_BAR_HEIGHT)

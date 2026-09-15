@@ -17,6 +17,8 @@ by opcode and calls .handler(cpu, dst, src1, src2, imm).
 from dataclasses import dataclass
 from typing import Callable
 
+from .memory_map import FLAG_IE, FLAG_LESS, FLAG_ZERO, VEC_DIV_ZERO
+
 NONE_REG = 0xFF          # sentinel: "this operand slot is unused"
 INSTR_SIZE = 8            # [opcode:1][dst:1][src1:1][src2:1][imm:4 LE]
 
@@ -153,13 +155,15 @@ def op_div(cpu, dst, src1, src2, imm):
     Usage:   DIV dst, src1, src2
              DIV dst, src1, #imm
     Example: DIV C, A, B         -> C = A / B, rounded down
-    Raises ZeroDivisionError if the divisor is 0 -- there's no DIV-by-zero
-    flag yet, so this currently crashes the emulator rather than setting
-    a status bit the program could check."""
+    A divisor of 0 is the VEC_DIV_ZERO fault, and dst is left alone. With
+    no handler for it, the fault raises ZeroDivisionError and the emulator
+    stops, as it did before there were faults."""
     v = cpu.reg.values
     b = imm if src2 == NONE_REG else v[src2]
     if b == 0:
-        raise ZeroDivisionError(f"Division by zero at PC={cpu.pc:#06x}")
+        pc = cpu.pc - INSTR_SIZE
+        cpu.fault(VEC_DIV_ZERO, pc, ZeroDivisionError(f"Division by zero at PC={pc:#06x}"))
+        return
     v[dst] = (v[src1] // b) & MASK32
 
 @instruction("OR")
@@ -437,6 +441,72 @@ def op_shr(cpu, dst, src1, src2, imm):
     v = cpu.reg.values
     b = imm if src2 == NONE_REG else v[src2]
     v[dst] = 0 if b >= 32 else (v[src1] >> b) & MASK32
+
+
+# --------------------------------------------------------------------------
+# Interrupts, faults and the stack pointer (docs/kernel.md §13). Taking an
+# interrupt and delivering a fault are the CPU's side, in cpu.py.
+# --------------------------------------------------------------------------
+
+@instruction("GETSP")
+def op_getsp(cpu, dst, src1, src2, imm):
+    """GETSP -- read the stack pointer into a register.
+    Usage:   GETSP dst
+    With SETSP, how a kernel's exit() gets back to where it called a
+    program, however deep the program's calls went (docs/kernel.md §9)."""
+    cpu.reg.values[dst] = cpu.sp & MASK32
+
+
+@instruction("SETSP")
+def op_setsp(cpu, dst, src1, src2, imm):
+    """SETSP -- set the stack pointer.
+    Usage:   SETSP src
+             SETSP #address"""
+    cpu.sp = imm if src1 == NONE_REG else cpu.reg.values[src1]
+
+
+@instruction("EI")
+def op_ei(cpu, dst, src1, src2, imm):
+    """EI -- Enable Interrupts. An interrupt already pending is taken
+    before the next instruction.
+    Usage:   EI"""
+    cpu.ie = True
+
+
+@instruction("DI")
+def op_di(cpu, dst, src1, src2, imm):
+    """DI -- Disable Interrupts. Interrupts raised now wait until EI, or an
+    IRET that turns them back on. Faults are delivered either way.
+    Usage:   DI"""
+    cpu.ie = False
+
+
+@instruction("IRET")
+def op_iret(cpu, dst, src1, src2, imm):
+    """IRET -- return from an interrupt or fault handler. Pops the address
+    to return to, then the flags word the CPU pushed on entry, and puts
+    back the zero and less flags and whether interrupts were on.
+    Usage:   IRET
+    The CPU saves the flags because no instruction can: an interrupt between
+    a CMP and its jump would send the jump the wrong way. It saves no
+    registers -- a handler pushes the ones it uses."""
+    ram = cpu.ram
+    cpu.pc = ram.read_word(cpu.sp)
+    flags = ram.read_word(cpu.sp + 4)
+    cpu.sp += 8
+    cpu.zero_flag = bool(flags & FLAG_ZERO)
+    cpu.less_flag = bool(flags & FLAG_LESS)
+    cpu.ie = bool(flags & FLAG_IE)
+
+
+@instruction("SETIV")
+def op_setiv(cpu, dst, src1, src2, imm):
+    """SETIV -- set the address of the vector table: VECTOR_COUNT words, a
+    handler address for each vector (VEC_* in memory_map.py), 0 for none.
+    Usage:   SETIV src
+             SETIV #table
+    Until one is set, a fault stops the emulator as it always has."""
+    cpu.ivt = (imm if src1 == NONE_REG else cpu.reg.values[src1]) & MASK32
 
 
 # --------------------------------------------------------------------------

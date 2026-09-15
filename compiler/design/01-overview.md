@@ -10,7 +10,9 @@ and legibility of output over speed of output.
 
 Optimisation beyond constant folding. Floating point (there is no FP hardware
 and no plan for soft-float). The full C preprocessor. `long long`, bitfields,
-variadic functions, `setjmp`. A linker — everything is compiled in one unit.
+`setjmp`. A linker — everything is compiled in one unit. (Variadic functions
+were a non-goal too, until `printf` needed them: see
+[03-abi.md](03-abi.md#variadic-functions).)
 
 ## Pipeline
 
@@ -57,6 +59,10 @@ registers, one of which is reserved. Expressions are evaluated on an accumulator
 with the hardware stack for temporaries — see [04-codegen.md](04-codegen.md).
 
 ### 2. The stack pointer cannot be read
+
+> Since the kernel's phase 2, `GETSP` and `SETSP` read and set it
+> ([docs/kernel.md](../../docs/kernel.md) §13). The design below predates them,
+> and the compiler doesn't use them.
 
 `PUSH`, `POP`, `CALL` and `RET` move `cpu.sp`, and **nothing else can observe
 it**. There is no `MOV A, SP`. A compiler therefore cannot form an SP-relative

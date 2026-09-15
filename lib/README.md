@@ -1,18 +1,24 @@
 # The C libraries
 
-Seven headers, compiled by `pigeon-cc` and covered by execution tests in
-`tests/test_libs.py`, `tests/test_fs.py` and `tests/test_cdlib.py`. Every test compiles the C and
+Twelve headers, compiled by `pigeon-cc` and covered by execution tests in
+`tests/test_libs.py`, `tests/test_fs.py`, `tests/test_cdlib.py`, `tests/test_stdio.py`,
+`tests/test_debug_port.py`, `tests/test_bmp.py`, `tests/test_compiler.py` and `tests/test_kernel.py`. Every test compiles the C and
 *runs* it.
 
 | Header | What it gives you |
 |---|---|
 | `<pigeon/mem.h>` | `memcpy` `memmove` `memset` `memcmp`, `malloc` `calloc` `free`, `heap_used` |
 | `<pigeon/string.h>` | `strlen` `strcmp` `strlcpy` `strlcat` `strchr` …, numbers as text (`utoa` `itoa` `strtou` `atoi`), `isdigit` and friends |
+| `<pigeon/stdio.h>` | `snprintf` `vsnprintf`, and `printf` `vprintf` `puts` `putchar`: through the kernel, or with no kernel to the debug port |
+| `<pigeon/debug.h>` | `dbg_write` `dbg_print` `dbg_printf`: lines to the debug port, which never reach the screen |
+| `<pigeon/stdarg.h>` | `va_list` `va_start` `va_arg` `va_copy` `va_end`, for a function of your own that takes `...` |
 | `<pigeon/fs.h>` | files and directories on the HDD channels: `fs_open`/`read`/`write`/`seek`, `fs_mkdir`/`readdir`/`rename`, `fs_load`/`fs_save`, a current directory |
 | `<pigeon/cd.h>` | the CD drive: `cd_info`, `cd_read`, `cd_has_fs`/`cd_label` for a disc that carries a filesystem, `cd_save` to copy a disc onto the current volume, and `cd_eject` |
-| `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped |
-| `<pigeon/input.h>` | mouse position/buttons/edges, keyboard characters, key edges, held-key state |
+| `<pigeon/display.h>` | pixels, lines, rects, circles, 4×6 text — all clipped — and `disp_scroll` |
+| `<pigeon/bmp.h>` | `bmp_load` `bmp_decode` `bmp_info`: 24- and 32-bit BMP images, cropped or stretched to the size asked for, in the screen's own pixels |
+| `<pigeon/input.h>` | mouse position/buttons/edges and wheel notches, keyboard characters, key edges, held-key state |
 | `<pigeon/math.h>` | fixed point, trig, roots, random, 3D vectors |
+| `<pigeon/sys.h>` | for a program the kernel runs: `write` `read` `open` `close`, `opendir` `readdir` `stat`, `mkdir` `rmdir` `remove` `rename`, `chdir` `getcwd`, `exec` `exit` `getkey`, `setcomplete` `setbreak` `paging`, `print`, `sys_strerror` |
 
 There is no linker: units are compiled together, so pass the library
 sources on the command line.
@@ -29,6 +35,12 @@ so `free(p)` finds it at `p - 8` without searching. **No coalescing and no
 splitting** — freeing large blocks then allocating small ones fragments.
 Adequate here because the other two libraries allocate nothing at runtime.
 
+The heap stops at `__heap_limit`, a word the compiler emits after
+`__heap_ptr`, and `malloc` returns `NULL` past it. The kernel writes it for
+each program it runs, and for itself ([docs/kernel.md](../docs/kernel.md)
+Q7). Left at 0, the limit is a megabyte below the top of RAM, where the
+hardware stack grows down.
+
 `memcpy` and `memset` move a word at a time while both pointers are aligned,
 then finish byte by byte. That is not a micro-optimisation: the byte loop is
 about four instructions per byte and the framebuffer is 82,944 bytes.
@@ -37,8 +49,9 @@ about four instructions per byte and the framebuffer is 82,944 bytes.
 ## string
 
 Strings, numbers as text, and character classes. The names are the
-standard C ones, cut down to what this machine needs. There is no printf, so
-to show a number you write it into a buffer first:
+standard C ones, cut down to what this machine needs. `printf` is in
+`<pigeon/stdio.h>`, below; without it, to show a number you write it into a
+buffer first:
 
 ```c
 char line[32];
@@ -75,6 +88,54 @@ framebuffer and overwrites its own code until the CPU faults.
 `disp_line` and `disp_circle` take signed `int` because Bresenham needs
 negative deltas — the only functions here that pay for signed comparison.
 
+**`disp_scroll(y, h, dy, bg)` moves rows of pixels** up or down within a band
+and clears the rows left behind: a console's scroll. The display device's
+`COPY` command moves them, and the blank rows are one row drawn and copied,
+so a whole screen scrolls in 7,121 instructions. Without the device it falls
+back to `memmove`, which took 674,955 (both measured; docs/phase4b_plan.md
+step 1).
+
+## bmp
+
+24- and 32-bit BMP images, decoded to the screen's own pixels at the size
+asked for ([docs/bmp_plan.md](../docs/bmp_plan.md)).
+
+```c
+unsigned *pixels = bmp_load("/etc/bmp/pigeon.bmp", DISP_W, DISP_H, BMP_CROP);
+if (pixels == NULL) {
+    print(bmp_strerror(bmp_error()));
+    return 1;
+}
+memcpy((void *)DISP_BASE, pixels, DISP_W * DISP_H * 4u);
+free(pixels);
+```
+
+**What comes back** is `w × h` words from `malloc`, row by row from the top
+left, each `0xFFRRGGBB`: the screen's own format, so a screenful copies
+straight in. Free it when done. It's `unsigned *`, the same bits as
+`color_t`, so `bmp.h` doesn't bring the display library along.
+
+**Three modes:** `BMP_CROP`, the middle of the image at its own size;
+`BMP_CROP_TOP_LEFT`, its top-left corner; and `BMP_STRETCH`, all of it scaled
+to `w × h` with the nearest pixel, not keeping the aspect. Where a cropped
+image is smaller than `w × h`, the rest is black.
+
+**Files:** 24- and 32-bit uncompressed BMPs, stored bottom-up or top-down,
+and 32-bit ones saved with the usual bit fields. A 32-bit file's alpha is
+dropped. Images up to 8,192 × 8,192, results up to 4,096 × 4,096.
+
+**`bmp_load` and `bmp_info` read through the kernel.** With no kernel they
+fail with `BMP_ENOKERNEL`, and a program loads the file itself with
+`fs_load_alloc` and hands it to `bmp_decode`. `bmp_info` gives an image's own
+width and height without decoding it.
+
+**A failure** is `NULL`, or a negative from `bmp_info`, and `bmp_error()` says
+why; `bmp_strerror` names a file error as `sys_strerror` does.
+
+**About 42 instructions a pixel:** each pixel is read as one word, since a
+BMP's B, G, R bytes are already `0x..RRGGBB` read that way. A screen is under
+900,000 instructions, plus reading the file.
+
 ## input
 
 Two buffers, because guest code asks two different questions:
@@ -102,6 +163,10 @@ and released inside one frame. Use the right one.
 Keycodes are one byte: printable ASCII passes through, named keys live in
 `0x80`–`0x9F`. Front ends translate into that space; the device rejects
 anything wider rather than truncating it.
+
+**The mouse wheel is two buttons:** each notch is a press and a release of
+`ME_WHEEL_UP`, button 5, or `ME_WHEEL_DOWN`, button 6, in the mouse-event
+queue. Both front ends add up what the OS reports into notches.
 
 ## math
 
@@ -201,3 +266,152 @@ before and after. `cd_save` does, removes the mixed copy, and returns
 unmounting it first if it was mounted, and refuses with `FS_EBUSY` while
 files on it are still open. The design is in
 [docs/cd-drive.md](../docs/cd-drive.md).
+
+## sys
+
+The system calls, for a program the kernel runs (`user/os/kernel.c`,
+[docs/kernel.md](../docs/kernel.md) §10). Each function calls through the
+kernel's table at `SYSCALL_TABLE`, so a program carries a few lines instead
+of a console and `fs.c` of its own, and every program shares the kernel's
+one screen of text and one current directory.
+
+```c
+char line[256];
+print("name? ");
+read(STDIN, line, 255);             /* a typed line, '\n' included */
+if (exec("/bin/ls.bin", argc, argv) == ENDED_BREAK) print("stopped\n");
+```
+
+**File descriptors 0, 1 and 2 are the console;** `open` gives 3 and up, and
+`read`, `write` and `close` take either. **Errors are below 0:** -1 to -19
+are `fs.h`'s codes passed on, `exec` adds `E_NOTPROG`, `E_NOMEM` and
+`E_DEPTH`, and `ENDED_*` for a program that didn't return: a fault, or
+Ctrl+C. `sys_strerror` names them all. **The slot numbers and codes are in
+`<pigeon/syscall.h>`,** which has no `.c`, so the kernel includes it without
+the stubs. **Only a program the kernel started can call them:** without a
+kernel the table is empty.
+
+**`mkdir`, `rmdir`, `remove` and `rename` pass straight to `fs.c`,** so they
+refuse what it refuses, with its codes: a directory that isn't empty, a path
+that doesn't exist, or anything on the read-only CD.
+
+**Text written to the console can carry escape codes,** as on a terminal:
+`ESC [ 30 m` to `ESC [ 37 m` for an ink, `ESC [ 7 m` for inverse, `ESC [ 0 m`
+back to normal, `ESC [ 2 J` to clear, `ESC [ r ; c H` to move the cursor, and
+`ESC [ K` to clear to the end of the line ([docs/kernel.md](../docs/kernel.md)
+§12). Since phase 4b.1 there is also `ESC [ t ; b r` to scroll only rows `t`
+to `b`, `ESC [ n S` and `ESC [ n T` to scroll them up or down, `ESC [ 3 J` to
+empty the scrollback, and `ESC ] 133 ; A BEL`, which marks where a prompt
+starts. The kernel puts the ink and the scrolling rows back to normal after
+each program.
+
+**`setcomplete(dir, builtins)` tells Tab where your commands are,** for the
+first word of a line your program reads: the `.bin` files in `dir`, and the
+built-ins in `builtins`, between spaces. The shell calls
+`setcomplete("/bin", "cd exit help")`. It lasts until the program ends, and
+a program that never calls it gets file names completed only.
+
+**`setbreak(0)` makes Ctrl+C an ordinary key for your program,** so a
+full-screen program can use it; `setbreak(1)` turns the break back on, and
+both return what it was. Each program starts with break on, whatever its
+parent chose, and its parent gets its own setting back when it ends.
+`/bin/edit` turns it off, so ^C is its own key.
+
+**`paging(1)` pages your output,** and that of the programs you run: after a
+screen, the console shows `-- more --` and waits inside `write`. If the
+person presses `q`, a program you ran ends with `ENDED_QUIT`, and your own
+`write` returns `E_QUIT`; stop writing then. Paging ends when your program
+does. `/bin/more` is the example.
+
+**Don't mix `getkey` with `read(STDIN)`.** `getkey` takes characters from one
+queue, and typing a line takes key presses from another, so a key your
+program took with `getkey` is still waiting for its next `read`. A Ctrl+C
+taken with `getkey` while break was off ends that line as soon as it starts.
+
+## stdio
+
+`printf` and its friends, on the compiler's variadic functions
+([compiler/design/03-abi.md](../compiler/design/03-abi.md#variadic-functions)).
+
+```c
+printf("%s: %d files\n", dir, count);
+n = snprintf(line, sizeof(line), "%-12s %5u", name, size);
+```
+
+**`snprintf` and `vsnprintf` work in any program.** `printf`, `vprintf`,
+`puts` and `putchar` write to `STDOUT` through the kernel. **Without a kernel
+they write to the debug port** ([debug](#debug), below): they find `write`'s
+slot in the system-call table holding 0, never call through it to address 0,
+and send the text to the port instead. They return -1 only when there's no
+port either, as on a bare CPU. To put text on the screen with no kernel, a
+program formats with `snprintf` and draws it where it likes, with `disp_text`.
+
+**`snprintf` returns the length it wanted,** as C's does, and always
+terminates what it kept, so a result `>= size` means the text was cut short.
+
+**Conversions:** `%d %i %u %x %X %o %c %s %p %%`, the flags `-` and `0`, a
+width, and for `%s` a precision, as in `%.5s`. An unknown conversion is
+printed as written. There is no floating point. **A call takes at most 8
+arguments after the format,** the compiler's limit; a ninth is a compile
+error.
+
+**`printf` needs no heap:** it formats into 64 bytes on its frame and writes
+them each time they fill.
+
+**Each program carries its own copy,** with `string.c`, since there is no
+shared library: `mkdir.bin`, which uses `printf`, is 30,712 bytes, `debug.c`
+included, and `clear.bin`, which only calls `print`, is 6,576.
+
+## debug
+
+Lines to the debug port, IO channel 8, which never reach the machine's
+screen. The host shows them in the launcher's terminal with `--serial`, in a
+file with `--serial-log PATH`, and in the front ends' Serial panel, each with
+the time since power-on ([docs/phase5_plan.md](../docs/phase5_plan.md)).
+
+```c
+dbg_print("[demo] started\n");
+dbg_printf("[demo] %d files in %s\n", count, dir);
+```
+
+**It works in any program,** the kernel and bios2 included. The first call
+asks whether there's a port, as `display.c` asks about the display. On a bare
+CPU, or a machine without the port, every call returns -1 at once, and
+`dbg_printf` doesn't format.
+
+**The library adds nothing to a line:** no prefix and no time. A program says
+who it is itself, as in `[demo] ` above.
+
+**`dbg_printf` formats straight into the IO data window,** so a line needs no
+buffer and is never copied: a 41-byte line costs 6,179 instructions and 232
+bytes of frame stack. So don't call it between firing a command and reading
+its reply. A line over 255 bytes is cut short. It uses `vsnprintf`, so it
+brings `stdio.c` and `sys.c` along.
+
+**`dbg_write` takes any length,** 4 KB at a time, and returns how many bytes
+the port took. With `n` 0 it only asks whether there's a port.
+
+## stdarg
+
+For a function of your own that takes `...`. Macros, with no `.c`:
+
+```c
+int sum(int count, ...) {
+    va_list ap;
+    int total = 0;
+    va_start(ap, count);
+    while (count > 0) {
+        total = total + va_arg(ap, int);
+        count--;
+    }
+    va_end(ap);
+    return total;
+}
+```
+
+**Every extra argument is one word:** an integer, a `char`, a pointer or a
+function. A struct is refused at the call. **Nothing counts them for you:**
+as in C, a count or a format says how many came, and reading past them gives
+whatever the slot held. **A `va_list` is a plain pointer,** so it can be
+passed on, as `printf` passes one to `vprintf`, and `va_copy` is an
+assignment.

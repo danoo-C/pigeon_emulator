@@ -31,12 +31,19 @@ DIRECT_BINOPS = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV",
 
 
 class CodeGen:
-    def __init__(self, program: A.Program, source_lines=None, origin="PROGRAM_LOAD_ADDR"):
+    def __init__(self, program: A.Program, source_lines=None, origin="PROGRAM_LOAD_ADDR",
+                 relocatable=False, assembly=()):
         self.program = program
         self.source_lines = source_lines or []
         # Where the code and data are built to run. The frame stack and the
         # heap do not move with them: they stay at HEAP_START.
         self.origin = origin
+        # A program file for the kernel (docs/kernel.md §8): called as
+        # entry(argc, argv), with its frame stack and heap after its image,
+        # so it runs wherever it is loaded. compiler/program_file.py builds it.
+        self.relocatable = relocatable
+        # (name, text) for each file a #asm line named.
+        self.assembly = list(assembly)
         self.out: List[str] = []
         self.label_count = 0
         self.loops: List[tuple] = []       # (continue_label, break_label)
@@ -85,11 +92,16 @@ class CodeGen:
         self._startup()
         for function in self.program.functions:
             self._function(function)
+        for name, text in self.assembly:
+            self._assembly(name, text)
         self._data()
         return "\n".join(self.out) + "\n"
 
     def _startup(self):
         """Set the frame pointer, init the heap, call main, halt."""
+        if self.relocatable:
+            self._startup_relocatable()
+            return
         self.comment("startup: establish the frame pointer, then call main")
         self.label("__start")
         self.emit("MOV F, #__frame_base")
@@ -98,6 +110,42 @@ class CodeGen:
         self.emit("MWW C, A")
         self.emit(f"CALL {self._main_label()}")
         self.emit("HALT")
+        self.out.append("")
+
+    def _startup_relocatable(self):
+        """Called like any C function, as entry(argc, argv): the arguments
+        are at [F] and [F + 4], in the caller's frame stack.
+
+        The program moves F to its own frame stack, after its image, and
+        writes the arguments where main's parameters go. A main(void) never
+        reads them: those slots are where its locals start. The caller's F
+        waits on the hardware stack, and comes back before RET, which is all
+        a caller expects to survive a call. main's value is still in A."""
+        self.comment("startup: called as entry(argc, argv); returns what main returns")
+        self.label("__start")
+        self.emit("MRW A, F")
+        self.emit("ADD C, F, #4")
+        self.emit("MRW B, C")
+        self.emit("PUSH F")
+        self.emit("MOV F, #__frame_base")
+        self.emit("MWW F, A")
+        self.emit("ADD C, F, #4")
+        self.emit("MWW C, B")
+        self.emit("MOV C, #__heap_ptr")
+        self.emit("MOV A, #__heap_base")
+        self.emit("MWW C, A")
+        self.emit(f"CALL {self._main_label()}")
+        self.emit("POP F")
+        self.emit("RET")
+        self.out.append("")
+
+    def _assembly(self, name, text):
+        """A #asm file, among the compiled code: C reaches a routine in it
+        as `extern int name;`, and the routine reaches a C global as
+        __g_name and a C function by its name."""
+        self.out.append("")
+        self.comment(f"--- assembly from {name} ---")
+        self.out.extend(text.rstrip("\n").splitlines())
         self.out.append("")
 
     def _main_label(self) -> str:
@@ -156,6 +204,11 @@ class CodeGen:
 
         self.label("__heap_ptr")
         self.emit(".word 0")
+        # The word after __heap_ptr is where the kernel writes how far a
+        # program's heap may grow (docs/kernel.md Q7), so a program file's
+        # header needs to say only where __heap_ptr is. 0 is mem.c's limit.
+        self.label("__heap_limit")
+        self.emit(".word 0")
         self.label("__free_list")
         self.emit(".word 0")
 
@@ -164,7 +217,12 @@ class CodeGen:
         self.comment("Reserving them with .space would put a quarter-megabyte of")
         self.comment("zeros in the image and make every boot copy it. RAM is")
         self.comment("already zero, so they just live past the end of the program.")
-        self.emit(f"__frame_base  = HEAP_START")
+        if self.relocatable:
+            self.comment("A relocatable program's follow its image, wherever it is loaded.")
+            self.label("__image_end")
+            self.emit("__frame_base  = __image_end")
+        else:
+            self.emit(f"__frame_base  = HEAP_START")
         self.emit(f"__frame_limit = __frame_base + {FRAME_STACK_BYTES}")
         self.emit(f"__heap_base   = __frame_limit")
 
@@ -173,7 +231,8 @@ class CodeGen:
     def _function(self, function: A.FunctionDef):
         self.function = function
         self.last_line = -1
-        params = ", ".join(f"{p.type} {p.name}" for p in function.params)
+        params = ", ".join([f"{p.type} {p.name}" for p in function.params]
+                           + (["..."] if function.variadic else []))
         self.comment(f"{function.returns} {function.name}({params})"
                      f"  frame_size={function.frame_size}")
         self.label(function.label or function.name)
@@ -719,5 +778,6 @@ def _escape_c(data: bytes) -> str:
     return "".join(out)
 
 
-def generate(program: A.Program, source_lines=None, origin="PROGRAM_LOAD_ADDR") -> str:
-    return CodeGen(program, source_lines, origin).generate()
+def generate(program: A.Program, source_lines=None, origin="PROGRAM_LOAD_ADDR",
+             relocatable=False, assembly=()) -> str:
+    return CodeGen(program, source_lines, origin, relocatable, assembly).generate()

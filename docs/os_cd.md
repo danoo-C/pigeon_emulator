@@ -3,12 +3,13 @@
 > **Status: phases 1 to 6 are built** (§9): stage 1 of the BIOS, the
 > firmware device, bios2 with its screen and menu, the boot sector,
 > `cc.py --project` with the launcher's `--cd`, and the installer. The
-> example disc installs the graphing calculator onto a blank hard disk,
-> which then boots it. Power-on runs through four stages:
+> example disc installs the kernel and its shell onto a blank hard disk,
+> which then boots them ([kernel.md](kernel.md) phase 3). Power-on runs
+> through four stages:
 >
 > 1. **The BIOS**, 1 KB at address 0, loads **bios2** from a firmware
 >    device on IO channel 7, and jumps to it.
-> 2. **bios2** is a C program with the font, the screen, the 2-second
+> 2. **bios2** is a C program with the font, the screen, the 5-second
 >    countdown and the boot menu. It boots a program on channel 1, or copies
 >    the hard disk's or the CD's boot sector into memory and jumps to it.
 > 3. **The disc's boot sector** loads the installer and runs it.
@@ -29,8 +30,8 @@
 | **bios2** (`firmware/bios2.c`) | `0x07000000` | Screen, countdown, menu; boots channel 1, or a boot sector from the hard disk or the CD | 46,068 bytes, built, with the display, input, mem and string libraries |
 | **Firmware device** | channel 7 | A read-only HDD holding `build/bios2.bin` | — |
 | **Boot sector** (`firmware/boot.asm`) | `0x15898` | Loads the file its boot record names into `0x20000`, and jumps; returns to bios2 if it can't | 376 of 384 bytes, built |
-| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | built; the example disc is 473.0 KiB |
-| **Installer** (`user/os/installer.c`) | `0x20000` | Formats the hard disk, copies the disc onto it, makes it boot `/boot.bin`, and restarts | 139,120 bytes, built |
+| **`cc.py --project`** | host | Builds the installer and files into a PigeonFS disc, with the boot sector in block 0 | built; the example disc is 1.0 MiB |
+| **Installer** (`user/os/installer.c`) | `0x20000` | Formats the hard disk, copies the disc onto it, makes it boot `/boot.bin`, and restarts | 143,212 bytes, built |
 
 ---
 
@@ -43,7 +44,7 @@ BIOS, at 0x0
 
 bios2, at 0x07000000
   check channel 1, the hard disk (channel 2) and the CD (channel 6)
-  draw the screen and count down 2 seconds; Esc opens the menu
+  draw the screen and count down 5 seconds; Esc opens the menu
   a program on channel 1:    DMA it to 0x20000, and call it
   a disk or a disc:          copy its block 0 to 0x15818, store the channel
                              at 0x15A18, and call 0x15898
@@ -63,7 +64,7 @@ installer, at 0x20000
 - **The BIOS region is 1 KB**, 128 instructions, and `bios.py` refuses more
   (`emulator/bios.py:20`). Today's BIOS is 688 bytes, 86 instructions.
 - **The CPU starts with PC at 0 and SP at `STACK_TOP`**
-  (`emulator/cpu.py:24`).
+  (`emulator/cpu.py:36`).
 - **Every C program is built for `PROGRAM_LOAD_ADDR`**, with its frame stack
   and heap at `HEAP_START` (`compiler/codegen.py:80`, `:164`). The kernel
   prototype builds C for another address by replacing that one line
@@ -147,6 +148,12 @@ Assembled, not run:
 | Loads bios2, and nothing else | 248 | 31 |
 | Loads bios2, or falls back to today's loader | 928 | 116 |
 | **As built:** the same, plus a check of the size against `BIOS2_MAX` | 944 | 118 |
+| **Phase 5b:** the same, and `[bios] bios2` on the debug port before the jump | 1,013 | 125 |
+
+**Phase 5b gave stage 1 one line** on the debug port, IO channel 8
+([phase5b_plan.md](phase5b_plan.md)): once bios2 has arrived whole, a
+`WRITE_DMA` of `[bios] bios2` straight from the BIOS's own bytes. The
+fallback to channel 1 says nothing.
 
 **With the fallback, nothing that exists changes.** Every test, and every
 `Machine` built without bios2, boots exactly as today. The progress bar
@@ -221,7 +228,7 @@ UP DOWN choose   ENTER boot
    The hard disk and the CD are bootable when block 0 has the boot signature
    at byte 52. **bios2 checks only that.** It reads the volume label at byte
    36 just to show a name.
-2. **Draw the screen, and count down 2 seconds** on the timer.
+2. **Draw the screen, and count down 5 seconds** on the timer.
 3. **Esc opens the menu, and Enter boots straight away.** In the menu, the
    arrow keys choose and Enter boots the choice.
 4. **With no key pressed, boot the first bootable device**, in this order:
@@ -251,6 +258,23 @@ UP DOWN choose   ENTER boot
   - call `0x15898`.
 - **Both are calls**, so the program starts on top of two of bios2's return
   addresses: SP is `STACK_TOP - 8`. `tests/test_bios2.py` pins it.
+
+### 5.4 On the debug port
+
+Since phase 5b, bios2 says what it does on the debug port, IO channel 8,
+each line starting `[bios2] ` ([phase5b_plan.md](phase5b_plan.md)):
+
+- **each device,** at power-on, after a boot that came back, and the CD again
+  when a disc goes in or out: `Program: 816 bytes, bootable`,
+  `Hard disk: PIGEONOS, bootable`, `CD: no disc`;
+- **the countdown,** `counting down 5 s to CD`, and what ended it:
+  `Enter: booting CD`, `time: booting CD` or `Esc: the menu`; with nothing
+  to boot, `nothing to boot: the menu`;
+- **each hand-over:** `Program: 816 bytes, at 0x00020000`, or
+  `Hard disk: its boot sector, at 0x00015898`;
+- **every reason the screen gives,** from `say`: `Program: load failed`,
+  `CD: can't boot`;
+- **each menu choice:** `menu: Hard disk`.
 
 ---
 
@@ -303,13 +327,27 @@ label   = PIGEONOS              # the disc's volume label, 15 bytes at most
 
 [boot]
 installer  = installer.c        # the disc's boot sector loads and runs this
-system     = ../graph.c         # optional: what the installed hard disk boots
+system     = kernel.c           # optional: what the installed hard disk boots
 bootsector = boot.asm           # optional: firmware/boot.asm when left out
 
 [files]                         # what the installer puts on the hard disk
-/bin/files.bin   = ../files.c   # a .c or .asm is built; anything else is copied
+/bin/sh.bin      = bin/sh.c     # a .c is built as a program file, an .asm as an image; anything else is copied
+/bin/ls.bin      = bin/ls.c
+/bin/cat.bin     = bin/cat.c
+/bin/echo.bin    = bin/echo.c
+/bin/mkdir.bin   = bin/mkdir.c
+/bin/rmdir.bin   = bin/rmdir.c
+/bin/rm.bin      = bin/rm.c
+/bin/mv.bin      = bin/mv.c
+/bin/cp.bin      = bin/cp.c
+/bin/clear.bin   = bin/clear.c
+/bin/more.bin    = bin/more.c
+/bin/edit.bin    = bin/edit.c
+/bin/graph.bin   = ../graph.c
 /bin/cube.bin    = ../cube.c
+/bin/files.bin   = ../files.c
 /docs/readme.txt = readme.txt
+/etc/shell_header.conf = etc/shell_header.conf   # the prompt (docs/shell.md)
 ```
 
 **`python3 compiler/cc.py --project user/os/pigeon_compiler_init.txt`**
@@ -318,7 +356,9 @@ writes `build/pigeonos.img`:
 1. **Check the project file.** Every mistake is reported with its line, all
    of them at once, before anything is built.
 2. **Build the installer** for `0x20000`, as the launcher builds a program,
-   and every `.c` and `.asm` in `[files]`. Builds go to `build/<name>/` and
+   and every `.c` and `.asm` in `[files]`. Since the kernel's phase 1, a `.c`
+   in `[files]` is built as a program file the kernel loads anywhere
+   ([kernel.md](kernel.md) Q6). Builds go to `build/<name>/` and
    happen again only when a source or a library it includes changed. Each
    build is named after its source as well as its path on the disc, so
    pointing a path at another source always builds it afresh.
@@ -337,17 +377,33 @@ writes `build/pigeonos.img`:
    output first, so a failed build leaves no half-written disc. The same
    project builds the same disc, byte for byte.
 
-As run on the example:
+As run on the example, since the kernel's phase 3 made `/boot.bin` the
+kernel and put its shell in `/bin`, phase 4a added the file commands and
+the prompt, 4b.1 the console's scrolling and line editing, 4b.2 `more`, and 4b.3 `edit`:
 
 ```
 PigeonOS 0.1, from user/os/pigeon_compiler_init.txt
-  /install.bin               139,120 B   user/os/installer.c
+  /install.bin               143,212 B   user/os/installer.c
   /pigeon.txt                     60 B
-  /boot.bin                  114,580 B   user/os/../graph.c
-  /bin/files.bin             174,088 B   user/os/../files.c
-  /bin/cube.bin               40,048 B   user/os/../cube.c
-  /docs/readme.txt               254 B   user/os/readme.txt
-build/pigeonos.img: 473.0 KiB, label PIGEONOS, boots /install.bin
+  /boot.bin                  209,528 B   user/os/kernel.c
+  /bin/sh.bin                 43,568 B   user/os/bin/sh.c
+  /bin/ls.bin                 38,364 B   user/os/bin/ls.c
+  /bin/cat.bin                 8,000 B   user/os/bin/cat.c
+  /bin/echo.bin                7,008 B   user/os/bin/echo.c
+  /bin/mkdir.bin              27,092 B   user/os/bin/mkdir.c
+  /bin/rmdir.bin              27,092 B   user/os/bin/rmdir.c
+  /bin/rm.bin                 27,088 B   user/os/bin/rm.c
+  /bin/mv.bin                 28,324 B   user/os/bin/mv.c
+  /bin/cp.bin                 30,524 B   user/os/bin/cp.c
+  /bin/clear.bin               6,576 B   user/os/bin/clear.c
+  /bin/more.bin               31,068 B   user/os/bin/more.c
+  /bin/edit.bin               81,172 B   user/os/bin/edit.c
+  /bin/graph.bin             124,996 B   user/os/../graph.c
+  /bin/cube.bin               45,972 B   user/os/../cube.c
+  /bin/files.bin             186,192 B   user/os/../files.c
+  /docs/readme.txt               438 B   user/os/readme.txt
+  /etc/shell_header.conf         222 B   user/os/etc/shell_header.conf
+build/pigeonos.img: 1.0 MiB, label PIGEONOS, boots /install.bin
 ```
 
 **The launcher's `--cd PATH`, or `"cd"` in `config.json`**, puts a disc in
@@ -383,19 +439,29 @@ the disc, it puts the disc on the hard disk:
 A failure stops with the reason on screen: no hard disk, a disk too small,
 or a `/boot.bin` that would not boot.
 
-**The project names what the installed disk boots.** `system = ../graph.c`
-in `[boot]` puts the graphing calculator on the disc as `/boot.bin` (§7).
+**On the debug port,** since phase 5b, each step is a line starting
+`[installer] ` ([phase5b_plan.md](phase5b_plan.md)): the disc and its title,
+or why it couldn't be mounted; the hard disk's size; the files to copy and
+whether the disk will boot; Enter or Esc; formatting; each file copied; the
+boot record's block and size; every failure, naming the file that didn't
+fit; the count installed; and the restart.
+
+**The project names what the installed disk boots.** `system = kernel.c`
+in `[boot]` puts the kernel on the disc as `/boot.bin` (§7). Until the
+kernel's phase 3 it was the graphing calculator, `../graph.c`.
 
 **Run end to end** in `tests/test_install.py`, on a `Machine` with a blank
 4 MiB hard disk and the example disc:
-- **The install:** the installer copied five files.
+- **The install:** the installer copied ten files.
 - **The disk, read back from the host:**
   - it held them byte for byte;
   - its boot record pointed at `/boot.bin`, with the disc's boot sector
     beside it;
   - `fsck` was clean.
 - **After the restart:** bios2 counted down to the hard disk, whose boot
-  sector loaded the calculator, and the calculator drew its curve.
+  sector loaded the kernel. The kernel ran the splash `/etc/boot.conf`
+  names, then started the shell (phase 6); the shell ran
+  `graph`, the calculator drew its curve, and Esc came back to the prompt.
 
 **What still holds for an installed disk:** its boot record points at
 `/boot.bin`'s blocks. Anything that rewrites that file has to write the
@@ -490,7 +556,7 @@ record again (`pfs.py boot` does, on the host; kernel.md §5).
      `mem.c` and `string.c`. The screen is §5.2's:
      - a title, the RAM, and one row per device, with what it holds or why it
        can't boot;
-     - a 2-second countdown to the first device that can boot: Enter boots at
+     - a 5-second countdown to the first device that can boot: Enter boots at
        once, Esc opens the menu;
      - in the menu, the arrow keys choose and Enter boots;
      - with nothing to boot, it waits in the menu. A disc put in changes the

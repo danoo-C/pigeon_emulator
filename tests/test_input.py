@@ -21,8 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _runner import cases, run_module                                 # noqa: E402
 from emulator.devices import keycodes as K                            # noqa: E402
 from emulator.devices.hid import (                                    # noqa: E402
-    CMD_GET_KEY_BITMAP, CMD_GET_KEY_EVENT, CMD_GET_KEY_STATE,
-    CMD_GET_KEYBOARD, CMD_GET_MOUSE_BUTTONS, CMD_GET_MOUSE_EVENT,
+    BUTTON_WHEEL_DOWN, BUTTON_WHEEL_UP, CMD_GET_KEY_BITMAP, CMD_GET_KEY_EVENT,
+    CMD_GET_KEY_STATE, CMD_GET_KEYBOARD, CMD_GET_MOUSE_BUTTONS, CMD_GET_MOUSE_EVENT,
     CMD_GET_MOUSE_POS, CMD_NOP, HID, KEY_BITMAP_BYTES)
 
 
@@ -446,6 +446,102 @@ def test_pigeon_keycodes_do_not_collide():
     assert all(0 <= c <= K.KEY_MAX for c in codes)
     named_non_ascii = [c for c in codes if not K.is_printable(c) and c >= 0x80]
     assert all(0x80 <= c <= 0x9F or c == K.KEY_DELETE for c in named_non_ascii)
+
+
+# --- the mouse wheel: docs/phase4b_plan.md step 4 ------------------------------
+
+def test_a_wheel_notch_is_a_press_and_release_of_button_five_or_six():
+    hid = HID()
+    for button in (BUTTON_WHEEL_UP, BUTTON_WHEEL_DOWN):
+        hid.push_mouse_event(button, True)
+        hid.push_mouse_event(button, False)
+    events = [read(hid, CMD_GET_MOUSE_EVENT)[0] for _ in range(5)]
+    assert (BUTTON_WHEEL_UP, BUTTON_WHEEL_DOWN) == (5, 6)
+    assert events == [0xC5, 0x85, 0xC6, 0x86, 0x00]
+
+
+def _wheel_source():
+    """The page's wheel adder, lifted out so node can run it."""
+    html = _browser_script()
+    assert "let wheelTotal = 0;" in html, "index.html has no wheel adder"
+    start = html.index("let wheelTotal = 0;")
+    end = html.index("function wheelNotches(", start)
+    end = html.index("\n    }\n", end) + len("\n    }\n")
+    return html[start:end]
+
+
+def test_the_browser_adds_wheel_distance_up_into_notches():
+    """Browsers report a distance, and a trackpad a stream of small ones;
+    HID wants notches. 100 pixels, 3 lines or a page make one."""
+    node = _node()
+    if node is None:
+        print("      (node not installed -- browser wheel not checked)")
+        return
+    script = _wheel_source() + """
+console.log(JSON.stringify([
+  wheelNotches(-100, 0),
+  wheelNotches(40, 0), wheelNotches(40, 0), wheelNotches(40, 0),
+  wheelNotches(-250, 0),
+  wheelNotches(3, 1), wheelNotches(-1, 2), wheelNotches(0, 0),
+]));
+"""
+    with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False) as f:
+        f.write(script)
+        path = f.name
+    try:
+        done = subprocess.run([node, path], capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+        got = json.loads(done.stdout.strip().splitlines()[-1])
+    finally:
+        os.unlink(path)
+    # up; a trackpad's small steps making one notch down; turning back
+    # dropping what was left; lines; a page; no distance
+    assert got == [[5], [], [], [6], [5, 5], [6], [5], []]
+
+
+def test_the_browser_sends_each_notch_through_the_outbox():
+    html = _browser_script()
+    wheel = re.search(r"canvas\.addEventListener\('wheel'.*?\{passive: false\}\);", html, re.DOTALL)
+    assert wheel, "no wheel listener that can stop the page scrolling"
+    body = wheel.group(0)
+    assert "preventDefault" in body and "wheelNotches(" in body
+    assert body.count("post('/mouse_event'") == 2, "a notch is a press and a release"
+
+
+def test_the_pygame_client_turns_the_wheel_into_notches():
+    client = _pygame_client()
+    if client is None:
+        print("      (pygame not installed -- pygame client not checked)")
+        return
+    assert (client.WHEEL_UP, client.WHEEL_DOWN) == (BUTTON_WHEEL_UP, BUTTON_WHEEL_DOWN)
+    assert client.wheel_edges(1) == [(5, True), (5, False)]
+    assert client.wheel_edges(-2) == [(6, True), (6, False)] * 2
+    assert client.wheel_edges(0) == []
+    assert 4 not in client.MOUSE_BUTTON_MAP and 5 not in client.MOUSE_BUTTON_MAP, \
+        "pygame's legacy wheel buttons would send every notch twice"
+
+
+def test_the_pygame_client_sends_where_a_click_is_before_the_click():
+    client = _pygame_client()
+    if client is None:
+        print("      (pygame not installed -- pygame client not checked)")
+        return
+    import pygame
+    sent = []
+    display = object.__new__(client.DisplayClient)
+    display._send_mouse_pos = lambda x, y: sent.append(("position", x, y))
+    display._send_mouse_button = lambda button, pressed: sent.append(("button", button, pressed))
+    display._forward_press(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(120, 300)))
+    display._forward_press(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=4, pos=(1, 1)))
+    assert sent == [("position", 120, 300), ("button", 0, True)], sent
+
+
+def test_the_pygame_client_repeats_a_held_key():
+    source = (REPO_ROOT / "display" / "display.py").read_text()
+    assert "pygame.key.set_repeat(KEY_REPEAT_DELAY, KEY_REPEAT_INTERVAL)" in source
+    client = _pygame_client()
+    if client is not None:
+        assert (client.KEY_REPEAT_DELAY, client.KEY_REPEAT_INTERVAL) == (400, 40)
 
 
 # --- the guest's view, through the real IO bus -------------------------------

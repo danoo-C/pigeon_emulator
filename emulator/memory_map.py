@@ -41,6 +41,21 @@ RAM_SIZE = 0x08000000  # 128 MB total address space
 # does not have (which used to assemble fine and fail at runtime).
 REGISTER_COUNT = 6   # A-F
 
+# Interrupts and faults (docs/kernel.md §13). SETIV points the CPU at a
+# table of VECTOR_COUNT words, one handler address per vector, 0 for none.
+# To deliver one, the CPU pushes the flags word, then the address to return
+# to -- for a fault, the faulting instruction's own -- turns interrupts off
+# and jumps to the handler. IRET undoes all four.
+VEC_DIV_ZERO   = 0   # fault: DIV by zero
+VEC_BAD_OPCODE = 1   # fault: an opcode with no instruction
+VEC_BAD_FETCH  = 2   # fault: fetching an instruction past the end of memory
+VEC_TIMER      = 3   # interrupt: a timer ticking (devices/timer.py, TICK)
+VEC_BREAK      = 4   # interrupt: Ctrl+C, once break is on (devices/hid.py)
+VECTOR_COUNT   = 5
+FLAG_ZERO = 1        # the flags word: bit 0 the zero flag,
+FLAG_LESS = 2        # bit 1 the less flag,
+FLAG_IE   = 4        # bit 2 whether interrupts were on
+
 # --- BIOS ---
 BIOS_START = 0x00000000
 BIOS_MAX   = 0x00000400   # 1 KB reserved
@@ -110,6 +125,25 @@ BOOT_CHANNEL   = BOOT_LOAD_ADDR + BOOT_BLOCK
 if BOOT_CHANNEL + 4 > PROGRAM_LOAD_ADDR:
     raise RuntimeError("A boot sector's copy overlaps the program load address")
 
+# --- System calls (docs/kernel.md §10) ---
+# The kernel fills SYSCALL_SLOTS words here, just past the boot channel, with
+# the addresses of its calls. Programs call through them with
+# lib/pigeon/sys.c; which slot is which is in lib/pigeon/syscall.h.
+SYSCALL_TABLE = BOOT_CHANNEL + 4
+SYSCALL_SLOTS = 32
+if SYSCALL_TABLE + 4 * SYSCALL_SLOTS > PROGRAM_LOAD_ADDR:
+    raise RuntimeError("The system-call table overlaps the program load address")
+
+# --- Program files (docs/kernel.md §8) ---
+# A C program the kernel can load at any address, as compiler/program_file.py
+# writes it: a header of PROGRAM_FILE_HEADER bytes -- eight words, the magic
+# first -- then the image, then the offset of every word in it that holds an
+# address. The magic's first byte, read as an opcode, is 80: a program file
+# jumped to by mistake stops at once.
+PROGRAM_FILE_MAGIC   = 0x58454750         # "PGEX" in byte order
+PROGRAM_FILE_VERSION = 1
+PROGRAM_FILE_HEADER  = 32
+
 # --- Heap: dynamic allocations, grows UP from just above the program ---
 HEAP_START = PROGRAM_LOAD_ADDR + PROGRAM_MAX_SIZE
 
@@ -124,8 +158,9 @@ CH_TIMER    = 4   # wall-clock countdown timers
 CH_DISPLAY  = 5   # framebuffer: scanout base, block fill
 CH_CD       = 6   # removable read-only disc, swapped from the host
 CH_BIOS2    = 7   # read-only firmware: the second-stage BIOS (docs/os_cd.md)
-# 8 is free. <pigeon/cd.h> takes a channel, so a second drive is a
-# one-line change here and nowhere else.
+CH_DEBUG    = 8   # write-only debug port, shown as "Serial" (docs/phase5_plan.md)
+# <pigeon/cd.h> takes a channel, so a second drive is a one-line change
+# here and nowhere else.
 
 
 def symbols():

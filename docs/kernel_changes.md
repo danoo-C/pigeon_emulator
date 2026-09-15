@@ -1,6 +1,8 @@
 # Kernel changes: apps that print to the shell
 
-> **Status: decided, nothing built.** This checks [kernel.md](kernel.md)
+> **Status: decided and built:** the console and the system calls in
+> kernel.md's phase 3, and `printf` in phase 4a
+> ([phase4_plan.md](phase4_plan.md) steps 1 and 2). This checks [kernel.md](kernel.md)
 > against one requirement: a command-line app — `ls`, `ld`, anything that
 > prints — starts from the shell, prints into the shell's console, and returns
 > to it. Every fact in §2 was checked on 2026-09-13; the compiler facts were
@@ -147,8 +149,8 @@ no paging.
 Command-line tools often stop deep inside the code — `exit(1)` on the first
 bad input. Without instructions that set the stack pointer (kernel.md §13),
 an error has to be returned through every caller up to `main`. That is
-kernel.md's Q5, which adds them, and it matters more for a tool like `ld`
-than for a game.
+kernel.md's Q5, which adds them — built in its phase 2 — and it matters more
+for a tool like `ld` than for a game.
 
 ---
 

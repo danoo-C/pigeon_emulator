@@ -21,6 +21,14 @@ exactly that -- one word at a time, every frame:
   2    SET_BASE      0    new base       4       1 accepted, 0 rejected
   3    GET_BASE      0    --             4       the current base
   4    FILL          1    destination    4       -- (data window holds the colour)
+  5    COPY          0    buffer         4       1 moved, 0 refused
+
+COPY reads three words from the data window, as the HDD's DMA commands do
+-- the offset to move to, the offset to move from, and how many bytes --
+and moves them within the buffer at ADDRESS, overlapping or not. It is a
+console's scroll: a screen of text redrawn cost about a million
+instructions, and the same pixels moved here cost a handful
+(docs/phase4b_plan.md, step 1).
 
 LENGTH is always the size of the PAYLOAD, never a fill length and never a
 colour. That is load-bearing: IOController does `bytearray(length)` before
@@ -35,13 +43,15 @@ DMA commands in filesystem phase 6, and does the same -- so every other device
 still just returns bytes.
 """
 import logging
+import struct
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Optional
 
 from ..memory_map import (
-    DISPLAY_START, DISPLAY_SIZE, DISPLAY_W, DISPLAY_H, PROGRAM_LOAD_ADDR,
+    DISPLAY_START, DISPLAY_SIZE, DISPLAY_W, DISPLAY_H, IO_START, IOHeader, PROGRAM_LOAD_ADDR,
 )
+from .debug_port import serial_reply
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +60,9 @@ CMD_INFO = 1
 CMD_SET_BASE = 2
 CMD_GET_BASE = 3
 CMD_FILL = 4
+CMD_COPY = 5
+
+_WINDOW_BASE = IO_START + IOHeader.USABLE_AFTER
 
 # devices/ -> emulator/ -> repo root, where display/index.html lives.
 # This used to be resolved relative to this file's own directory; once the
@@ -87,6 +100,9 @@ class DisplayIO:
         # Both are set by Machine.start_servers, so config.json stays the
         # single source of truth for ports and index.html hardcodes none.
         self.cd_url: Optional[str] = None
+        # The debug port /serial reads, set there too: the page polls it on
+        # its own origin (docs/phase5_plan.md §4.4).
+        self.debug_port = None
 
     # --- the framebuffer ---------------------------------------------------
 
@@ -163,11 +179,33 @@ class DisplayIO:
             self.ram.mem[address:address + self.display_size] = self._fill_bytes
             return b""
 
+        if command == CMD_COPY:
+            return self._copy(address)
+
         if command == CMD_NOP:
             return b"\x00\x00\x00\x00"
 
         log.warning("DISPLAY: unknown command %d", command)
         return b""
+
+    def _copy(self, base: int) -> bytes:
+        """COPY: move bytes within the buffer at base, as memmove does.
+
+        Both ranges must lie inside one screen's worth of bytes from a base
+        the display would take, so the slices below can neither reach the
+        IO header nor run past the end of RAM -- where a slice assignment
+        grows the bytearray instead of raising. The right-hand slice is a
+        copy, so overlapping ranges come out right either way.
+        """
+        to, source, count = struct.unpack_from("<III", self.ram.mem, _WINDOW_BASE)
+        if (not self._valid_base(base) or to + count > self.display_size
+                or source + count > self.display_size):
+            log.warning("DISPLAY: refusing copy of %d bytes from +%#x to +%#x at %#x",
+                        count, source, to, base)
+            return b"\x00\x00\x00\x00"
+        mem = self.ram.mem
+        mem[base + to:base + to + count] = mem[base + source:base + source + count]
+        return b"\x01\x00\x00\x00"
 
     def update(self) -> bool:
         """Snapshot the current display region from RAM into the in-memory frame buffer.
@@ -221,7 +259,7 @@ class DisplayIO:
         # the daemon thread below is swallowed, leaving the emulator running
         # with no display and no explanation.
         try:
-            from fastapi import FastAPI, Response
+            from fastapi import FastAPI, Query, Response
             from fastapi.responses import HTMLResponse
             from fastapi.middleware.cors import CORSMiddleware
             import uvicorn
@@ -253,6 +291,10 @@ class DisplayIO:
                 return {"w": DISPLAY_W, "h": DISPLAY_H, "size": self.display_size,
                         "scanout": self.scanout_base, "hid_url": self.hid_url,
                         "cd_url": self.cd_url}
+
+            @app.get("/serial")
+            async def serial(offset: int = Query(0, alias="from")):
+                return serial_reply(self.debug_port, offset)
 
             if serve_frontend:
                 @app.get("/", response_class=HTMLResponse)

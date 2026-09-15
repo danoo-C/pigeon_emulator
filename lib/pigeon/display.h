@@ -82,6 +82,13 @@ void disp_frame(unsigned x, unsigned y, unsigned w, unsigned h, color_t c);
 void disp_line(int x0, int y0, int x1, int y1, color_t c);
 void disp_circle(int cx, int cy, int r, color_t c);
 
+/* Move the pixel rows from y to y + h by dy rows, up when dy is negative,
+ * and fill the rows left behind with bg; what moves out of the band is
+ * gone. A console's scroll. The display device moves the pixels when there
+ * is one, so a whole screen costs a few thousand instructions, where
+ * redrawing its text cost about a million. */
+void disp_scroll(unsigned y, unsigned h, int dy, color_t bg);
+
 /* --- text: a 5x7 font over printable ASCII -----------------------------
  *
  * GLYPH_W x GLYPH_H is the CELL, not the ink. The glyph body is 5x7 on

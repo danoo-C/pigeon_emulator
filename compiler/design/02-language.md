@@ -83,8 +83,10 @@ void clear(void);
 int  apply(int (*fn)(int), int v);   /* function pointers: JMP/CALL take a register */
 ```
 
-Up to 8 parameters. No variadics — `printf` is not in scope, and the display
-library takes explicit arguments instead.
+Up to 8 parameters. A variadic function, `int printf(char *format, ...)`,
+takes up to 8 more, each a word, walked with `<pigeon/stdarg.h>`. Variadics
+came later than this design, with `printf` in the kernel's phase 4: see
+[03-abi.md](03-abi.md#variadic-functions).
 
 Recursion works and is verified — see [03-abi.md](03-abi.md).
 
@@ -119,6 +121,5 @@ initialises the heap, then calls `main`, then `HALT`s with the return value in
 | `long long` | no 64-bit support in the ISA |
 | `goto` | not needed for the libraries; complicates label handling |
 | `switch` | phase 2 |
-| varargs | needs a stack-walking convention the frame design does not offer |
 | `union`, `enum`, bitfields | phase 2 |
 | standard C library beyond memory ops | scope, per the brief |

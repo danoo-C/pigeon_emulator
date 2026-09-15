@@ -1,6 +1,8 @@
 # Running a program from the shell
 
-> **Status: proposal, nothing built.** What happens, step by step, when you
+> **Status: built, as phases 1 to 3 of kernel.md §17:** relocation, the
+> kernel with `exec` and the system calls of §8, and a simple shell with
+> `ls`, `cat` and `echo`. `printf` is not built yet. What happens, step by step, when you
 > type `ls` at the shell. The kernel boots, starts the shell as its first
 > program, and the shell asks the kernel to run others. §5 was compiled and
 > run on 2026-09-13, and again on 2026-09-14; anything else reasoned but not
@@ -16,10 +18,10 @@
 
 ## 1. The one idea: everything is a function call
 
-Nothing switches between programs behind their backs. The CPU has no
-interrupts today, and in the first version the ones kernel.md §13 adds only
-end a program or tick the timer. That makes the whole system simpler than it
-sounds:
+Nothing switches between programs behind their backs. The CPU has had
+interrupts since kernel.md's phase 2 (§13), but in the first version they
+only end a program or tick the timer. That makes the whole system simpler
+than it sounds:
 
 - **The kernel runs a program** by calling a function that happens to live in
   a file it just loaded.
@@ -153,15 +155,15 @@ that differ is the list the kernel patches.
 
 **Checked on every C program in `user/`**
 (`prototypes/kernel/p0_relocation.py`), built with its libraries at
-`0x20000` and at `0x01021238`, as run again on 2026-09-14:
+`0x20000` and at `0x01021238`, as run again after phase 1 on 2026-09-14:
 
 | Program | Size | Words to patch | In an instruction's address field | Other bytes that differ |
 |---|---|---|---|---|
-| `files` | 174,088 | 1,937 | 1,918 | 0 |
-| `disc` | 172,392 | 1,786 | 1,786 | 0 |
-| `graph` | 114,580 | 1,461 | 1,452 | 0 |
-| `cube` | 40,048 | 392 | 392 | 0 |
-| `demo` | 32,044 | 344 | 343 | 0 |
+| `files` | 174,132 | 1,940 | 1,921 | 0 |
+| `disc` | 172,436 | 1,789 | 1,789 | 0 |
+| `graph` | 114,624 | 1,464 | 1,455 | 0 |
+| `cube` | 40,092 | 395 | 395 | 0 |
+| `demo` | 32,088 | 347 | 346 | 0 |
 
 - **Every differing word differed by exactly the distance between the two
   addresses**, and no other byte differed at all, so the trick misses
@@ -183,7 +185,9 @@ that differ is the list the kernel patches.
   "Undefined symbol: __image_end". The test instead wrote
   `__image_end + 262144` directly into the instructions, which the assembler
   resolves after labels are placed. The compiler can emit it that way, or the
-  assembler can learn to resolve definitions later.
+  assembler can learn to resolve definitions later. **Phase 1 took the
+  second way:** a definition that uses a label is settled after layout, so
+  the compiler emits `__frame_base = __image_end`.
 
 **Cost.** The largest program has about 2,000 words to patch. At a few
 instructions each, that's tens of thousands of instructions, well under a
@@ -233,7 +237,7 @@ the patch list at the end:
 
 | Field | What |
 |---|---|
-| magic | tells a program from any other file; `PGX1` in the prototype |
+| magic | tells a program from any other file: `PGEX`, `PROGRAM_FILE_MAGIC`; the prototype's was `PGX1` |
 | version | the format version |
 | image size | bytes of code and data |
 | entry | offset of `__start` in the image |
@@ -263,8 +267,9 @@ The BIOS path keeps running raw `.bin` files as it does today.
 - the console: text grid, scrolling, line input
 - the file system: the one copy of `fs.c`, and the current directory
 
-**Program startup code**, emitted by the compiler instead of today's `HALT`
-version. Assembled and run in the prototype (kernel.md §16):
+**Program startup code**, emitted by `cc.py --relocatable` instead of the
+`HALT` version. Built in phase 1; the prototype ran the same instructions
+(kernel.md §16), with the two addresses written out:
 
 ```asm
 __start:                          ; the kernel called entry(argc, argv)
@@ -272,12 +277,12 @@ __start:                          ; the kernel called entry(argc, argv)
     ADD  C, F, #4
     MRW  B, C                     ; argv
     PUSH F                        ; the kernel's frame pointer
-    MOV  F, #__image_end          ; my frame stack; patched at load
+    MOV  F, #__frame_base         ; my frame stack: __image_end, patched at load
     MWW  F, A                     ; main's argc
     ADD  C, F, #4
     MWW  C, B                     ; main's argv
     MOV  C, #__heap_ptr
-    MOV  A, #(__image_end + 262144) ; my heap starts after the frame stack
+    MOV  A, #__heap_base          ; my heap, after the frame stack
     MWW  C, A
     CALL main
     POP  F

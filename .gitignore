@@ -26,3 +26,5 @@ venv/
 .pypy/
 
 cds/
+
+chats/

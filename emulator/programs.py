@@ -36,6 +36,9 @@ class Program:
     # Where a C source is built to run, as cc.py --org takes it. None is
     # PROGRAM_LOAD_ADDR; bios2 is built for "BIOS2_LOAD_ADDR".
     origin: Optional[str] = None
+    # A program file the kernel can load anywhere (docs/kernel.md §8), not
+    # an image for one address. cc.py --project builds [files] this way.
+    relocatable: bool = False
 
     @property
     def language(self) -> str:
@@ -52,7 +55,8 @@ class Program:
         """The binary exists but a source has been edited since.
 
         For a C program the libraries count too: editing display.c must
-        rebuild every program that uses it.
+        rebuild every program that uses it. So does the assembly its #asm
+        lines name.
         """
         if self.source is None or not self.built:
             return False
@@ -60,8 +64,8 @@ class Program:
         if self.source.stat().st_mtime > built_at:
             return True
         if self.language == "c":
-            return any(lib.stat().st_mtime > built_at
-                       for lib in libraries_for(self.source))
+            return any(dependency.stat().st_mtime > built_at
+                       for dependency in libraries_for(self.source) + assembly_for(self.source))
         return False
 
     @property
@@ -93,8 +97,19 @@ class Program:
             asm_path = self.binary.with_suffix(".asm")
             asm_path.parent.mkdir(parents=True, exist_ok=True)
             origin = origin_of(self.origin) if self.origin else DEFAULT_ORIGIN
-            asm_path.write_text(compile_units(units, origin=origin))
-            assemble_file(asm_path, self.binary, quiet=quiet)
+            asm_path.write_text(compile_units(units, origin=origin,
+                                              relocatable=self.relocatable))
+            if self.relocatable:
+                from compiler.program_file import build
+                self.binary.write_bytes(build(asm_path))
+                if not quiet:
+                    print(f"Built {asm_path} -> {self.binary} "
+                          f"({self.binary.stat().st_size} bytes, a program file)")
+            else:
+                assemble_file(asm_path, self.binary, quiet=quiet)
+        elif self.relocatable:
+            raise ValueError(f"{self.name}: only C can be built relocatable; assembly has "
+                             f"no startup code that returns to the kernel")
         else:
             assemble_file(self.source, self.binary, quiet=quiet)
         return self.binary
@@ -179,6 +194,25 @@ def libraries_for(source: Path) -> List[Path]:
                 found.append(implementation)
                 pending.append(implementation)
     return sorted(found)
+
+
+ASM_RE = re.compile(r'^\s*#\s*asm\s+"([^"]+)"', re.MULTILINE)
+
+
+def assembly_for(source: Path) -> List[Path]:
+    """The assembly a C program and its libraries name with #asm, each
+    relative to the file naming it (compiler/preprocess.py)."""
+    found: List[Path] = []
+    for unit in [Path(source), *libraries_for(source)]:
+        try:
+            text = unit.read_text()
+        except OSError:
+            continue
+        for name in ASM_RE.findall(text):
+            path = (unit.parent / name).resolve()
+            if path.is_file() and path not in found:
+                found.append(path)
+    return found
 
 
 def from_path(config: Config, path: Path) -> Program:

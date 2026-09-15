@@ -12,10 +12,33 @@ label   = PIGEONOS              # the disc's volume label, 15 bytes at most
 
 [boot]
 installer = installer.c         # the disc's boot sector loads and runs this
-system    = ../graph.c          # what the installed hard disk boots: the graphing calculator
+system    = kernel.c            # what the installed hard disk boots: the kernel, which starts /bin/sh.bin
 # bootsector = boot.asm         # optional: firmware/boot.asm when left out
 
 [files]                         # what the installer will put on the hard disk
-/bin/files.bin   = ../files.c   # a .c or .asm is built; anything else is copied
+/bin/sh.bin      = bin/sh.c     # a .c is built as a program file, an .asm as an image; anything else is copied
+/bin/ls.bin      = bin/ls.c
+/bin/cat.bin     = bin/cat.c
+/bin/echo.bin    = bin/echo.c
+/bin/mkdir.bin   = bin/mkdir.c
+/bin/rmdir.bin   = bin/rmdir.c
+/bin/rm.bin      = bin/rm.c
+/bin/mv.bin      = bin/mv.c
+/bin/cp.bin      = bin/cp.c
+/bin/clear.bin   = bin/clear.c
+/bin/more.bin    = bin/more.c
+/bin/edit.bin    = bin/edit.c
+/bin/splash.bin  = bin/splash.c   # the boot screen /etc/boot.conf names
+/bin/reboot.bin  = bin/reboot.c
+/bin/img.bin     = bin/img.c      # shows a BMP until Esc
+
+/bin/graph.bin   = ../graph.c   # the graphing calculator; Esc goes back to the shell
 /bin/cube.bin    = ../cube.c
+/bin/files.bin   = ../files.c
+/bin/corrupter.bin   = bin/graph-corrupt.c
+
+/etc/bmp/pigeon.bmp = etc/bmp/pigeon.bmp   # what the splash draws
+/etc/bmp/eye-mask.bmp = etc/bmp/eye-mask.bmp   # where the splash's eyes flash
 /docs/readme.txt = readme.txt
+/etc/shell_header.conf = etc/shell_header.conf   # the prompt (docs/shell.md)
+/etc/boot.conf   = etc/boot.conf  # what runs after the kernel (docs/phase6_plan.md)

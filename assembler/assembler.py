@@ -3,7 +3,8 @@
 Pigeon Emulator Assembler
 
 Two-pass assembler:
-  Pass 1: Preprocess (strip comments, evaluate static defs, collect labels)
+  Pass 1: Preprocess (strip comments, evaluate static defs, collect labels);
+          a definition that uses a label is settled once labels have addresses
   Pass 2: Assemble (parse mnemonics, resolve operands, encode to binary)
 
 Usage:
@@ -22,7 +23,7 @@ import operator
 import re
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 # emulator/ lives one level up from assembler/.
@@ -167,6 +168,11 @@ def _pack_int(value: int, width: int, where: str) -> bytes:
     return (value & 0xFFFFFFFF).to_bytes(width, "little")
 
 
+class UndefinedSymbol(ValueError):
+    """A name with no value, yet. A definition that meets one waits for
+    layout instead of failing, because the name may be a label."""
+
+
 
 # --------------------------------------------------------------------------
 # Operand syntax templates: one row per mnemonic, describing the *ordered*
@@ -228,6 +234,14 @@ SYNTAX = {
     "RET":  [],
     "SHL":  [("dst", "reg"), ("src1", "reg"), ("src2", "reg_or_imm")],
     "SHR":  [("dst", "reg"), ("src1", "reg"), ("src2", "reg_or_imm")],
+
+    # Interrupts, faults and the stack pointer (docs/kernel.md §13)
+    "GETSP": [("dst", "reg")],
+    "SETSP": [("src1", "reg_or_imm")],
+    "EI":    [],
+    "DI":    [],
+    "IRET":  [],
+    "SETIV": [("src1", "reg_or_imm")],
 }
 
 # Mnemonics whose 3-operand form may be written with 2, duplicating the
@@ -370,13 +384,22 @@ class Align(Item):
 
 
 class Assembler:
-    def __init__(self, source_file: str):
-        """Load source assembly file."""
+    def __init__(self, source_file: str, origin: Optional[int] = None):
+        """Load source assembly file.
+
+        `origin`, when given, is where the image is built to run, instead of
+        the address the file's .ORG names. compiler/program_file.py builds
+        one file at two origins and compares the images.
+        """
         with open(source_file, 'r') as f:
             self.source_lines = f.readlines()
+        self.origin = origin
         self.symbols: Dict[str, int] = {}  # label name -> address
         self.warnings: List[str] = []
         self.static_defs: Dict[str, int] = {}  # static definition name -> value
+        # Definitions that use a label, as (source line, name, expression):
+        # settled once layout has given every label its address.
+        self.pending_defs: List[Tuple[int, str, str]] = []
         self.org_addr = 0  # origin address
         self.instructions: List[bytes] = []  # collected instructions
         self.current_addr = 0  # current write address
@@ -387,6 +410,7 @@ class Assembler:
         lines = self._preprocess()          # [(source line number, text)]
         items = self._parse_items(lines)    # parsed EXACTLY once
         self._layout(items)                 # pass 1: addresses, sizes, labels
+        self._resolve_definitions()         # the definitions that use a label
         return self._emit(items)            # pass 2: bytes
 
     def _layout(self, items: List[Item]) -> None:
@@ -494,6 +518,9 @@ class Assembler:
         """
         lines: List[Tuple[int, str]] = []
         emitted_any = False
+        self.pending_defs = []
+        if self.origin is not None:
+            self.org_addr = self.current_addr = self.origin
 
         for source_line_num, raw in enumerate(self.source_lines, 1):
             line = _strip_comment(raw).strip()
@@ -512,7 +539,9 @@ class Assembler:
                 # Evaluated, not regex-matched: `.ORG PROGRAM_LOAD_ADDR` used
                 # to fail the literal-only regex and be silently dropped,
                 # leaving the origin at 0 and every label wrong.
-                self.org_addr = self.current_addr = self._eval_expr(argument)
+                address = self._eval_expr(argument)
+                if self.origin is None:
+                    self.org_addr = self.current_addr = address
                 continue
 
             # Static definition: NAME = expression. Checked before the label
@@ -520,13 +549,15 @@ class Assembler:
             definition = STATIC_DEF_RE.match(line)
             if definition and not LABEL_RE.match(line):
                 name, expr = definition.group(1), definition.group(2).strip()
-                value = self._eval_expr(expr)
-                builtin = BUILTIN_SYMBOLS.get(name)
-                if builtin is not None and builtin != value:
-                    self.warnings.append(
-                        f"{name} is redefined as {value:#x}, but the machine's "
-                        f"memory map says {builtin:#x} -- this source has drifted")
-                self.static_defs[name] = value
+                try:
+                    value = self._eval_expr(expr)
+                except UndefinedSymbol:
+                    # Perhaps a label, which has no address until layout:
+                    # `__frame_base = __image_end`. Tried again then, and
+                    # reported then if it still means nothing.
+                    self.pending_defs.append((source_line_num, name, expr))
+                    continue
+                self._define(name, value)
                 continue
 
             lines.append((source_line_num, line))
@@ -613,7 +644,46 @@ class Assembler:
             return self.symbols[name]
         if name in BUILTIN_SYMBOLS:
             return BUILTIN_SYMBOLS[name]
-        raise ValueError(f"Undefined symbol: {name}")
+        for line_num, pending, _ in self.pending_defs:
+            if pending == name:
+                raise UndefinedSymbol(
+                    f"{name} (line {line_num}) uses a label, so it has no value "
+                    f"until every line has its address -- too late for .ORG, "
+                    f".space or .align")
+        raise UndefinedSymbol(f"Undefined symbol: {name}")
+
+    def _define(self, name: str, value: int) -> None:
+        builtin = BUILTIN_SYMBOLS.get(name)
+        if builtin is not None and builtin != value:
+            self.warnings.append(
+                f"{name} is redefined as {value:#x}, but the machine's "
+                f"memory map says {builtin:#x} -- this source has drifted")
+        self.static_defs[name] = value
+
+    def _resolve_definitions(self) -> None:
+        """Settle the definitions that waited for layout.
+
+        In rounds, because one may use another: `__frame_limit = __frame_base
+        + 262144` and `__heap_base = __frame_limit` both wait for
+        `__frame_base = __image_end`. A round that settles nothing leaves a
+        name that means nothing, reported at its line.
+        """
+        pending = self.pending_defs
+        while pending:
+            waiting = []
+            for line_num, name, expr in pending:
+                try:
+                    self._define(name, self._eval_expr(expr))
+                except UndefinedSymbol:
+                    waiting.append((line_num, name, expr))
+            if len(waiting) == len(pending):
+                line_num, name, expr = waiting[0]
+                try:
+                    self._eval_expr(expr)
+                except ValueError as e:
+                    raise ValueError(f"Line {line_num}: {name} = {expr}\n  Error: {e}") from None
+            pending = waiting
+        self.pending_defs = []
 
     def _encode_instruction(self, text: str) -> bytes:
         """Encode one instruction line. Callers have already stripped any

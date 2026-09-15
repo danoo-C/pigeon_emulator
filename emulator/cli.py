@@ -15,6 +15,7 @@ from .instruction_set import INSTR_SIZE, disassemble, disassemble_range
 from .machine import Machine
 from .memory_map import PROGRAM_LOAD_ADDR, PROGRAM_MAX_SIZE
 from .programs import Program, short
+from .serial_printer import SerialPrinter
 
 log = logging.getLogger(__name__)
 
@@ -152,12 +153,22 @@ def in_program(pc: int) -> bool:
     return PROGRAM_LOAD_ADDR <= pc < PROGRAM_LOAD_ADDR + PROGRAM_MAX_SIZE
 
 
+def serial_printer(machine: Machine, config: Config) -> SerialPrinter | None:
+    """The printer for --serial and --serial-log, or None for neither."""
+    if not config.serial and config.serial_log is None:
+        return None
+    return SerialPrinter(machine.debug, terminal=sys.stdout if config.serial else None,
+                         log_path=config.serial_log)
+
+
 class Console:
     """The interactive menu and debugger wrapped around a Machine."""
 
-    def __init__(self, machine: Machine, config: Config):
+    def __init__(self, machine: Machine, config: Config,
+                 printer: SerialPrinter | None = None):
         self.machine = machine
         self.config = config
+        self.printer = printer
 
     MENU = """
 Pigeon Emulator
@@ -191,8 +202,12 @@ Pigeon Emulator
                 print(f"'{choice}' is not on the menu.")
 
     def run(self):
+        printer = self.printer
         try:
-            self.machine.run(report_ips=lambda ips: print(f"[IPS] {ips:,.0f}"))
+            self.machine.run(on_frame=printer.poll if printer else None,
+                             report_ips=lambda ips: print(f"[IPS] {ips:,.0f}"))
+            if printer:
+                printer.poll(final=True)
             print(f"\nHALT at PC={self.machine.cpu.pc:#06x} "
                   f"after {self.machine.total_instructions:,} instructions")
         except KeyboardInterrupt:
@@ -217,9 +232,13 @@ Pigeon Emulator
         """
         print(f"Debug mode: free-running until PC is in the program at "
               f"{PROGRAM_LOAD_ADDR:#06x}, then Enter to step. Ctrl-C for the menu.")
-        machine, cpu = self.machine, self.machine.cpu
+        machine, cpu, printer = self.machine, self.machine.cpu, self.printer
+        steps = 0
         try:
             while True:
+                steps += 1
+                if printer and (in_program(cpu.pc) or steps % 10_000 == 0):
+                    printer.poll()
                 if in_program(cpu.pc):
                     print(disassemble(bytes(machine.ram.mem[cpu.pc:cpu.pc + INSTR_SIZE]), cpu.pc))
                     print("  " + cpu.dump())
@@ -228,6 +247,8 @@ Pigeon Emulator
                     except EOFError:
                         return
                 if machine.step() == 1:
+                    if printer:
+                        printer.poll(final=True)
                     print("HALT")
                     return
         except KeyboardInterrupt:
@@ -288,6 +309,11 @@ def build_parser():
                      help="print the BIOS disassembly at startup")
     dbg.add_argument("--verbose", "-v", action="store_true",
                      help="log every IO transaction, disk read and key event")
+    dbg.add_argument("--serial", action="store_true", default=None,
+                     help="print what the machine writes to its debug port here, "
+                          "each line with the time since power-on (docs/phase5_plan.md)")
+    dbg.add_argument("--serial-log", metavar="PATH", dest="serial_log",
+                     help="write those lines to a file as well, started fresh each run")
     return parser
 
 
@@ -314,6 +340,7 @@ def main(argv=None):
         cd_port=args.cd_port, cd=args.cd,
         program_dirs=args.program_dirs, bios_binary=args.bios_binary,
         bios2_binary=args.bios2_binary, disk=args.disk,
+        serial=args.serial, serial_log=args.serial_log,
         auto_build=False if args.no_autobuild else None)
 
     if args.list:
@@ -408,11 +435,18 @@ def main(argv=None):
             print(f"Display: {config.display_url}   HID: {config.hid_url}   "
                   f"CD: {config.cd_url}")
 
-        console = Console(machine, config)
-        if args.run:
-            console.run()
-        else:
-            console.menu()
+        printer = serial_printer(machine, config)
+        if config.serial_log is not None:
+            print(f"Serial log: {short(config.serial_log)}")
+        console = Console(machine, config, printer)
+        try:
+            if args.run:
+                console.run()
+            else:
+                console.menu()
+        finally:
+            if printer:
+                printer.close()
     finally:
         machine.close()
     return 0
