@@ -36,7 +36,7 @@ from emulator.devices.keycodes import (                                 # noqa: 
     KEY_PGUP, KEY_RIGHT, KEY_TAB, KEY_UP)
 from emulator.machine import Machine                                    # noqa: E402
 from emulator.memory_map import (                                       # noqa: E402
-    BOOT_CHANNEL, CH_CD, CH_DEBUG, CH_DISPLAY, CH_HDD, CH_TIMER, CH_USERPROG, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
+    BOOT_CHANNEL, CH_CD, CH_DEBUG, CH_DISPLAY, CH_HDD, CH_TIMER, CH_USERPROG, DISPLAY_H, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
     BOOT_LOAD_ADDR, BOOT_RECORD, BOOT_SIGNATURE, VEC_BREAK)
 from emulator.programs import Program                                   # noqa: E402
 from pfs import PgfsImage                                               # noqa: E402
@@ -1675,106 +1675,149 @@ def test_a_startup_program_that_cannot_start_stops_boot(label, conf, message):
     assert said[-1] == f"[kernel] {message}", f"{label}: {said}"
 
 
-def splash_files(ms):
-    """The real splash, and a boot.conf showing it for `ms`."""
-    return (f"splash = /bin/splash.bin\nsplash_ms = {ms}\nstartup = /bin/sh.bin\n",
-            [("/bin/splash.bin", shell_program("splash"))])
+PIGEON_BMP = REPO_ROOT / "user" / "os" / "etc" / "bmp" / "pigeon.bmp"
+EYE_MASK_BMP = REPO_ROOT / "user" / "os" / "etc" / "bmp" / "eye-mask.bmp"
+YELLOW = 0xFFFFFF00
 
 
-def fills_of(c):
-    """The colours of the full-screen fills, as they happen."""
-    seen = []
-    channel = c.machine.io_controller.channels[CH_DISPLAY]
+def splash_files(ms, image=True, eyes=True):
+    """The real splash, /etc/bmp/pigeon.bmp and eye-mask.bmp unless left out,
+    and a boot.conf showing it for `ms`."""
+    extra = [("/bin/splash.bin", shell_program("splash"))]
+    if image:
+        extra.append(("/etc/bmp/pigeon.bmp", PIGEON_BMP.read_bytes()))
+    if eyes:
+        extra.append(("/etc/bmp/eye-mask.bmp", EYE_MASK_BMP.read_bytes()))
+    return f"splash = /bin/splash.bin\nsplash_ms = {ms}\nstartup = /bin/sh.bin\n", extra
+
+
+def watch_splash(c, key_at=None, every=False):
+    """As the splash waits: how often it looks at its timer, and what the
+    screen was at the first look -- or, with `every`, at each look. With
+    `key_at`, a key goes down at that look."""
+    seen = {"looks": 0, "screen": None, "screens": []}
+    channel = c.machine.io_controller.channels[CH_TIMER]
     real = channel.callback
 
     def spy(read_write, command, length, address, data):
-        if command == 4 and address == DISPLAY_START and len(data) >= 4:
-            seen.append(int.from_bytes(bytes(data[:4]), "little") & 0xFFFFFF)
+        if command == 5 and address == 1:
+            seen["looks"] += 1
+            if seen["screen"] is None:
+                seen["screen"] = c.machine.display_io.snapshot()
+            if every:
+                seen["screens"].append(c.machine.display_io.snapshot())
+            if seen["looks"] == key_at:
+                c.machine.hid.push_key(ord("x"), True)
+                c.machine.hid.push_key(ord("x"), False)
         return real(read_write, command, length, address, data)
     channel.callback = spy
     return seen
 
 
-def strongest(colour):
-    return max((colour >> 16 & 255, "red"), (colour >> 8 & 255, "green"), (colour & 255, "blue"))[1]
+def pigeon_screen():
+    """The screen's bytes with pigeon.bmp stretched onto it, decoded in Python."""
+    from test_bmp import STRETCH, reference
+    pixels = reference(PIGEON_BMP.read_bytes(), DISPLAY_W, DISPLAY_H, STRETCH)
+    return struct.pack(f"<{DISPLAY_W * DISPLAY_H}I", *pixels)
 
 
-def test_the_splash_fades_through_red_green_and_blue_and_ends_by_itself():
+def test_the_splash_draws_pigeon_bmp_and_holds_it_for_its_length():
     conf, extra = splash_files(2500)
     with booted_with(conf, extra) as c:
-        seen = fills_of(c)
+        seen = watch_splash(c)
         assert c.ready(), c.rows()
         assert c.rows()[:2] == ["PigeonOS", "2:/> _"], c.rows()
         said = serial(c)
-    colours = [colour for colour in seen if colour != 0]
-    order = []
-    for colour in colours:
-        if not order or order[-1] != strongest(colour):
-            order.append(strongest(colour))
-    assert order == ["red", "green", "blue"], order
-    for shift, name in ((16, "red"), (8, "green"), (0, "blue")):
-        assert max(colour >> shift & 255 for colour in colours) >= 240, f"{name} never came up full"
-    assert any(colour >> 16 & 255 >= 64 and colour >> 8 & 255 >= 64 for colour in colours), \
-        "red went to green without fading into it"
+    assert seen["screen"] == pigeon_screen(), "the screen wasn't pigeon.bmp while the splash waited"
+    assert 40 <= seen["looks"] <= 60, f"{seen['looks']} looks at the timer for 2,500 ms on the stepping clock"
     assert "[kernel] /bin/splash.bin ended: 0" in said, said
 
 
-def looks_and_fills(conf, extra, until=b"splash.bin ended"):
-    """Boot until the splash ends: how many times it looked at the timer, and
-    the colours it filled the screen with."""
+def blend(base, t):
+    """The splash's blend of a pixel toward yellow by t/256, in Python."""
+    channels = [((base >> s & 255) * (256 - t) + (YELLOW >> s & 255) * t) >> 8 for s in (16, 8, 0)]
+    return 0xFF000000 | channels[0] << 16 | channels[1] << 8 | channels[2]
+
+
+def test_the_eyes_flash_yellow_smoothly_and_nothing_else_moves():
+    """At every look: outside eye-mask.bmp's white the screen is the pigeon,
+    and every eye pixel is its own colour blended toward yellow by the one
+    amount, which over 2.5 s comes near both ends."""
+    from test_bmp import STRETCH, reference
+    size = DISPLAY_W * DISPLAY_H
+    pigeon = reference(PIGEON_BMP.read_bytes(), DISPLAY_W, DISPLAY_H, STRETCH)
+    mask = reference(EYE_MASK_BMP.read_bytes(), DISPLAY_W, DISPLAY_H, STRETCH)
+    eyes = [i for i in range(size) if (mask[i] >> 8 & 255) >= 128]
+    assert len(eyes) == 36, len(eyes)
+    others = [i for i in range(size) if (mask[i] >> 8 & 255) < 128]
+    conf, extra = splash_files(2500)
     with booted_with(conf, extra) as c:
-        looks = []
-        channel = c.machine.io_controller.channels[CH_TIMER]
-        real = channel.callback
+        seen = watch_splash(c, every=True)
+        assert c.ready(), c.rows()
+    amounts = []
+    for screen in seen["screens"]:
+        words = struct.unpack(f"<{size}I", screen)
+        assert all(words[i] == pigeon[i] for i in others), "a pixel outside the eyes changed"
+        if all(words[i] == pigeon[i] for i in eyes):
+            continue                             # before the first flash is drawn
+        found = [t for t in range(257) if all(words[i] == blend(pigeon[i], t) for i in eyes)]
+        assert found, "the eyes aren't one blend of their own colours and yellow"
+        amounts.append(found[0])
+    assert len(set(amounts)) >= 10, f"only {sorted(set(amounts))}: not a smooth flash"
+    assert max(amounts) >= 230 and min(amounts) <= 26, f"from {min(amounts)} to {max(amounts)} of 256"
+    steps = [b - a for a, b in zip(amounts, amounts[1:]) if b != a]
+    turns = sum(1 for a, b in zip(steps, steps[1:]) if (a > 0) != (b > 0))
+    assert turns >= 3, f"the brightness turned {turns} times in 2.5 s: not a flash a second ({amounts})"
 
-        def spy(read_write, command, length, address, data):
-            if command == 5 and address == 1:
-                looks.append(1)
-            return real(read_write, command, length, address, data)
-        channel.callback = spy
-        seen = fills_of(c)
-        assert c.run_until(lambda rows: until in c.machine.debug.since(0).data), c.rows()
-    return len(looks), [colour for colour in seen if colour]
+
+def test_without_the_mask_the_pigeon_still_shows_with_its_eyes_still():
+    conf, extra = splash_files(2500, eyes=False)
+    with booted_with(conf, extra) as c:
+        seen = watch_splash(c, every=True)
+        assert c.ready(), c.rows()
+        screen = "".join(row.ljust(COLS) for row in c.rows())
+        said = serial(c)
+    assert all(s == pigeon_screen() for s in seen["screens"]), "the screen wasn't the still pigeon"
+    assert screen.startswith("splash: /etc/bmp/eye-mask.bmp: not found".ljust(2 * COLS) + BANNER + "2:/> _"), \
+        repr(screen)
+    assert "[kernel] /bin/splash.bin ended: 0" in said, said
 
 
-def test_the_splash_shows_for_its_length_and_fills_only_when_the_colour_changes():
-    """A minute: 1,200 looks at the timer on the stepping clock, 50 ms each,
-    and at that length the colour doesn't change at every look."""
+def test_the_splash_holds_the_image_for_the_milliseconds_boot_conf_gives():
+    """A minute: 1,200 looks at 50 ms each on the stepping clock."""
     conf, extra = splash_files(60000)
-    looks, colours = looks_and_fills(conf, extra)
-    assert 1100 <= looks <= 1300, f"{looks} looks: not the 60,000 ms boot.conf gave"
-    assert len(colours) < looks - 100, f"{len(colours)} fills for {looks} looks"
-    assert all(a != b for a, b in zip(colours, colours[1:])), "the same colour filled twice in a row"
+    with booted_with(conf, extra) as c:
+        seen = watch_splash(c)
+        assert c.ready(), c.rows()
+    assert 1100 <= seen["looks"] <= 1300, f"{seen['looks']} looks: not the 60,000 ms boot.conf gave"
 
 
 def test_a_key_ends_the_splash_early_and_never_reaches_the_shell():
-    """A minute of splash, and a key as soon as it has drawn: a whole minute
-    on the stepping clock would be over a thousand fills."""
     conf, extra = splash_files(60000)
     with booted_with(conf, extra) as c:
-        seen = fills_of(c)
-        channel = c.machine.io_controller.channels[CH_DISPLAY]
-        watching = channel.callback
-        pressed = []
-
-        def press_once(*args):
-            reply = watching(*args)
-            if not pressed and any(seen):
-                pressed.append(sum(1 for colour in seen if colour))
-                c.machine.hid.push_key(ord("x"), True)
-                c.machine.hid.push_key(ord("x"), False)
-            return reply
-        channel.callback = press_once
+        seen = watch_splash(c, key_at=1)
         assert c.ready(), c.rows()
         assert c.rows()[:2] == ["PigeonOS", "2:/> _"], "the key reached the shell: " + repr(c.rows())
-    drawn = sum(1 for colour in seen if colour)
-    assert pressed and drawn <= pressed[0] + 1, f"{drawn} fills, the key at {pressed}"
+    assert seen["screen"] == pigeon_screen()
+    assert seen["looks"] <= 3, f"{seen['looks']} looks at the timer after the key"
 
 
-def test_the_splash_costs_a_few_hundred_instructions_a_look_at_the_timer():
-    """Counted, not timed: 624 a look (docs/phase6_plan.md §9). The stepping
-    clock moves 50 ms a look, so nearly every look is a new colour and a
-    fill too; on the real clock the prototype filled on one look in 22."""
+def test_a_splash_image_that_will_not_load_is_reported_and_boot_carries_on():
+    conf, extra = splash_files(2500, image=False)
+    with booted_with(conf, extra) as c:
+        assert c.ready(), c.rows()
+        screen = "".join(row.ljust(COLS) for row in c.rows())
+        said = serial(c)
+    assert screen.startswith("splash: /etc/bmp/pigeon.bmp: not found".ljust(2 * COLS) + BANNER + "2:/> _"), \
+        repr(screen)
+    assert "[kernel] /bin/splash.bin ended: 1" in said, said
+
+
+def test_the_splash_loads_and_draws_in_a_few_million_instructions_and_waits_cheaply():
+    """Counted, not timed: from exec until the first look at the timer is
+    loading the program, the pigeon and the eye mask and drawing, 3,387,860;
+    each look after that, with the eyes drawn again, is 6,757."""
+    entry = kernel_symbols()["k_exec"]
     conf, extra = splash_files(2500)
     with booted_with(conf, extra) as c:
         done, looks = [0], []
@@ -1786,15 +1829,20 @@ def test_the_splash_costs_a_few_hundred_instructions_a_look_at_the_timer():
                 looks.append(done[0])
             return real(read_write, command, length, address, data)
         channel.callback = spy
-        seen = fills_of(c)
+        cpu = c.machine.cpu
         with contextlib.redirect_stdout(io.StringIO()):
-            while b"splash.bin ended" not in c.machine.debug.since(0).data and done[0] < 5_000_000:
+            while cpu.pc != entry and done[0] < 10_000_000:
+                c.machine.step()
+                done[0] += 1
+            start = done[0]
+            while b"splash.bin ended" not in c.machine.debug.since(0).data and done[0] < 20_000_000:
                 for _ in range(10_000):
                     c.machine.step()
                     done[0] += 1
-    assert 40 <= len(looks) <= 60, f"{len(looks)} looks at the timer for 2,500 ms on the stepping clock"
+    to_draw = looks[0] - start
     per_look = (looks[-1] - looks[0]) / (len(looks) - 1)
-    assert per_look < 750, f"{per_look:,.0f} instructions a look, {sum(1 for x in seen if x)} fills"
+    assert to_draw < 4_400_000, f"{to_draw:,} instructions to load and draw"
+    assert per_look < 9_000, f"{per_look:,.0f} instructions a look"
 
 
 if __name__ == "__main__":

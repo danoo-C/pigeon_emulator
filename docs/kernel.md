@@ -1326,8 +1326,9 @@ form.
 6. **`boot.conf`, a splash screen and the startup program**
    ([phase6_plan.md](phase6_plan.md)). ***Built:*** the kernel runs the
    splash `/etc/boot.conf` names, told how long to show, then `PigeonOS`,
-   then the startup program, the shell; `/bin/splash.bin` fades through red,
-   green and blue as a placeholder, and any key ends it. A startup script is
+   then the startup program, the shell; `/bin/splash.bin` draws
+   `/etc/bmp/pigeon.bmp` with `<pigeon/bmp.h>`, its eyes flashing yellow where
+   `/etc/bmp/eye-mask.bmp` is white, and any key ends it. A startup script is
    left for later, as the shell's own `sh.conf`.
 7. **The launcher, `config.json`, and the docs.**
 

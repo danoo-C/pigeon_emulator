@@ -357,3 +357,22 @@ Both come from strict boot (Q3); each has what I'd suggest.
   failing a test; `splash_ms` taking letters needed a case of its own first,
   `1s`, since `soon` read as digits is already over a minute. The full
   suite passes: 1,407 tests.
+- **Later the same day, the fade gave way to the pigeon.** `splash.bin` draws
+  `/etc/bmp/pigeon.bmp` with `<pigeon/bmp.h>` ([bmp_plan.md](bmp_plan.md)),
+  stretched to the screen, and holds it for `splash_ms`; any key still ends
+  it. An image that won't load is one line on the console, and the splash
+  ends with status 1: boot carries on, as after any splash that doesn't
+  fault. The disc gains `/etc/bmp/pigeon.bmp`: 23 files. From `exec` to the
+  splash's first look at the timer, loading it and the image and drawing,
+  is 1,755,788 instructions, and a look while it waits is 179 *(measured)*;
+  a test holds them under 2.3 million and 250.
+- **Then the eyes.** `/etc/bmp/eye-mask.bmp` lies exactly over the pigeon,
+  white at its eyes' 36 pixels. The splash finds them once, and at each look
+  at the timer draws just those pixels again: each its own colour blended
+  toward yellow by `(isin(angle) + 256) / 2` of 256, the angle following the
+  time gone, one flash a second whatever the host's speed. A mask that won't
+  load leaves the eyes still, with its line on the console once the splash
+  ends, since the console draws on the same screen. The disc holds 24 files.
+  Loading the program, the pigeon and the mask and drawing is 3,387,860
+  instructions, and a look with the eyes drawn again is 6,757 *(measured)*;
+  the splash's default length, run from the prompt, is 4,000 ms.

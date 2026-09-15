@@ -28,11 +28,15 @@ system    = kernel.c            # what the installed hard disk boots: the kernel
 /bin/clear.bin   = bin/clear.c
 /bin/more.bin    = bin/more.c
 /bin/edit.bin    = bin/edit.c
+/bin/splash.bin  = bin/splash.c   # the boot screen /etc/boot.conf names
+
 /bin/graph.bin   = ../graph.c   # the graphing calculator; Esc goes back to the shell
 /bin/cube.bin    = ../cube.c
 /bin/files.bin   = ../files.c
 /bin/corrupter.bin   = bin/graph-corrupt.c
-/bin/splash.bin  = bin/splash.c   # the boot screen /etc/boot.conf names
+
+/etc/bmp/pigeon.bmp = etc/bmp/pigeon.bmp   # what the splash draws
+/etc/bmp/eye-mask.bmp = etc/bmp/eye-mask.bmp   # where the splash's eyes flash
 /docs/readme.txt = readme.txt
 /etc/shell_header.conf = etc/shell_header.conf   # the prompt (docs/shell.md)
 /etc/boot.conf   = etc/boot.conf  # what runs after the kernel (docs/phase6_plan.md)
