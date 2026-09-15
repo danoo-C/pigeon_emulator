@@ -459,7 +459,8 @@ kernel's phase 3 it was the graphing calculator, `../graph.c`.
     beside it;
   - `fsck` was clean.
 - **After the restart:** bios2 counted down to the hard disk, whose boot
-  sector loaded the kernel. The kernel started the shell, the shell ran
+  sector loaded the kernel. The kernel ran the splash `/etc/boot.conf`
+  names, then started the shell (phase 6); the shell ran
   `graph`, the calculator drew its curve, and Esc came back to the prompt.
 
 **What still holds for an installed disk:** its boot record points at

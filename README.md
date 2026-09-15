@@ -147,8 +147,9 @@ python3 start_emulator.py --cd build/pigeonos.img --disk disks/os.img --run
 
 With no program picked, bios2 boots the disc into its installer. Enter
 formats the hard disk, copies the disc onto it and makes it boot the
-kernel. Enter again restarts: the hard disk boots the kernel, and the
-kernel starts the shell. `ls /bin` lists what it can run: `mkdir`, `cp`,
+kernel. Enter again restarts: the hard disk boots the kernel, which runs
+what `/etc/boot.conf` names: a splash screen, which any key cuts short, then
+the shell ([docs/phase6_plan.md](docs/phase6_plan.md)). `ls /bin` lists what it can run: `mkdir`, `cp`,
 `mv`, `rm` and the other file commands, and `graph` — the graphing
 calculator — among them, where Esc or Ctrl+C comes back to the prompt
 ([docs/kernel.md](docs/kernel.md)). The prompt is the file

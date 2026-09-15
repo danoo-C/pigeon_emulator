@@ -32,5 +32,7 @@ system    = kernel.c            # what the installed hard disk boots: the kernel
 /bin/cube.bin    = ../cube.c
 /bin/files.bin   = ../files.c
 /bin/corrupter.bin   = bin/graph-corrupt.c
+/bin/splash.bin  = bin/splash.c   # the boot screen /etc/boot.conf names
 /docs/readme.txt = readme.txt
 /etc/shell_header.conf = etc/shell_header.conf   # the prompt (docs/shell.md)
+/etc/boot.conf   = etc/boot.conf  # what runs after the kernel (docs/phase6_plan.md)

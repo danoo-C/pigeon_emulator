@@ -169,9 +169,11 @@ Decided 2026-09-14, left to me. Each is recorded where the question was asked.
    logging boot, every `exec` and how it ended
    ([phase5b_plan.md](phase5b_plan.md)); and the Serial panel in both front
    ends ([phase5c_plan.md](phase5c_plan.md)).
-6. **A boot screen and a startup script,** from `/etc/boot.conf`.
+6. ***Done.*** **`boot.conf`, a splash screen and the startup program**
+   ([phase6_plan.md](phase6_plan.md)): the kernel runs the splash
+   `/etc/boot.conf` names, then the startup program, the shell.
 7. **The launcher.**
 
-Phases 6 and 7 are sketched in [phase4_plan.md §11](phase4_plan.md#11-later-phases),
-which numbered the first two the other way round.
+Phase 7 is sketched in [phase4_plan.md §11](phase4_plan.md#11-later-phases),
+which numbered phases 5 and 6 the other way round.
 Multitasking stays optional.

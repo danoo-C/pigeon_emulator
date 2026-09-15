@@ -36,7 +36,7 @@ from emulator.devices.keycodes import (                                 # noqa: 
     KEY_PGUP, KEY_RIGHT, KEY_TAB, KEY_UP)
 from emulator.machine import Machine                                    # noqa: E402
 from emulator.memory_map import (                                       # noqa: E402
-    BOOT_CHANNEL, CH_CD, CH_DEBUG, CH_HDD, CH_USERPROG, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
+    BOOT_CHANNEL, CH_CD, CH_DEBUG, CH_DISPLAY, CH_HDD, CH_TIMER, CH_USERPROG, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
     BOOT_LOAD_ADDR, BOOT_RECORD, BOOT_SIGNATURE, VEC_BREAK)
 from emulator.programs import Program                                   # noqa: E402
 from pfs import PgfsImage                                               # noqa: E402
@@ -1405,13 +1405,15 @@ def test_the_kernel_logs_starting_mounting_and_the_shell():
     with booted() as c:
         assert c.ready(), c.rows()
         assert serial(c) == ["[kernel] started at 0x00020000", "[kernel] mounted channel 2, TEST",
+                             "[kernel] no /etc/boot.conf: starting /bin/sh.bin",
                              "[kernel] exec /bin/sh.bin at 0x01000000, depth 1"], serial(c)
 
 
 def test_the_kernel_logs_why_it_stops_at_boot():
     with booted(shell=False) as c:
         assert not c.run_until(lambda rows: False, seconds=20) and c.machine.cpu.halted
-        assert serial(c)[2:] == ["[kernel] exec /bin/sh.bin: no such file or directory",
+        assert serial(c)[2:] == ["[kernel] no /etc/boot.conf: starting /bin/sh.bin",
+                                 "[kernel] exec /bin/sh.bin: no such file or directory",
                                  "[kernel] cannot start /bin/sh.bin: no such file or directory"], \
             serial(c)
     with tempfile.TemporaryDirectory() as t:
@@ -1550,6 +1552,249 @@ def test_an_exec_costs_its_two_lines_and_no_more():
     with_port, without = first_exec_of_echo(True), first_exec_of_echo(False)
     assert with_port - without < 12_000, \
         f"logging cost {with_port - without:,} instructions ({with_port:,} against {without:,})"
+
+
+# --- boot.conf, the splash and the startup program: docs/phase6_plan.md -----------
+
+STANDINS["splasharg"] = r"""#include <pigeon/sys.h>
+int main(int argc, char **argv) { print("splash got "); if (argc > 1) print(argv[1]); print("\n"); return 0; }
+"""
+
+WITH_SPLASH = "splash = /bin/splash.bin\nsplash_ms = 1234\nstartup = /bin/sh.bin\n"
+
+
+@contextlib.contextmanager
+def booted_with(conf, extra=()):
+    """The kernel on a test disk with /etc/boot.conf holding `conf`, or none."""
+    with tempfile.TemporaryDirectory() as t:
+        files = list(extra)
+        if conf is not None:
+            files.append(("/etc/boot.conf", conf.encode() if isinstance(conf, str) else conf))
+        console = Console(make_disk(Path(t) / "hdd.img", files))
+        try:
+            yield console
+        finally:
+            console.close()
+
+
+def stopped(c):
+    """Run until the kernel stops: the console as one run of text, every row
+    padded to the full width so a message wrapped at a space reads whole,
+    and the port's lines."""
+    assert not c.run_until(lambda rows: False, seconds=30) and c.machine.cpu.halted, c.rows()
+    return "".join(row.ljust(COLS) for row in c.rows()).rstrip(), serial(c)
+
+
+BANNER = "PigeonOS".ljust(COLS)
+
+
+def test_boot_conf_runs_the_splash_with_its_length_then_the_banner_then_the_shell():
+    with booted_with(WITH_SPLASH, [("/bin/splash.bin", standin("splasharg"))]) as c:
+        assert c.ready(), c.rows()
+        assert c.rows()[:3] == ["splash got 1234", "PigeonOS", "2:/> _"], c.rows()
+        said = serial(c)
+    assert said[2] == "[kernel] boot.conf: splash /bin/splash.bin for 1234 ms, startup /bin/sh.bin", said
+    assert [(path, depth) for path, _, depth in execs(said)] == [("/bin/splash.bin", 1), ("/bin/sh.bin", 1)]
+    assert said[4] == "[kernel] /bin/splash.bin ended: 0", said
+
+
+@cases(("comments, blank lines, tabs and CRLF",
+        "# what boots\r\n\r\n\tsplash = /bin/splash.bin   # first\r\nstartup=/bin/sh.bin\r\n",
+        ["splash got 2500", "PigeonOS", "2:/> _"]),
+       ("no splash", "startup = /bin/sh.bin\n", ["PigeonOS", "2:/> _"]))
+def test_boot_conf_takes_comments_spaces_and_defaults(label, conf, rows):
+    with booted_with(conf, [("/bin/splash.bin", standin("splasharg"))]) as c:
+        assert c.ready(), f"{label}: {c.rows()}"
+        assert c.rows()[:len(rows)] == rows, f"{label}: {c.rows()}"
+
+
+OVER = "# " + "x" * 1030 + "\nstartup = /bin/sh.bin\n"
+
+
+@cases(("an unknown key", "splash_mss = 5\nstartup = /bin/sh.bin\n", "/etc/boot.conf:1: unknown key splash_mss"),
+       ("a key given twice", "startup = /bin/sh.bin\nstartup = /bin/sh.bin\n", "/etc/boot.conf:2: startup given twice"),
+       ("a line with no =", "startup /bin/sh.bin\n", "/etc/boot.conf:1: expected key = value"),
+       ("a key with no value", "# first\nsplash =\nstartup = /bin/sh.bin\n", "/etc/boot.conf:2: no value for splash"),
+       ("splash_ms not a number", "splash = /bin/splash.bin\nsplash_ms = soon\nstartup = /bin/sh.bin\n",
+        "/etc/boot.conf:2: splash_ms must be 1 to 60000, not soon"),
+       ("splash_ms with a unit", "splash = /bin/splash.bin\nsplash_ms = 1s\nstartup = /bin/sh.bin\n",
+        "/etc/boot.conf:2: splash_ms must be 1 to 60000, not 1s"),
+       ("splash_ms 0", "splash = /bin/splash.bin\nsplash_ms = 0\nstartup = /bin/sh.bin\n",
+        "/etc/boot.conf:2: splash_ms must be 1 to 60000, not 0"),
+       ("splash_ms over a minute", "splash = /bin/splash.bin\nsplash_ms = 60001\nstartup = /bin/sh.bin\n",
+        "/etc/boot.conf:2: splash_ms must be 1 to 60000, not 60001"),
+       ("splash_ms with no splash", "splash_ms = 100\nstartup = /bin/sh.bin\n", "/etc/boot.conf: splash_ms without splash"),
+       ("no startup", "splash = /bin/splash.bin\n", "/etc/boot.conf: no startup"),
+       ("over 1,024 bytes", OVER, "/etc/boot.conf: is over 1024 bytes"))
+def test_a_mistake_in_boot_conf_stops_boot_and_says_where(label, conf, message):
+    with booted_with(conf, [("/bin/splash.bin", standin("splasharg"))]) as c:
+        shown, said = stopped(c)
+    assert shown == BANNER + message, f"{label}: {shown!r}"
+    assert said[-1] == f"[kernel] {message}", f"{label}: {said}"
+    assert execs(said) == [], f"{label}: something ran: {said}"
+
+
+@cases(("missing", None, r"cannot start /bin/splash\.bin: no such file or directory"),
+       ("not a program", b"not a program at all\n", r"cannot start /bin/splash\.bin: not a program"),
+       ("faulting", "div0", r"/bin/splash\.bin: divided by zero at 0x[0-9a-fA-F]+"))
+def test_a_splash_that_cannot_start_or_faults_stops_boot(label, splash, message):
+    extra = []
+    if splash is not None:
+        extra = [("/bin/splash.bin", standin(splash) if isinstance(splash, str) else splash)]
+    with booted_with("splash = /bin/splash.bin\nstartup = /bin/sh.bin\n", extra) as c:
+        shown, said = stopped(c)
+    assert re.fullmatch(re.escape(BANNER) + message, shown), f"{label}: {shown!r}"
+    assert "/bin/sh.bin" not in [path for path, _, _ in execs(said)], f"{label}: the shell started"
+
+
+def test_ctrl_c_ends_the_splash_and_boot_carries_on():
+    with booted_with("splash = /bin/spin.bin\nstartup = /bin/sh.bin\n", [("/bin/spin.bin", standin("spin"))]) as c:
+        assert c.run_until(lambda rows: rows[0] == "spinning"), c.rows()
+        c.press(KEY_LCTRL, ord("c"))
+        assert c.ready(), c.rows()
+        assert c.rows()[:4] == ["spinning", "^C", "PigeonOS", "2:/> _"], c.rows()
+        assert "[kernel] /bin/spin.bin ended: Ctrl+C" in serial(c)
+
+
+def test_a_startup_program_other_than_the_shell_is_started_again_when_it_ends():
+    with booted_with("startup = /bin/hello.bin\n", [("/bin/hello.bin", standin("hello"))]) as c:
+        assert c.run_until(lambda rows: lines(rows).count("hello ended, starting it again") >= 2), c.rows()
+        assert lines(c.rows())[:4] == ["PigeonOS", "hello from hello", "hello ended, starting it again",
+                                       "hello from hello"], c.rows()
+        said = serial(c)
+    assert [path for path, _, _ in execs(said)][:2] == ["/bin/hello.bin", "/bin/hello.bin"], said
+    assert "[kernel] /bin/hello.bin ended; starting it again" in said
+
+
+@cases(("missing", "startup = /bin/nothing.bin\n", "cannot start /bin/nothing.bin: no such file or directory"),
+       ("not a program", "startup = /docs/readme.txt\n", "cannot start /docs/readme.txt: not a program"))
+def test_a_startup_program_that_cannot_start_stops_boot(label, conf, message):
+    with booted_with(conf) as c:
+        shown, said = stopped(c)
+    assert shown == BANNER + message, f"{label}: {shown!r}"
+    assert said[-1] == f"[kernel] {message}", f"{label}: {said}"
+
+
+def splash_files(ms):
+    """The real splash, and a boot.conf showing it for `ms`."""
+    return (f"splash = /bin/splash.bin\nsplash_ms = {ms}\nstartup = /bin/sh.bin\n",
+            [("/bin/splash.bin", shell_program("splash"))])
+
+
+def fills_of(c):
+    """The colours of the full-screen fills, as they happen."""
+    seen = []
+    channel = c.machine.io_controller.channels[CH_DISPLAY]
+    real = channel.callback
+
+    def spy(read_write, command, length, address, data):
+        if command == 4 and address == DISPLAY_START and len(data) >= 4:
+            seen.append(int.from_bytes(bytes(data[:4]), "little") & 0xFFFFFF)
+        return real(read_write, command, length, address, data)
+    channel.callback = spy
+    return seen
+
+
+def strongest(colour):
+    return max((colour >> 16 & 255, "red"), (colour >> 8 & 255, "green"), (colour & 255, "blue"))[1]
+
+
+def test_the_splash_fades_through_red_green_and_blue_and_ends_by_itself():
+    conf, extra = splash_files(2500)
+    with booted_with(conf, extra) as c:
+        seen = fills_of(c)
+        assert c.ready(), c.rows()
+        assert c.rows()[:2] == ["PigeonOS", "2:/> _"], c.rows()
+        said = serial(c)
+    colours = [colour for colour in seen if colour != 0]
+    order = []
+    for colour in colours:
+        if not order or order[-1] != strongest(colour):
+            order.append(strongest(colour))
+    assert order == ["red", "green", "blue"], order
+    for shift, name in ((16, "red"), (8, "green"), (0, "blue")):
+        assert max(colour >> shift & 255 for colour in colours) >= 240, f"{name} never came up full"
+    assert any(colour >> 16 & 255 >= 64 and colour >> 8 & 255 >= 64 for colour in colours), \
+        "red went to green without fading into it"
+    assert "[kernel] /bin/splash.bin ended: 0" in said, said
+
+
+def looks_and_fills(conf, extra, until=b"splash.bin ended"):
+    """Boot until the splash ends: how many times it looked at the timer, and
+    the colours it filled the screen with."""
+    with booted_with(conf, extra) as c:
+        looks = []
+        channel = c.machine.io_controller.channels[CH_TIMER]
+        real = channel.callback
+
+        def spy(read_write, command, length, address, data):
+            if command == 5 and address == 1:
+                looks.append(1)
+            return real(read_write, command, length, address, data)
+        channel.callback = spy
+        seen = fills_of(c)
+        assert c.run_until(lambda rows: until in c.machine.debug.since(0).data), c.rows()
+    return len(looks), [colour for colour in seen if colour]
+
+
+def test_the_splash_shows_for_its_length_and_fills_only_when_the_colour_changes():
+    """A minute: 1,200 looks at the timer on the stepping clock, 50 ms each,
+    and at that length the colour doesn't change at every look."""
+    conf, extra = splash_files(60000)
+    looks, colours = looks_and_fills(conf, extra)
+    assert 1100 <= looks <= 1300, f"{looks} looks: not the 60,000 ms boot.conf gave"
+    assert len(colours) < looks - 100, f"{len(colours)} fills for {looks} looks"
+    assert all(a != b for a, b in zip(colours, colours[1:])), "the same colour filled twice in a row"
+
+
+def test_a_key_ends_the_splash_early_and_never_reaches_the_shell():
+    """A minute of splash, and a key as soon as it has drawn: a whole minute
+    on the stepping clock would be over a thousand fills."""
+    conf, extra = splash_files(60000)
+    with booted_with(conf, extra) as c:
+        seen = fills_of(c)
+        channel = c.machine.io_controller.channels[CH_DISPLAY]
+        watching = channel.callback
+        pressed = []
+
+        def press_once(*args):
+            reply = watching(*args)
+            if not pressed and any(seen):
+                pressed.append(sum(1 for colour in seen if colour))
+                c.machine.hid.push_key(ord("x"), True)
+                c.machine.hid.push_key(ord("x"), False)
+            return reply
+        channel.callback = press_once
+        assert c.ready(), c.rows()
+        assert c.rows()[:2] == ["PigeonOS", "2:/> _"], "the key reached the shell: " + repr(c.rows())
+    drawn = sum(1 for colour in seen if colour)
+    assert pressed and drawn <= pressed[0] + 1, f"{drawn} fills, the key at {pressed}"
+
+
+def test_the_splash_costs_a_few_hundred_instructions_a_look_at_the_timer():
+    """Counted, not timed: 624 a look (docs/phase6_plan.md §9). The stepping
+    clock moves 50 ms a look, so nearly every look is a new colour and a
+    fill too; on the real clock the prototype filled on one look in 22."""
+    conf, extra = splash_files(2500)
+    with booted_with(conf, extra) as c:
+        done, looks = [0], []
+        channel = c.machine.io_controller.channels[CH_TIMER]
+        real = channel.callback
+
+        def spy(read_write, command, length, address, data):
+            if command == 5 and address == 1:
+                looks.append(done[0])
+            return real(read_write, command, length, address, data)
+        channel.callback = spy
+        seen = fills_of(c)
+        with contextlib.redirect_stdout(io.StringIO()):
+            while b"splash.bin ended" not in c.machine.debug.since(0).data and done[0] < 5_000_000:
+                for _ in range(10_000):
+                    c.machine.step()
+                    done[0] += 1
+    assert 40 <= len(looks) <= 60, f"{len(looks)} looks at the timer for 2,500 ms on the stepping clock"
+    per_look = (looks[-1] - looks[0]) / (len(looks) - 1)
+    assert per_look < 750, f"{per_look:,.0f} instructions a look, {sum(1 for x in seen if x)} fills"
 
 
 if __name__ == "__main__":

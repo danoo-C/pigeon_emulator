@@ -2,8 +2,10 @@
  *
  * Built for PROGRAM_LOAD_ADDR and installed as the project's system,
  * /boot.bin, which the boot sector loads. It mounts the disk it booted
- * from, fills in the system-call and vector tables, and starts /bin/sh.bin
- * -- again whenever it ends.
+ * from, fills in the system-call and vector tables, and runs what
+ * /etc/boot.conf names: a splash screen, then the startup program -- again
+ * whenever it ends -- which is /bin/sh.bin when there is no boot.conf
+ * (docs/phase6_plan.md).
  *
  * A program is a program file (compiler/program_file.py). exec loads it
  * just above the program that started it, patches it for where it landed,
@@ -35,6 +37,10 @@
 #asm "kernel.asm"
 
 #define SHELL         "/bin/sh.bin"
+#define BOOT_CONF     "/etc/boot.conf"
+#define BOOT_CONF_MAX 1024u         /* bytes, as the shell's prompt file      */
+#define SPLASH_MS     2500u         /* the splash's length when boot.conf gives none */
+#define SPLASH_MS_MAX 60000u
 #define PROGRAMS      0x01000000u   /* where the first program goes          */
 #define PROGRAMS_TOP  0x07F00000u   /* the hardware stack's megabyte above   */
 #define MIN_HEAP      0x10000u      /* room a program must have past its frames */
@@ -135,6 +141,10 @@ int depth;                      /* programs running; 0 is the kernel alone   */
 unsigned in_kernel;             /* 1 while kernel code runs (kernel.asm)     */
 unsigned started;               /* the last exec got as far as the program   */
 unsigned mounted;               /* the channel of the disk the kernel uses   */
+unsigned banner_shown;          /* 1 once PigeonOS is on the console         */
+char boot_splash[256];          /* boot.conf's splash, or "" for none        */
+char boot_startup[256];         /* boot.conf's startup, or SHELL             */
+unsigned boot_splash_ms;
 unsigned vectors[VECTOR_COUNT];
 unsigned fault_frames[256];     /* the frame stack k_fault runs on           */
 int handle_depth[HANDLES];      /* the program an fs handle is open for; 0 none */
@@ -1432,8 +1442,184 @@ static void k_log_mount(unsigned channel) {
     }
 }
 
+/* --- boot.conf (docs/phase6_plan.md) -------------------------------------- */
+
+/* PigeonOS on the console, once: after the splash, or before whatever stops
+ * boot first, so an error reads under it as it always has. */
+static void k_banner(void) {
+    if (banner_shown != 0u) return;
+    con_puts("PigeonOS\n");
+    banner_shown = 1u;
+}
+
+/* What's wrong with boot.conf, on the console and the debug port; line 0 is
+ * the file as a whole. Boot is strict, so it stops after this. */
+static int k_conf_error(unsigned line, char *first, char *second) {
+    char message[96];
+    strlcpy(message, first, 96u);
+    strlcat(message, second, 96u);
+    k_banner();
+    con_puts(BOOT_CONF);
+    if (line != 0u) {
+        con_put(':');
+        con_number(line, 10u);
+        dbg_printf("[kernel] %s:%u: %s\n", BOOT_CONF, line, message);
+    } else {
+        dbg_printf("[kernel] %s: %s\n", BOOT_CONF, message);
+    }
+    con_puts(": ");
+    con_puts(message);
+    con_put('\n');
+    return -1;
+}
+
+/* Spaces, tabs and a '\r' off both ends, in place. */
+static char *k_trim(char *s) {
+    unsigned n;
+    while (*s == ' ' || *s == '\t') s++;
+    n = strlen(s);
+    while (n > 0u && (s[n - 1u] == ' ' || s[n - 1u] == '\t' || s[n - 1u] == '\r')) n--;
+    s[n] = 0;
+    return s;
+}
+
+/* A splash_ms: digits only, from 1 to SPLASH_MS_MAX. 0 when it isn't one. */
+static unsigned k_ms(char *s) {
+    unsigned v = 0u;
+    if (*s == 0) return 0u;
+    while (*s != 0) {
+        if (*s < '0' || *s > '9' || v > SPLASH_MS_MAX) return 0u;
+        v = v * 10u + (unsigned)(*s - '0');
+        s++;
+    }
+    if (v > SPLASH_MS_MAX) return 0u;
+    return v;
+}
+
+/* /etc/boot.conf into boot_splash, boot_splash_ms and boot_startup: 1 when
+ * it was read, 0 when there is none -- the shell, as before phase 6 -- or
+ * -1 after saying what's wrong with it. key = value a line; # starts a
+ * comment. */
+static int k_read_boot_conf(void) {
+    char text[1025];                /* BOOT_CONF_MAX and its terminator */
+    char *line;
+    char *next;
+    char *cut;
+    char *key;
+    char *value;
+    unsigned number = 0u;
+    unsigned seen = 0u;             /* 1 splash, 2 splash_ms, 4 startup */
+    unsigned bit;
+    int n;
+
+    boot_splash[0] = 0;
+    boot_splash_ms = SPLASH_MS;
+    strlcpy(boot_startup, SHELL, FS_PATH_MAX + 1u);
+    n = fs_load(BOOT_CONF, text, BOOT_CONF_MAX);
+    if (n == FS_ENOENT) return 0;
+    if (n == FS_E2BIG) return k_conf_error(0u, "is over 1024 bytes", "");
+    if (n < 0) return k_conf_error(0u, fs_strerror(n), "");
+    text[n] = 0;
+    line = text;
+    while (line != NULL) {
+        number++;
+        next = strchr(line, '\n');
+        if (next != NULL) {
+            *next = 0;
+            next++;
+        }
+        cut = strchr(line, '#');
+        if (cut != NULL) *cut = 0;
+        line = k_trim(line);
+        if (*line != 0) {
+            cut = strchr(line, '=');
+            if (cut == NULL) return k_conf_error(number, "expected key = value", "");
+            *cut = 0;
+            key = k_trim(line);
+            value = k_trim(cut + 1);
+            bit = 0u;
+            if (strcmp(key, "splash") == 0) bit = 1u;
+            if (strcmp(key, "splash_ms") == 0) bit = 2u;
+            if (strcmp(key, "startup") == 0) bit = 4u;
+            if (bit == 0u) return k_conf_error(number, "unknown key ", key);
+            if ((seen & bit) != 0u) return k_conf_error(number, key, " given twice");
+            if (*value == 0) return k_conf_error(number, "no value for ", key);
+            seen = seen | bit;
+            if (bit == 2u) {
+                boot_splash_ms = k_ms(value);
+                if (boot_splash_ms == 0u) {
+                    return k_conf_error(number, "splash_ms must be 1 to 60000, not ", value);
+                }
+            } else if (strlen(value) > FS_PATH_MAX) {
+                return k_conf_error(number, "path too long for ", key);
+            } else if (bit == 1u) {
+                strlcpy(boot_splash, value, FS_PATH_MAX + 1u);
+            } else {
+                strlcpy(boot_startup, value, FS_PATH_MAX + 1u);
+            }
+        }
+        line = next;
+    }
+    if ((seen & 2u) != 0u && (seen & 1u) == 0u) return k_conf_error(0u, "splash_ms without splash", "");
+    if ((seen & 4u) == 0u) return k_conf_error(0u, "no startup", "");
+    return 1;
+}
+
+/* A program's name for its argv[0]: "/bin/sh.bin" is "sh". */
+static void k_program_name(char *path, char *out) {
+    char *base = path;
+    char *p;
+    unsigned n;
+    for (p = path; *p != 0; p++) {
+        if (*p == '/') base = p + 1;
+    }
+    strlcpy(out, base, 32u);
+    n = strlen(out);
+    if (n > 4u && strcmp(out + n - 4u, ".bin") == 0) out[n - 4u] = 0;
+}
+
+/* The splash, as `splash 2500`, with its splash_ms. 0 when boot carries on:
+ * it ended by itself, by a key or by Ctrl+C. -1 when it couldn't start, or
+ * faulted, which stops boot. */
+static int k_splash(void) {
+    char name[32];
+    char digits[12];
+    char *argv[3];
+    int status;
+
+    k_program_name(boot_splash, name);
+    utoa(boot_splash_ms, digits, 10u);
+    argv[0] = name;
+    argv[1] = digits;
+    argv[2] = NULL;
+    status = k_exec(boot_splash, 2, argv);
+    if (started == 0u) {
+        k_banner();
+        dbg_printf("[kernel] cannot start the splash, %s: %s\n", boot_splash, k_strerror(status));
+        con_puts("cannot start ");
+        con_puts(boot_splash);
+        con_puts(": ");
+        con_puts(k_strerror(status));
+        con_put('\n');
+        return -1;
+    }
+    if (procs[1].how == K_HOW_FAULT) {
+        k_banner();
+        dbg_print("[kernel] the splash faulted: not booting\n");
+        con_puts(boot_splash);
+        con_puts(": ");
+        con_puts(k_strerror(status));
+        con_puts(" at 0x");
+        con_number(procs[1].fault_pc, 16u);
+        con_put('\n');
+        return -1;
+    }
+    return 0;
+}
+
 int main(void) {
-    char *shell_argv[2];
+    char *startup_argv[2];
+    char startup_name[32];
     unsigned channel;
     int status;
 
@@ -1443,7 +1629,6 @@ int main(void) {
     con_attr = CON_DEFAULT;
     con_bottom = CON_ROWS - 1u;
     con_clear();
-    con_puts("PigeonOS\n");
 
     /* The disk it booted from (Q8): bios2 leaves the channel. */
     channel = *(unsigned *)BOOT_CHANNEL;
@@ -1452,6 +1637,7 @@ int main(void) {
     status = fs_mount(channel);
     if (status < 0) {
         dbg_printf("[kernel] cannot mount channel %u: %s\n", channel, fs_strerror(status));
+        k_banner();
         con_puts("cannot mount disk ");
         con_number(channel, 10u);
         con_puts(": ");
@@ -1462,21 +1648,46 @@ int main(void) {
     mounted = channel;
     k_log_mount(channel);
 
-    shell_argv[0] = "sh";
-    shell_argv[1] = (char *)0;
+    /* What runs after the kernel: boot.conf's splash, then PigeonOS, then its
+     * startup program, again whenever it ends. Boot is strict: an error in
+     * any of it stops the machine. */
+    status = k_read_boot_conf();
+    if (status < 0) return status;
+    if (status == 0) {
+        dbg_printf("[kernel] no %s: starting %s\n", BOOT_CONF, SHELL);
+    } else if (boot_splash[0] != 0) {
+        dbg_printf("[kernel] boot.conf: splash %s for %u ms, startup %s\n",
+                   boot_splash, boot_splash_ms, boot_startup);
+    } else {
+        dbg_printf("[kernel] boot.conf: startup %s\n", boot_startup);
+    }
+    if (boot_splash[0] != 0) {
+        if (k_splash() < 0) return -1;
+    }
+    k_banner();
+
+    k_program_name(boot_startup, startup_name);
+    startup_argv[0] = startup_name;
+    startup_argv[1] = NULL;
     while (1) {
-        status = k_exec(SHELL, 1, shell_argv);
+        status = k_exec(boot_startup, 1, startup_argv);
         if (started == 0u) {
-            dbg_printf("[kernel] cannot start %s: %s\n", SHELL, k_strerror(status));
+            dbg_printf("[kernel] cannot start %s: %s\n", boot_startup, k_strerror(status));
             con_puts("cannot start ");
-            con_puts(SHELL);
+            con_puts(boot_startup);
             con_puts(": ");
             con_puts(k_strerror(status));
             con_put('\n');
             return status;
         }
-        dbg_print("[kernel] the shell ended; starting it again\n");
-        con_puts("shell ended, starting it again\n");
+        if (strcmp(boot_startup, SHELL) == 0) {
+            dbg_print("[kernel] the shell ended; starting it again\n");
+            con_puts("shell ended, starting it again\n");
+        } else {
+            dbg_printf("[kernel] %s ended; starting it again\n", boot_startup);
+            con_puts(startup_name);
+            con_puts(" ended, starting it again\n");
+        }
     }
     return 0;
 }

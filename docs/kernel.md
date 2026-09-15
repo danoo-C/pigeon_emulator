@@ -473,6 +473,13 @@ and start `/bin/sh.bin`. When the shell exits, the kernel starts it again. If
 it can't be started at all, the kernel prints why and halts (kernel_exec.md
 Q2). The prototype's kernel stopped.
 
+> **Since phase 6** ([phase6_plan.md](phase6_plan.md)), what runs after
+> mounting is `/etc/boot.conf`'s: its `splash`, told its `splash_ms`, then
+> `PigeonOS` on the console, then its `startup` program, again whenever it
+> ends. With no `boot.conf` that is `/bin/sh.bin`, as above. Boot is strict:
+> a mistake in the file, a splash that can't start or faults, or a startup
+> program that can't start stops it, and says why.
+
 **Running a program** (P4, P5):
 
 1. choose its address: `0x01000000` for the shell, otherwise just above the
@@ -1316,8 +1323,12 @@ form.
    after a command that couldn't start restarts the shell. ***And 5c,***
    which finishes phase 5: the Serial panel beside the screen, in the browser
    and the pygame client ([phase5c_plan.md](phase5c_plan.md)).
-6. **A boot screen and a startup script,** from `/etc/boot.conf`
-   ([phase4_plan.md §11](phase4_plan.md#11-later-phases)).
+6. **`boot.conf`, a splash screen and the startup program**
+   ([phase6_plan.md](phase6_plan.md)). ***Built:*** the kernel runs the
+   splash `/etc/boot.conf` names, told how long to show, then `PigeonOS`,
+   then the startup program, the shell; `/bin/splash.bin` fades through red,
+   green and blue as a placeholder, and any key ends it. A startup script is
+   left for later, as the shell's own `sh.conf`.
 7. **The launcher, `config.json`, and the docs.**
 
 Also done, out of order: ~~**the sector-booting BIOS, stage 1, and `pfs.py

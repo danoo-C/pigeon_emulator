@@ -4,7 +4,9 @@ The installer copied this from
 the disc with everything else,
 and the hard disk now boots
 /boot.bin: the kernel, which
-starts the shell.
+runs what /etc/boot.conf
+names: a splash screen, then
+the shell.
 
 Try, at the prompt:
   ls -l /bin

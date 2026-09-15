@@ -609,7 +609,10 @@ step 11 renumbers that list to match this one.
 
 **Renumbered on 2026-09-15:** the serial debug port became phase 5, planned
 in full in [phase5_plan.md](phase5_plan.md), and the boot screen and startup
-script phase 6.
+script phase 6. Phase 6 was then planned and built, differently, in
+[phase6_plan.md](phase6_plan.md): `boot.conf` names a splash screen and a
+startup program, and the startup script below is left for later, as the
+shell's own `sh.conf`.
 
 ### Phase 6: a boot screen and a startup script
 

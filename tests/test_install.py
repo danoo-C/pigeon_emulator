@@ -34,9 +34,10 @@ from test_project import EXAMPLE, quiet                               # noqa: E4
 
 MiB = 1 << 20
 PROMPT = "ENTER install   ESC cancel"
-INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt", "/etc/shell_header.conf"] + [
+INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt", "/etc/shell_header.conf",
+             "/etc/boot.conf"] + [
     f"/bin/{name}.bin" for name in ("sh", "ls", "cat", "echo", "mkdir", "rmdir", "rm", "mv",
-                                    "cp", "clear", "more", "edit", "graph", "cube", "files", "corrupter")]
+                                    "cp", "clear", "more", "edit", "graph", "cube", "files", "corrupter", "splash")]
 
 # The example disc, built once for the whole file.
 _BUILD = tempfile.TemporaryDirectory()
@@ -133,9 +134,12 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_she
             assert shell.ready(), shell.rows()
             everything = serial(p)
             assert everything.count("[bios] bios2") == 2 and "[installer] restarting" in everything
-            assert serial(p, "[kernel]")[:3] == [
+            assert serial(p, "[kernel]")[:6] == [
                 f"[kernel] started, {len(kernel)} bytes at 0x00020000",
                 "[kernel] mounted channel 2, PIGEONOS",
+                "[kernel] boot.conf: splash /bin/splash.bin for 2500 ms, startup /bin/sh.bin",
+                "[kernel] exec /bin/splash.bin at 0x01000000, depth 1",
+                "[kernel] /bin/splash.bin ended: 0",
                 "[kernel] exec /bin/sh.bin at 0x01000000, depth 1",
             ], everything
             assert shell.rows()[:3] == ["PigeonOS", "|-(PGS)-[2:/]-(0)", "|-> _"], shell.rows()
