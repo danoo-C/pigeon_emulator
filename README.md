@@ -11,6 +11,8 @@ invented machine.
 <img width="1865" height="961" alt="image" src="https://github.com/user-attachments/assets/e29f6863-fa83-4c1c-97ba-7402df2bc984" />
 <img width="1868" height="960" alt="image" src="https://github.com/user-attachments/assets/c36875cd-0c2a-4712-81ce-dfe4274a2b03" />
 <img width="1868" height="963" alt="image" src="https://github.com/user-attachments/assets/e844a53f-9266-4a4f-a375-76a04386066e" />
+<img width="1867" height="960" alt="image" src="https://github.com/user-attachments/assets/c86b0349-a0f2-4788-918d-5a533e4e21ed" />
+
 
 
 
