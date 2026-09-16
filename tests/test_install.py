@@ -138,7 +138,7 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_she
             assert serial(p, "[kernel]")[:6] == [
                 f"[kernel] started, {len(kernel)} bytes at 0x00020000",
                 "[kernel] mounted channel 2, PIGEONOS",
-                "[kernel] boot.conf: splash /bin/splash.bin for 2500 ms, startup /bin/sh.bin",
+                "[kernel] boot.conf: splash /bin/splash.bin for 30000 ms, startup /bin/sh.bin",
                 "[kernel] exec /bin/splash.bin at 0x01000000, depth 1",
                 "[kernel] /bin/splash.bin ended: 0",
                 "[kernel] exec /bin/sh.bin at 0x01000000, depth 1",

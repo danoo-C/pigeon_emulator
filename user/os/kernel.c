@@ -1669,6 +1669,7 @@ int main(void) {
     k_program_name(boot_startup, startup_name);
     startup_argv[0] = startup_name;
     startup_argv[1] = NULL;
+    
     while (1) {
         status = k_exec(boot_startup, 1, startup_argv);
         if (started == 0u) {
