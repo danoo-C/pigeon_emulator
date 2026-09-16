@@ -212,9 +212,15 @@ $out = $(ls /bin)           ;; a command's output (§4.5)
 - **The name is `$word` on the left of a `=`.** A line whose first word starts
   with `$` and whose second word is `=` is an assignment; everything else is a
   command. That one rule is the whole grammar of it (Q2).
-- **Names** are letters, digits and `_`, at most 31 characters. **Values** are
-  text, at most 255 bytes, and there are at most 32 variables (Q11). A value
-  that doesn't fit is an error on that line, not a quiet cut.
+- **Names** are letters, digits and `_`, at most 31 characters. There are at
+  most 32 variables (Q11). A value that doesn't fit is an error on that line,
+  not a quiet cut.
+  *(Corrected while building: values were to be 255 bytes, which cannot hold
+  a captured listing -- and `$files = $(ls /bin)` then `for $line in $files`
+  is §3's own example. A value is now a block on the heap, as big as a
+  capture: 8 KB. Setting one frees the block it had, and `mem.c`'s first fit
+  hands the same block back when the new value fits it, which is what a loop
+  assigning one variable does *(checked: `mem.c` `malloc`)*.)*
 - **An unset variable stops the script** — `hello.pgs:4: no such variable:
   $nmae` (Q5). There is no `set -u` to turn on here, and a typo that silently
   becomes an empty string is the most expensive bug a small language can
