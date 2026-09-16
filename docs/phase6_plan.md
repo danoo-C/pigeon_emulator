@@ -375,4 +375,5 @@ Both come from strict boot (Q3); each has what I'd suggest.
   ends, since the console draws on the same screen. The disc holds 24 files.
   Loading the program, the pigeon and the mask and drawing is 3,387,860
   instructions, and a look with the eyes drawn again is 6,757 *(measured)*;
-  the splash's default length, run from the prompt, is 4,000 ms.
+  run from the prompt with no length there is no countdown at all: the
+  timer is started again for each flash, and the pigeon holds until a key.

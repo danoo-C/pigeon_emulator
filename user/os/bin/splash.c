@@ -1,8 +1,9 @@
 /* splash -- the boot screen (docs/phase6_plan.md, docs/bmp_plan.md).
  *
  * The kernel runs this first when /etc/boot.conf names it, as `splash 2500`:
- * how long to show, in milliseconds, from boot.conf's splash_ms. Run from
- * the prompt with no argument, it shows for 4,000.
+ * how long to show, in milliseconds, from boot.conf's splash_ms. With no
+ * argument -- run from the prompt, say -- there is no countdown at all: it
+ * shows until a key goes down.
  *
  * It draws /etc/bmp/pigeon.bmp, stretched to the screen, and holds it for
  * that long, timed on the timer device rather than by frames. Any key ends
@@ -14,7 +15,9 @@
  * found once, and at each look at the timer only those pixels are drawn
  * again: each its own colour in the pigeon blended toward yellow, by an
  * amount that follows isin() of the time gone, so the eyes brighten and dim
- * smoothly once a second whatever the speed of the host.
+ * smoothly once a second whatever the speed of the host. The one timer does
+ * both jobs: it is started for the whole splash, or, with no countdown, for
+ * one flash at a time, started again as each flash ends.
  *
  * An image that won't load is one line on the console. Without the pigeon
  * the splash ends with status 1, which the kernel logs; without the mask
@@ -32,7 +35,6 @@
 
 #define IMAGE        "/etc/bmp/pigeon.bmp"
 #define EYES         "/etc/bmp/eye-mask.bmp"
-#define DEFAULT_MS   4000u
 #define LONGEST_MS   60000u
 #define FLASH_MS     1000u          /* one flash: dim, bright, and dim again */
 #define YELLOW       0xFFFFFF00u
@@ -103,7 +105,8 @@ static int find_eyes(void) {
 }
 
 int main(int argc, char **argv) {
-    unsigned ms = DEFAULT_MS;
+    unsigned ms = 0u;               /* 0: no countdown -- it waits for a key */
+    unsigned period;                /* what the timer is started for         */
     unsigned *pixels;
     unsigned *screen = (unsigned *)DISPLAY_START;
     unsigned left;
@@ -126,11 +129,18 @@ int main(int argc, char **argv) {
     memcpy(screen, pixels, DISPLAY_W * DISPLAY_H * 4u);
     eyes_found = find_eyes();
 
-    timer(TIMER_START, ms);
+    period = ms;
+    if (period == 0u) period = FLASH_MS;
+    timer(TIMER_START, period);
     for (;;) {
         left = left_ms();
-        if (left == 0u || key_pressed()) break;
-        gone = ms - left;
+        if (left == 0u) {
+            if (ms != 0u) break;    /* the countdown is up */
+            timer(TIMER_START, period);     /* another flash: the clock round again */
+            left = period;
+        }
+        if (key_pressed()) break;
+        gone = period - left;
         /* 0 to 256, following the sine: half-bright at the start of each flash */
         t = (unsigned)(isin((int)(gone * ANGLE_STEPS / FLASH_MS)) + FX_ONE) / 2u;
         if (t != shown) {
