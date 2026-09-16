@@ -1563,6 +1563,16 @@ def test_an_exec_costs_its_two_lines_and_no_more():
 
 # --- exec_out: a program's output into a buffer (docs/pgs_plan.md 4.5) ------------
 
+# A program that says what arguments it was given: "[args][a][b]".
+STANDINS["args"] = r"""#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    int i;
+    for (i = 0; i < argc; i++) { print("["); print(argv[i]); print("]"); }
+    print("\n");
+    return 0;
+}
+"""
+
 STANDINS["talker"] = r"""#include <pigeon/sys.h>
 int main(int argc, char **argv) { print("hello from talker\n"); return 0; }
 """
@@ -1714,6 +1724,238 @@ def test_a_program_that_cannot_start_is_reported_as_exec_reports_it():
         said = serial(c)
     assert "[kernel] exec /bin/nope.bin: no such file or directory" in said, said
 
+
+
+# --- exec_to and exec_from: a program's output into a file, and its input
+#     out of one (docs/redirect_plan.md) --------------------------------------------
+
+# into FILE [append] -- runs `talker` with its output going to FILE.
+STANDINS["into"] = r"""#include <pigeon/stdio.h>
+#include <pigeon/string.h>
+#include <pigeon/sys.h>
+char path[264];
+int main(int argc, char **argv) {
+    char *child[3];
+    int status;
+    unsigned how = R_TRUNC;
+    if (argc < 3) { print("usage: into FILE PROGRAM [ARGS]\n"); return 1; }
+    if (argc > 4) how = R_APPEND;
+    if (strchr(argv[2], '/') == (char *)0) {
+        strlcpy(path, "/bin/", sizeof(path));
+        strlcat(path, argv[2], sizeof(path));
+        strlcat(path, ".bin", sizeof(path));
+    } else {
+        strlcpy(path, argv[2], sizeof(path));
+    }
+    child[0] = argv[2];
+    child[1] = (argc > 3) ? argv[3] : (char *)0;
+    child[2] = (char *)0;
+    status = exec_to(path, (argc > 3) ? 2 : 1, child, argv[1], how);
+    printf("to %s: %d\n", argv[1], status);
+    return 0;
+}
+"""
+
+# outof FILE -- runs `eater` with its input coming from FILE.
+STANDINS["outof"] = r"""#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    char *child[2];
+    int status;
+    if (argc < 2) { print("usage: outof FILE\n"); return 1; }
+    child[0] = "eater";
+    child[1] = (char *)0;
+    status = exec_from("/bin/eater.bin", 1, child, argv[1]);
+    printf("from: %d\n", status);
+    return 0;
+}
+"""
+
+# Reads lines until there are none and says how many, with the first one.
+STANDINS["eater"] = r"""#include <pigeon/stdio.h>
+#include <pigeon/string.h>
+#include <pigeon/sys.h>
+char line[128];
+char first[128];
+int main(int argc, char **argv) {
+    int n;
+    int count = 0;
+    first[0] = 0;
+    while (1) {
+        n = read(STDIN, line, sizeof(line));
+        if (n <= 0) break;
+        line[n] = 0;
+        if (count == 0) {
+            strlcpy(first, line, sizeof(first));
+            n = (int)strlen(first);
+            while (n > 0 && first[n - 1] == 10) { n--; first[n] = 0; }
+        }
+        count++;
+    }
+    printf("ate %d [%s]\n", count, first);
+    return 0;
+}
+"""
+
+# Writes some of a line and then faults, to show > keeping the old file.
+STANDINS["halfway"] = r"""#include <pigeon/sys.h>
+int zero;
+int main(int argc, char **argv) {
+    print("half a line");
+    return 10 / zero;
+}
+"""
+
+
+@contextlib.contextmanager
+def redirecting(*names, files=()):
+    """A kernel on a disk with the standins named and `files` already on it,
+    keeping the image's path so a test can read what was written."""
+    extra = [(f"/bin/{name}.bin", standin(name)) for name in names] + list(files)
+    with tempfile.TemporaryDirectory() as t:
+        path = Path(t) / "hdd.img"
+        console = Console(make_disk(path, extra))
+        console.disk = path
+        try:
+            yield console
+        finally:
+            console.close()
+
+
+def on_disk(c, path):
+    """What the disk holds at `path`, the machine stopped first; None for
+    nothing."""
+    c.close()
+    with PgfsImage(c.disk) as img:
+        return img.read_file(path) if img.exists(path) else None
+
+
+def test_exec_to_writes_the_output_into_the_file():
+    with redirecting("into", "talker") as c:
+        assert c.ready(), c.rows()
+        text = ran(c, "into /out.txt talker")
+        assert "to /out.txt: 0" in text, c.rows()
+        assert "hello from talker" not in text, "it was printed as well as written"
+        assert on_disk(c, "/out.txt") == b"hello from talker\n"
+
+
+def test_exec_to_appends_when_it_is_asked_to():
+    with redirecting("into", "talker") as c:
+        assert c.ready(), c.rows()
+        ran(c, "into /out.txt talker")
+        ran(c, "into /out.txt talker x y")           # a fourth argument: append
+        assert on_disk(c, "/out.txt") == b"hello from talker\nhello from talker\n"
+
+
+def test_a_grandchilds_output_goes_to_the_file_too():
+    with redirecting("into", "relay", "talker") as c:
+        assert c.ready(), c.rows()
+        ran(c, "into /out.txt relay")
+        assert on_disk(c, "/out.txt") == b"relay says hi\nhello from talker\n"
+
+
+def test_a_program_that_faults_leaves_the_file_it_had():
+    """> writes beside the file and renames at the end, so a program that
+    never finished takes its half-written file away with it."""
+    with redirecting("into", "halfway", files=[("/out.txt", b"what was there\n")]) as c:
+        assert c.ready(), c.rows()
+        assert "to /out.txt: -100" in ran(c, "into /out.txt halfway"), c.rows()
+        c.close()
+        with PgfsImage(c.disk) as img:
+            assert img.read_file("/out.txt") == b"what was there\n", "the old file was lost"
+            assert not img.exists("/out.txt~"), "the half-written file was left behind"
+
+
+def test_the_file_is_only_put_in_place_when_the_program_ends_by_itself():
+    """A program that returns a number is still a program that ended: its
+    output is kept. Only a crash or a Ctrl+C throws it away."""
+    with redirecting("into", "exiter", files=[("/out.txt", b"old\n")]) as c:
+        assert c.ready(), c.rows()
+        assert "to /out.txt: 3" in ran(c, "into /out.txt exiter"), c.rows()
+        assert on_disk(c, "/out.txt") == b"leaving\n"
+
+
+def test_exec_from_feeds_a_program_its_lines():
+    with redirecting("outof", "eater", files=[("/in.txt", b"one\ntwo\nthree\n")]) as c:
+        assert c.ready(), c.rows()
+        text = ran(c, "outof /in.txt")
+        assert "ate 3 [one]" in text, c.rows()
+        assert "from: 0" in text, c.rows()
+
+
+def test_exec_from_a_file_that_is_not_there():
+    with redirecting("outof", "eater") as c:
+        assert c.ready(), c.rows()
+        assert "from: -1" in ran(c, "outof /nope.txt"), c.rows()
+
+
+def test_a_file_that_will_not_open_stops_the_program_starting():
+    with redirecting("into", "talker") as c:
+        assert c.ready(), c.rows()
+        text = ran(c, "into /nodir/out.txt talker")
+        assert "to /nodir/out.txt: -1" in text, c.rows()
+        assert "hello from talker" not in text, "it ran anyway"
+
+
+# --- the shell's > >> and < (docs/redirect_plan.md 3.2) -----------------------------
+
+def test_the_shell_writes_a_programs_output_into_a_file():
+    with redirecting("talker") as c:
+        assert c.ready(), c.rows()
+        assert c.command("talker > /out.txt") == [], c.rows()
+        assert on_disk(c, "/out.txt") == b"hello from talker\n"
+
+
+def test_the_shell_appends():
+    with redirecting("talker") as c:
+        assert c.ready(), c.rows()
+        c.command("talker > /out.txt")
+        c.command("talker >> /out.txt")
+        assert on_disk(c, "/out.txt") == b"hello from talker\nhello from talker\n"
+
+
+def test_the_shell_feeds_a_program_a_file():
+    with redirecting("eater", files=[("/in.txt", b"one\ntwo\n")]) as c:
+        assert c.ready(), c.rows()
+        assert c.command("eater < /in.txt") == ["ate 2 [one]"], c.rows()
+
+
+def test_the_shell_does_both_ends_at_once():
+    with redirecting("eater", files=[("/in.txt", b"one\ntwo\nthree\n")]) as c:
+        assert c.ready(), c.rows()
+        assert c.command("eater < /in.txt > /out.txt") == [], c.rows()
+        assert on_disk(c, "/out.txt") == b"ate 3 [one]\n"
+
+
+def test_a_redirection_is_a_whole_word_or_it_is_an_argument():
+    with redirecting("args") as c:
+        assert c.ready(), c.rows()
+        assert c.command("args 1>2") == ["[args][1>2]"], c.rows()
+        assert c.command('args ">"') == ["[args][>]"], c.rows()
+
+
+@cases(("no file after >", "talker >", ">: no file"),
+       ("no file after <", "talker <", "<: no file"),
+       ("only a redirection", "> /out.txt", "nothing to run"))
+def test_a_redirection_that_does_not_add_up(label, line, message):
+    with redirecting("talker") as c:
+        assert c.ready(), c.rows()
+        assert c.command(line) == [message], c.rows()
+
+
+def test_the_built_ins_refuse_a_redirection():
+    with redirecting("talker") as c:
+        assert c.ready(), c.rows()
+        assert c.command("help > /out.txt") == ["help: no > or < here"], c.rows()
+        assert c.command("cd /docs > /out.txt") == ["cd: no > or < here"], c.rows()
+
+
+def test_a_file_that_cannot_be_written_is_said_and_nothing_runs():
+    with redirecting("talker") as c:
+        assert c.ready(), c.rows()
+        out = c.command("talker > /nodir/out.txt")
+        assert out == ["/nodir/out.txt: not found"], c.rows()
+        assert "hello from talker" not in "".join(c.rows()), "it ran anyway"
 
 # --- boot.conf, the splash and the startup program: docs/phase6_plan.md -----------
 

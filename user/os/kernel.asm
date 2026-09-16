@@ -184,6 +184,16 @@ w_exec_out:
     EI
     RET
 
+w_exec_io:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_exec_io
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
 w_getkey:
     DI
     MOV C, #__g_in_kernel

@@ -267,3 +267,42 @@ nano, for the 32×12 screen:
 - **A line longer than the screen** moves sideways while the cursor is on
   it, with `$` in its first cell.
 - **Leaving clears the screen,** and the prompt starts at the top.
+
+---
+
+## 8. Sending output to a file: `>`, `>>` and `<`
+
+```
+2:/> ls -l /bin > listing.txt
+2:/> echo done >> listing.txt
+2:/> more < listing.txt
+```
+
+- **They are whole words**, so `echo 1>2` is one argument and `echo ">"` is a
+  greater-than sign. The shell takes them and the filename out of the words
+  it split, and hands the rest to the kernel's `exec_io`
+  ([redirect_plan.md](redirect_plan.md)).
+- **`>` writes beside the file and renames at the end**: the program writes
+  `listing.txt~`, and only when it has ended by itself does that become
+  `listing.txt`. A program that crashes, is stopped with Ctrl+C or fills the
+  disk leaves the file you had, and takes the half-written one away with it.
+  A program that merely *returns* a number has still ended, so its output is
+  kept — `ls /nope > out.txt` empties `out.txt` the way it would anywhere
+  else.
+- **`>>` adds to the end** and has no such safety: what is appended stays
+  appended. It cannot have it without copying the whole file first.
+- **`<` gives the program the file a line at a time**, with the `\n`, and 0
+  at its end — which is what a program reading the console already expects.
+- **Both at once** work: `sort < in.txt > out.txt`.
+- **`STDERR` still goes to the screen.** Only what a program writes to
+  `STDOUT` is redirected, so its complaints are not swallowed by the file.
+- **The built-ins refuse one:** `cd`, `help` and `exit` print almost nothing
+  and `cd` moves the shell itself, so `help > x` is a mistake, said as one.
+  In a script, `pgs`'s builtins *do* redirect — `echo hello > note.txt` is
+  most of why a script wants `>` ([pgs.md](pgs.md)).
+- **A file that will not open** is named, not the program: `> /nodir/out.txt`
+  says `/nodir/out.txt: not found`, since the shell has already found the
+  program.
+- **There are no pipes.** The kernel runs one program at a time
+  ([kernel_exec.md](kernel_exec.md)), so `a | b` has nowhere to put `a` while
+  `b` runs.

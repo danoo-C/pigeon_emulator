@@ -31,7 +31,12 @@
 #define SYS_SETBREAK 18
 #define SYS_PAGING   19
 #define SYS_EXEC_OUT 20
-#define SYS_COUNT    21
+#define SYS_EXEC_IO  21
+#define SYS_COUNT    22
+
+/* --- exec_io(): what happens to the file it writes into ----------------- */
+#define R_TRUNC  0          /* >  : written beside it, and put in place at the end */
+#define R_APPEND 1          /* >> : added to the end of what is there             */
 
 /* --- the console: every program starts with these; open() gives 3 up -- */
 #define STDIN  0

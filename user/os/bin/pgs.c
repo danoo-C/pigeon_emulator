@@ -33,6 +33,9 @@
  * sums, `break` leaves the innermost loop, and `read $name` takes a typed
  * line. echo, cd, pwd and exit are the builtins.
  *
+ * `ls > out.txt`, `>>` and `< in.txt` work as they do at the prompt, on a
+ * builtin as well as a program (docs/redirect_plan.md).
+ *
  * Everything else is a program, found as the shell finds
  * one: /bin/<name>.bin first, then <name>.bin where you are, with the .bin
  * added when it is missing. A program that fails doesn't stop the script --
@@ -86,6 +89,12 @@ static char cap_buf[CAPTURE];       /* what a $( ) caught                  */
 static int capturing;               /* 1 while a builtin's output is taken */
 static char *sink;                  /* where it goes, and how much room    */
 static char *sink_end;
+static int out_fd;                  /* a builtin's output into a file, or -1 */
+
+static char was_quoted[WORDS + 1];  /* the word had quotes: ">" is text      */
+static char *redirect_out;          /* > or >> FILE on this line, or NULL    */
+static char *redirect_in;           /* < FILE                                */
+static unsigned redirect_how;
 
 static char value_buf[VALUE_MAX];   /* an assignment's value, expanded     */
 
@@ -155,7 +164,10 @@ static void out(char *s) {
     unsigned n = strlen(s);
     unsigned i;
     if (capturing == 0) {
-        write(STDOUT, s, n);
+        /* A builtin's own words: to the file when the line redirects, since
+         * `echo hello > note.txt` is a large part of why a script wants > at
+         * all (docs/redirect_plan.md 3.3). */
+        write((out_fd >= 0) ? out_fd : STDOUT, s, n);
         return;
     }
     for (i = 0u; i < n; i++) {
@@ -406,6 +418,7 @@ static int split_words(char *src, char **out_words, char *out_store, unsigned ro
             return -1;
         }
         out_words[count] = o;
+        if (count <= WORDS) was_quoted[count] = 0;
         count++;
         quoted = 0;
         while (*p != 0) {
@@ -413,6 +426,7 @@ static int split_words(char *src, char **out_words, char *out_store, unsigned ro
             if (quoted == 0 && p[0] == ';' && p[1] == ';') break;
             if (*p == '"') {
                 quoted = (quoted == 0) ? 1 : 0;
+                if (count <= WORDS) was_quoted[count - 1] = 1;
                 p++;
                 continue;
             }
@@ -714,6 +728,24 @@ static void directive(char *line) {
     fail("no such setting: ", word);
 }
 
+/* A standalone unquoted >, >> or < in a run of text. */
+static int redirect_word(char *s) {
+    int quoted = 0;
+    char *p = s;
+    while (*p != 0) {
+        if (*p == '"') quoted = (quoted == 0) ? 1 : 0;
+        if (quoted == 0 && p[0] == ';' && p[1] == ';') return 0;
+        if (quoted == 0 && (*p == '>' || *p == '<')
+                && (p == s || p[-1] == ' ' || p[-1] == '\t')) {
+            char *q = p;
+            while (*q == '>' || *q == '<') q++;
+            if (*q == ' ' || *q == '\t') return 1;
+        }
+        p++;
+    }
+    return 0;
+}
+
 /* `$name = value`: the first word starts with $ and the second is =. The
  * name is not expanded -- it is being set. */
 static int assignment(char *line) {
@@ -736,22 +768,122 @@ static int assignment(char *line) {
     while (*p == ' ' || *p == '\t') p++;
 
     started = 1;
+    /* `$x = $(ls) > out.txt` reads as a redirection and is not one: the whole
+     * right-hand side is the value. Rather than quietly making the value
+     * "... > out.txt", say so (docs/redirect_plan.md Q3). */
+    if (redirect_word(p)) {
+        fail("a value cannot redirect: quote it if you meant the text", "");
+        return 1;
+    }
     if (!expand_value(p, value_buf, VALUE_MAX)) return 1;
     var_set(name, value_buf);
     return 1;
 }
 
+/* `>` `>>` and `<` taken out of the words, with the file each names. They
+ * count only as whole words and only unquoted, so `echo ">"` is text
+ * (docs/redirect_plan.md 3.3). 0 and a message when a file is missing. */
+static int take_redirects(int *count, char **w) {
+    char *word;
+    int i = 0;
+    int keep = 0;
+
+    redirect_out = NULL;
+    redirect_in = NULL;
+    redirect_how = R_TRUNC;
+    while (i < *count) {
+        word = w[i];
+        if (was_quoted[i] == 0
+                && (strcmp(word, ">") == 0 || strcmp(word, ">>") == 0
+                    || strcmp(word, "<") == 0)) {
+            if (i + 1 >= *count) {
+                fail("no file after ", word);
+                return 0;
+            }
+            if (word[0] == '<') {
+                redirect_in = w[i + 1];
+            } else {
+                redirect_out = w[i + 1];
+                redirect_how = (word[1] == '>') ? R_APPEND : R_TRUNC;
+            }
+            i = i + 2;
+            continue;
+        }
+        w[keep] = word;
+        was_quoted[keep] = was_quoted[i];
+        keep++;
+        i++;
+    }
+    *count = keep;
+    w[keep] = NULL;
+    return 1;
+}
+
+/* A builtin's `>`: the same rule the kernel uses for a program, so one line
+ * of the docs covers both -- `file~` is written and renamed over `file` when
+ * the builtin is done, and `>>` adds to the end. */
+static int open_out(char *file, char *temp, unsigned room) {
+    if (redirect_how == R_APPEND) {
+        temp[0] = 0;
+        return open(file, O_WRITE | O_CREATE | O_APPEND);
+    }
+    strlcpy(temp, file, room);
+    strlcat(temp, "~", room);
+    return open(temp, O_WRITE | O_CREATE | O_TRUNC);
+}
+
+static void close_out(int fd, char *file, char *temp) {
+    close(fd);
+    if (temp[0] == 0) return;
+    remove(file);                       /* it may not be there at all */
+    if (rename(temp, file) < 0) {
+        remove(temp);
+        warn(file, ": could not be written");
+        last_status = 1;
+    }
+}
+
 static void run_command_words(int count, char **w) {
     char path[PATH];
+    char temp[PATH + 2];
     char number[STR_UTOA_MAX];
+    int fd;
 
     if (count <= 0) return;
     started = 1;
+    if (!take_redirects(&count, w)) return;
+    if (count == 0) {
+        fail("nothing to run", "");
+        return;
+    }
     if (is_builtin(w[0])) {
-        run_builtin(count, w);
+        if (redirect_in != NULL) {
+            fail("< on ", w[0]);        /* no builtin reads a file this way */
+            return;
+        }
+        if (redirect_out != NULL && capturing == 0) {
+            fd = open_out(redirect_out, temp, sizeof(temp));
+            if (fd < 0) {
+                warn(redirect_out, ": could not be written");
+                last_status = fd;
+                return;
+            }
+            out_fd = fd;
+            run_builtin(count, w);
+            out_fd = -1;
+            close_out(fd, redirect_out, temp);
+        } else {
+            run_builtin(count, w);
+        }
     } else if (!find_program(w[0], path)) {
         warn(w[0], ": not found");
         last_status = E_NOENT;
+    } else if (redirect_out != NULL || redirect_in != NULL) {
+        last_status = exec_io(path, count, w, redirect_in, redirect_out, redirect_how);
+        if (last_status == E_NOENT) {
+            /* find_program has been past the program, so it is the file. */
+            warn((redirect_in != NULL) ? redirect_in : redirect_out, ": not found");
+        }
     } else {
         last_status = exec(path, count, w);
     }
@@ -1076,6 +1208,7 @@ int main(int argc, char **argv) {
         say("usage: pgs FILE [ARGS...]\n");
         return 1;
     }
+    out_fd = -1;                        /* nothing redirected yet */
     script = argv[1];
     args = argv + 1;                    /* $0 is the script, $1.. its arguments */
     n_args = argc - 2;

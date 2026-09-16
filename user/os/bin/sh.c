@@ -21,6 +21,10 @@
  *
  * /etc/startup.pgs, when there is one, is run before the first prompt --
  * every shell runs it, the way every shell reads .bashrc.
+ *
+ * `ls > out.txt`, `>>` and `< in.txt` are taken out of the words and handed
+ * to the kernel's exec_io (docs/redirect_plan.md). They are whole words, and
+ * the built-ins refuse them.
  */
 #include <pigeon/stdio.h>
 #include <pigeon/string.h>
@@ -36,12 +40,20 @@
 #define FILE_MAX    1024u
 #define BUILT_IN    "``RED````CWD``> ``RESET``"
 
+static char was_quoted[WORDS + 1];  /* the word had quotes in it: ">" is text */
+
+static char *redirect_out;          /* > or >> FILE on this line, or NULL */
+static char *redirect_in;           /* < FILE                             */
+static unsigned redirect_how;       /* R_TRUNC or R_APPEND                */
+
 static char prompt[256];            /* line 1: the prompt */
 static char first[256];             /* line 2: the first prompt, or empty */
 static int last_status;
 
 /* Split a line in place at spaces; double quotes keep spaces in a word.
- * The count, or -1 for more than WORDS words. */
+ * The count, or -1 for more than WORDS words. was_quoted remembers which
+ * words had quotes in them, since the quotes are gone by the end of this
+ * and `echo ">"` must not read as a redirection. */
 static int split(char *line, char **argv) {
     int argc = 0;
     char *p = line;
@@ -52,10 +64,12 @@ static int split(char *line, char **argv) {
         if (*p == 0 || *p == '\n') break;
         if (argc == WORDS) return -1;
         argv[argc] = p;
+        was_quoted[argc] = 0;
         argc++;
         out = p;
         while (*p != 0 && *p != '\n' && *p != ' ') {
             if (*p == '"') {
+                was_quoted[argc - 1] = 1;
                 p++;
                 while (*p != 0 && *p != '\n' && *p != '"') {
                     *out = *p;
@@ -76,6 +90,46 @@ static int split(char *line, char **argv) {
     }
     argv[argc] = (char *)0;
     return argc;
+}
+
+/* `>` `>>` and `<` taken out of the words, with the file each names
+ * (docs/redirect_plan.md 3.2). They count only as whole words, so `echo 1>2`
+ * is one argument and `ls > out.txt` is a redirection. 0 and a message when
+ * a file is missing. */
+static int take_redirects(int *count, char **words) {
+    char *word;
+    int i = 0;
+    int keep = 0;
+
+    redirect_out = (char *)0;
+    redirect_in = (char *)0;
+    redirect_how = R_TRUNC;
+    while (i < *count) {
+        word = words[i];
+        if (was_quoted[i] == 0
+                && (strcmp(word, ">") == 0 || strcmp(word, ">>") == 0
+                    || strcmp(word, "<") == 0)) {
+            if (i + 1 >= *count) {
+                printf("%s: no file\n", word);
+                return 0;
+            }
+            if (word[0] == '<') {
+                redirect_in = words[i + 1];
+            } else {
+                redirect_out = words[i + 1];
+                redirect_how = (word[1] == '>') ? R_APPEND : R_TRUNC;
+            }
+            i = i + 2;
+            continue;
+        }
+        words[keep] = word;
+        was_quoted[keep] = was_quoted[i];
+        keep++;
+        i++;
+    }
+    *count = keep;
+    words[keep] = (char *)0;
+    return 1;
 }
 
 static int is_file(char *path) {
@@ -280,6 +334,25 @@ int main(int argc, char **argv) {
         }
         if (count == 0) continue;
 
+        if (!take_redirects(&count, words)) {
+            last_status = 1;
+            continue;
+        }
+        if (count == 0) {
+            print("nothing to run\n");
+            last_status = 1;
+            continue;
+        }
+        /* The built-ins print almost nothing and cd moves the shell itself,
+         * so a redirection on one is a mistake rather than a quiet no-op. */
+        if ((redirect_out != (char *)0 || redirect_in != (char *)0)
+                && (strcmp(words[0], "exit") == 0 || strcmp(words[0], "help") == 0
+                    || strcmp(words[0], "cd") == 0)) {
+            printf("%s: no > or < here\n", words[0]);
+            last_status = 1;
+            continue;
+        }
+
         if (strcmp(words[0], "exit") == 0) return 0;
         if (strcmp(words[0], "help") == 0) {
             help();
@@ -304,10 +377,24 @@ int main(int argc, char **argv) {
             last_status = 1;
             continue;
         }
-        status = exec(path, count, words);
+        if (redirect_out != (char *)0 || redirect_in != (char *)0) {
+            status = exec_io(path, count, words, redirect_in, redirect_out, redirect_how);
+        } else {
+            status = exec(path, count, words);
+        }
         last_status = status;
-        if (status < 0) printf("%s: %s\n", words[0], sys_strerror(status));
-        else if (status > 0) printf("%s: exit %d\n", words[0], status);
+        /* find() has already been past the program, so a file that isn't
+         * there is the redirection's, and saying "ls: not found" for a
+         * missing out.txt would send you looking in the wrong place. */
+        if (status == E_NOENT && redirect_in != (char *)0 && !is_file(redirect_in)) {
+            printf("%s: %s\n", redirect_in, sys_strerror(status));
+        } else if (status == E_NOENT && redirect_out != (char *)0) {
+            printf("%s: %s\n", redirect_out, sys_strerror(status));
+        } else if (status < 0) {
+            printf("%s: %s\n", words[0], sys_strerror(status));
+        } else if (status > 0) {
+            printf("%s: exit %d\n", words[0], status);
+        }
     }
     return 0;
 }

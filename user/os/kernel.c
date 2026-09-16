@@ -111,6 +111,7 @@ extern int w_chdir;
 extern int w_getcwd;
 extern int w_exec;
 extern int w_exec_out;
+extern int w_exec_io;
 extern int w_exit;
 extern int w_getkey;
 extern int w_mkdir;
@@ -194,6 +195,14 @@ char *out_buf;                  /* NULL when nothing is captured             */
 unsigned out_size;              /* its room, the terminator included         */
 unsigned out_len;               /* what is in it                             */
 int out_depth;                  /* the shallowest program it covers          */
+
+/* A redirection (exec_to, exec_from): the same idea with a file on the end
+ * of it. The innermost of a capture and a redirection is the one that takes
+ * the output, which is what `$(cmd > file)` would mean if pgs allowed it. */
+int out_file;                   /* STDOUT into this handle, or -1            */
+int out_file_depth;
+int in_file;                    /* STDIN out of this one, a line at a time   */
+int in_file_depth;
 
 unsigned page_owner;            /* the program that turned paging on; 0 none */
 unsigned page_rows;             /* rows the output moved down since the last wait */
@@ -1132,17 +1141,27 @@ static char *k_strerror(int status) {
 
 int k_write(int fd, char *buf, unsigned n) {
     unsigned i;
-    if (fd == STDOUT && out_buf != NULL && depth >= out_depth) {
-        /* Captured: into the buffer, not onto the screen. What doesn't fit is
-         * dropped, and the caller knows by the length it gets back. */
-        for (i = 0u; i < n; i++) {
-            if (out_len + 1u < out_size) {
-                out_buf[out_len] = buf[i];
-                out_len++;
+    int to_file;                /* the depth a redirection covers from, or -1 */
+    int to_buf;                 /* and a capture's                            */
+
+    if (fd == STDOUT) {
+        /* A capture and a redirection can both be on, one outside the other:
+         * the innermost -- the deeper owner -- takes the output. */
+        to_file = (out_file >= 0 && depth >= out_file_depth) ? out_file_depth : -1;
+        to_buf = (out_buf != NULL && depth >= out_depth) ? out_depth : -1;
+        if (to_file >= 0 && to_file >= to_buf) return fs_write(out_file, buf, n);
+        if (to_buf >= 0) {
+            /* Into the buffer: what doesn't fit is dropped, and the caller
+             * knows by the length it gets back. */
+            for (i = 0u; i < n; i++) {
+                if (out_len + 1u < out_size) {
+                    out_buf[out_len] = buf[i];
+                    out_len++;
+                }
             }
+            out_buf[out_len] = 0;
+            return (int)n;
         }
-        out_buf[out_len] = 0;
-        return (int)n;
     }
     if (fd == STDOUT || fd == STDERR) {
         page_counting = page_owner != 0u ? 1u : 0u;
@@ -1162,7 +1181,12 @@ int k_write(int fd, char *buf, unsigned n) {
 }
 
 int k_read(int fd, char *buf, unsigned n) {
-    if (fd == STDIN) return con_read_line(buf, n);
+    if (fd == STDIN) {
+        /* < : a line at a time with its '\n', and 0 at the end, which is
+         * what a program reading the console already expects. */
+        if (in_file >= 0 && depth >= in_file_depth && n >= 2u) return fs_gets(in_file, buf, n);
+        return con_read_line(buf, n);
+    }
     if (fd < 3) return E_BADF;
     return fs_read(fd - 3, buf, n);
 }
@@ -1258,11 +1282,22 @@ int k_paging(int on) {
  * running, keys queued, the display pointed at a buffer of its own. The
  * disk is mounted afresh, since a program with its own fs.c may have
  * written what this one's cache doesn't know. */
+/* The disk mounted again, with the current directory kept. A program with
+ * its own fs.c may have written what this one's cache doesn't know, so this
+ * happens after every program -- and again when a redirection closes, since
+ * the attempt inside k_tidy is refused while the file is open. */
+static void k_remount(void) {
+    char cwd[FS_PATH_MAX + 8];
+    int n = fs_getcwd(cwd, FS_PATH_MAX + 8u);
+    if (fs_unmount(mounted) >= 0) {
+        fs_mount(mounted);
+        if (n > 0) fs_chdir(cwd);
+    }
+}
+
 static void k_tidy(void) {
     int h;
     unsigned t;
-    char cwd[FS_PATH_MAX + 8];
-    int n;
     for (h = 0; h < HANDLES; h++) {
         if (handle_depth[h] >= depth) {     /* and programs it ran that q ended */
             if (handle_dir[h] != 0u) fs_closedir(h);
@@ -1275,11 +1310,7 @@ static void k_tidy(void) {
     while (key_event() != 0u) { }
     while (mouse_event() != 0u) { }
     k_io(CH_DISPLAY, K_DISPLAY_SET_BASE, 4u, DISPLAY_START);
-    n = fs_getcwd(cwd, FS_PATH_MAX + 8u);
-    if (fs_unmount(mounted) >= 0) {
-        fs_mount(mounted);
-        if (n > 0) fs_chdir(cwd);
-    }
+    k_remount();
     con_attr = CON_DEFAULT;                 /* no color left on for the shell */
     con_esc = CON_ESC_NONE;
     con_marked = 0u;
@@ -1410,6 +1441,85 @@ int k_exec_out(char *path, int argc, char **argv, char *buf, unsigned size) {
     return status;
 }
 
+/* exec, with a file on either end of it (docs/redirect_plan.md 3.1).
+ *
+ * `out` takes STDOUT: R_APPEND writes to the end of it, and R_TRUNC writes
+ * `out~` and renames it over `out` once the program has ended by itself, so
+ * a fault, a Ctrl+C or a full disk leaves the old file whole and takes the
+ * half-written one away with it. `in` feeds STDIN, a line at a time. Either
+ * may be NULL. The redirections that were running are put back afterwards,
+ * so these nest the way exec_out does.
+ */
+int k_exec_io(char *path, int argc, char **argv, char *in, char *out, unsigned how) {
+    char temp[FS_PATH_MAX + 2];
+    int was_out = out_file;
+    int was_out_depth = out_file_depth;
+    int was_in = in_file;
+    int was_in_depth = in_file_depth;
+    unsigned ran = 0u;
+    int ofd = -1;
+    int ifd = -1;
+    int status;
+    int r;
+
+    temp[0] = 0;
+    if (out != NULL && *out != 0) {
+        if (how == R_APPEND) {
+            ofd = fs_open(out, FS_WRITE | FS_CREATE | FS_APPEND);
+        } else {
+            if (strlen(out) + 1u > FS_PATH_MAX) return FS_ENAMETOOLONG;
+            strlcpy(temp, out, sizeof(temp));
+            strlcat(temp, "~", sizeof(temp));
+            ofd = fs_open(temp, FS_WRITE | FS_CREATE | FS_TRUNC);
+        }
+        if (ofd < 0) return ofd;
+    }
+    if (in != NULL && *in != 0) {
+        ifd = fs_open(in, FS_READ);
+        if (ifd < 0) {
+            if (ofd >= 0) {
+                fs_close(ofd);
+                if (temp[0] != 0) fs_remove(temp);
+            }
+            return ifd;
+        }
+    }
+    if (ofd >= 0) {
+        out_file = ofd;
+        out_file_depth = depth + 1;
+    }
+    if (ifd >= 0) {
+        in_file = ifd;
+        in_file_depth = depth + 1;
+    }
+
+    status = k_run(path, argc, argv, &ran);
+    if (ran == 0u) dbg_printf("[kernel] exec %s: %s\n", path, k_strerror(status));
+
+    if (ofd >= 0) fs_close(ofd);
+    if (ifd >= 0) fs_close(ifd);
+    out_file = was_out;
+    out_file_depth = was_out_depth;
+    in_file = was_in;
+    in_file_depth = was_in_depth;
+    k_remount();                        /* k_tidy could not, with a file open */
+
+    if (temp[0] != 0) {
+        if (ran != 0u && status > ENDED_DIV_ZERO) {
+            fs_remove(out);             /* it may not be there at all */
+            r = fs_rename(temp, out);
+            if (r < 0) {
+                fs_remove(temp);
+                dbg_printf("[kernel] %s: %s\n", out, k_strerror(r));
+                return r;
+            }
+        } else {
+            fs_remove(temp);            /* what was there stays there */
+        }
+    }
+    return status;
+}
+
 void k_exit(int code) {
     procs[depth].how = K_HOW_EXIT;
     ((abort_fn)&exec_abort)(code, &procs[depth].save_sp);
@@ -1444,6 +1554,9 @@ void k_fault(unsigned vector, unsigned pc) {
 
 static void k_tables(void) {
     unsigned *table = (unsigned *)SYSCALL_TABLE;
+    out_file = -1;              /* nothing redirected yet. Set here and not  */
+    in_file = -1;               /* where they are declared: every global of  */
+                                /* this kernel starts as the image's zeros.  */
     table[SYS_WRITE] = (unsigned)&w_write;
     table[SYS_READ] = (unsigned)&w_read;
     table[SYS_OPEN] = (unsigned)&w_open;
@@ -1465,6 +1578,7 @@ static void k_tables(void) {
     table[SYS_SETBREAK] = (unsigned)&w_setbreak;
     table[SYS_PAGING] = (unsigned)&w_paging;
     table[SYS_EXEC_OUT] = (unsigned)&w_exec_out;
+    table[SYS_EXEC_IO] = (unsigned)&w_exec_io;
     vectors[VEC_DIV_ZERO] = (unsigned)&fault_div;
     vectors[VEC_BAD_OPCODE] = (unsigned)&fault_opcode;
     vectors[VEC_BAD_FETCH] = (unsigned)&fault_fetch;

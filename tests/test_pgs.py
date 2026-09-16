@@ -21,18 +21,9 @@ sys.path.insert(0, str(REPO_ROOT / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import cases, run_module                                   # noqa: E402
+from pfs import PgfsImage                                               # noqa: E402
 from test_kernel import (                                              # noqa: E402
     COLS, PROMPT, STANDINS, Console, last_row, make_disk, shell_program, standin)
-
-# A program that says what arguments it was given: "[args][a][b]".
-STANDINS["args"] = r"""#include <pigeon/sys.h>
-int main(int argc, char **argv) {
-    int i;
-    for (i = 0; i < argc; i++) { print("["); print(argv[i]); print("]"); }
-    print("\n");
-    return 0;
-}
-"""
 
 # A program with something to say and a status to go with it.
 STANDINS["moan"] = r"""#include <pigeon/sys.h>
@@ -59,7 +50,9 @@ def booted_with(source, files=(), programs=()):
         extra.append((f"/bin/{name}.bin", standin(name)))
     extra.extend(files)
     with tempfile.TemporaryDirectory() as t:
-        console = Console(make_disk(Path(t) / "hdd.img", extra))
+        path = Path(t) / "hdd.img"
+        console = Console(make_disk(path, extra))
+        console.disk = path
         try:
             assert console.ready(), console.rows()
             yield console
@@ -71,6 +64,16 @@ def run(source, files=(), programs=(), args=""):
     """A script's output, line by line, as the console shows it."""
     with booted_with(source, files, programs) as c:
         return c.command("pgs /s.pgs" + (" " + args if args else ""))
+
+
+def wrote(source, path, files=(), programs=(), args=""):
+    """What a script left on the disk at `path`, the machine stopped first;
+    None for nothing."""
+    with booted_with(source, files, programs) as c:
+        c.command("pgs /s.pgs" + (" " + args if args else ""))
+        c.close()
+        with PgfsImage(c.disk) as img:
+            return img.read_file(path) if img.exists(path) else None
 
 
 def screen(source, files=(), programs=(), args=""):
@@ -409,6 +412,63 @@ def test_the_discs_own_example_script_runs():
     assert "tick 0" in text and "tick 2" in text, text
     assert "the explorer has its rules" in text, text
     assert "/s.pgs:" not in text, f"the script complained: {text}"
+
+
+# --- > >> and < in a script (docs/redirect_plan.md 3.3) ---------------------------------
+
+def test_a_program_writes_into_a_file():
+    assert wrote("args one > /out.txt\n", "/out.txt", programs=["args"]) == b"[args][one]\n"
+
+
+def test_a_builtin_writes_into_a_file_too():
+    """echo into a file is most of why a script wants > at all."""
+    assert wrote("echo hello > /out.txt\n", "/out.txt") == b"hello\n"
+
+
+def test_a_builtin_appends():
+    source = "echo one > /out.txt\necho two >> /out.txt\n"
+    assert wrote(source, "/out.txt") == b"one\ntwo\n"
+
+
+def test_a_value_can_name_the_file():
+    source = "$where = /out.txt\necho hello > $where\n"
+    assert wrote(source, "/out.txt") == b"hello\n"
+
+
+def test_a_script_reads_a_file_with_a_redirection():
+    source = "eater < /in.txt\n"
+    out = run(source, files=[("/in.txt", b"a\nb\n")], programs=["eater"])
+    assert out == ["ate 2 [a]"], out
+
+
+def test_a_quoted_marker_is_text_not_a_redirection():
+    assert run('echo ">" done\n') == ['> done']
+
+
+def test_a_redirection_with_no_file_is_a_mistake():
+    text = screen("echo hi >\n")
+    assert "/s.pgs:1: no file after >" in text, text
+
+
+def test_a_builtin_refuses_an_input_redirection():
+    text = screen("echo hi < /s.pgs\n")
+    assert "/s.pgs:1: < on echo" in text, text
+
+
+def test_a_value_cannot_redirect():
+    """`$x = $(ls) > out.txt` looks like a redirection and is not one: the
+    whole right-hand side is the value (docs/redirect_plan.md Q3)."""
+    text = screen("$x = $(pwd) > /out.txt\n")
+    assert "/s.pgs:1: a value cannot redirect" in text, text
+
+
+def test_a_value_may_hold_the_marker_in_quotes():
+    assert run('$x = "a > b"\necho $x\n') == ["a > b"]
+
+
+def test_a_file_that_cannot_be_written_is_said():
+    text = screen("args one > /nodir/out.txt\n", programs=["args"])
+    assert "/s.pgs:1: /nodir/out.txt: not found" in text, text
 
 
 if __name__ == "__main__":

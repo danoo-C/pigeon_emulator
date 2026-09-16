@@ -19,6 +19,7 @@ typedef int  (*sys_path_stat)(char *, sys_stat_t *);
 typedef int  (*sys_buf_size)(char *, unsigned);
 typedef int  (*sys_exec_fn)(char *, int, char **);
 typedef int  (*sys_exec_out_fn)(char *, int, char **, char *, unsigned);
+typedef int  (*sys_exec_io_fn)(char *, int, char **, char *, char *, unsigned);
 typedef void (*sys_exit_fn)(int);
 typedef int  (*sys_none)(void);
 typedef int  (*sys_path_path)(char *, char *);
@@ -69,6 +70,18 @@ int exec(char *path, int argc, char **argv) {
 
 int exec_out(char *path, int argc, char **argv, char *buf, unsigned size) {
     return ((sys_exec_out_fn)SYS_SLOT(SYS_EXEC_OUT))(path, argc, argv, buf, size);
+}
+
+int exec_io(char *path, int argc, char **argv, char *in, char *out, unsigned how) {
+    return ((sys_exec_io_fn)SYS_SLOT(SYS_EXEC_IO))(path, argc, argv, in, out, how);
+}
+
+int exec_to(char *path, int argc, char **argv, char *file, unsigned how) {
+    return exec_io(path, argc, argv, (char *)0, file, how);
+}
+
+int exec_from(char *path, int argc, char **argv, char *file) {
+    return exec_io(path, argc, argv, file, (char *)0, R_TRUNC);
 }
 
 void exit(int code) { ((sys_exit_fn)SYS_SLOT(SYS_EXIT))(code); }

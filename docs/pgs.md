@@ -187,10 +187,32 @@ when it is missing. So a word means the same in a script as at the prompt.
 - **Ctrl+C** ends the program the script is waiting for, and then the script.
   That is the way out of a `while 1`.
 
-## 10. What it is not
+## 10. `>`, `>>` and `<`
+
+```sh
+args one > /out.txt         ;; a program's output into a file
+echo hello > note.txt       ;; and a builtin's, which is most of the point
+echo world >> note.txt
+eater < note.txt            ;; a file as a program's typed input
+sort < in.txt > out.txt     ;; both ends at once
+```
+
+They work as they do at the prompt ([shell.md](shell.md) §8): whole words
+only, `>` writing `file~` and renaming it when the command has ended by
+itself, `>>` adding to the end, `STDERR` still reaching the screen. Two
+things are the script's own:
+
+- **A builtin redirects too.** `echo hello > note.txt` writes the file, with
+  the same `file~` rule. `<` on a builtin is a mistake — none of them reads
+  input that way.
+- **A value cannot redirect.** `$x = $(ls) > out.txt` looks like a
+  redirection and is not one: the whole right-hand side is the value. Rather
+  than quietly making the value `... > out.txt`, `pgs` says
+  `a value cannot redirect: quote it if you meant the text`. `$x = "a > b"`
+  is that text.
+
+## 11. What it is not
 
 No pipes (`a | b`), no `&&`, no `;`, no functions, no arrays, no environment,
-no background jobs. Redirection — `ls > out.txt` — is
-[redirect_plan.md](redirect_plan.md), and a `# graphics` script that owns the
-screen is [graphics_plan.md](graphics_plan.md); both are planned and neither
-is built.
+no background jobs. A `# graphics` script that owns the screen is
+[graphics_plan.md](graphics_plan.md), planned and not built.
