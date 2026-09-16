@@ -1559,6 +1559,161 @@ def test_an_exec_costs_its_two_lines_and_no_more():
         f"logging cost {with_port - without:,} instructions ({with_port:,} against {without:,})"
 
 
+
+# --- exec_out: a program's output into a buffer (docs/pgs_plan.md 4.5) ------------
+
+STANDINS["talker"] = r"""#include <pigeon/sys.h>
+int main(int argc, char **argv) { print("hello from talker\n"); return 0; }
+"""
+
+STANDINS["exiter"] = r"""#include <pigeon/sys.h>
+int main(int argc, char **argv) { print("leaving\n"); return 3; }
+"""
+
+STANDINS["errtalk"] = r"""#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    print("out\n");
+    write(STDERR, "err\n", 4u);
+    return 0;
+}
+"""
+
+STANDINS["relay"] = r"""#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    char *child[2];
+    print("relay says hi\n");
+    child[0] = "talker";
+    child[1] = (char *)0;
+    exec("/bin/talker.bin", 1, child);
+    return 0;
+}
+"""
+
+STANDINS["spammer"] = r"""#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    int i;
+    for (i = 0; i < 100; i++) print("0123456789\n");
+    return 0;
+}
+"""
+
+# cap SIZE PROGRAM [ARGS...] -- runs it captured and says what it caught, on
+# one line, with the newlines in the value shown as '|'. A bare name is
+# /bin/<name>.bin, as the shell resolves one, so a test's command line stays
+# under the console's 32 columns: one exactly that wide reads as a wrapped
+# line and Console.output() cannot find it.
+STANDINS["cap"] = r"""#include <pigeon/stdio.h>
+#include <pigeon/string.h>
+#include <pigeon/sys.h>
+char buf[9000];
+char path[264];
+int main(int argc, char **argv) {
+    char *p;
+    int status;
+    unsigned size;
+    if (argc < 3) { print("usage: cap SIZE PROGRAM\n"); return 1; }
+    size = (unsigned)atoi(argv[1]);
+    if (strchr(argv[2], '/') == (char *)0) {
+        strlcpy(path, "/bin/", sizeof(path));
+        strlcat(path, argv[2], sizeof(path));
+        strlcat(path, ".bin", sizeof(path));
+    } else {
+        strlcpy(path, argv[2], sizeof(path));
+    }
+    status = exec_out(path, argc - 2, argv + 2, buf, size);
+    for (p = buf; *p != 0; p++) {
+        if (*p == 10) *p = '|';
+    }
+    printf("got [%s] status %d len %u\n", buf, status, strlen(buf));
+    return 0;
+}
+"""
+
+
+def catching(*names):
+    """A kernel on a disk with cap and the standins named."""
+    return booted(extra=[(f"/bin/{name}.bin", standin(name)) for name in ("cap",) + names])
+
+
+def ran(c, line):
+    """Type a line, wait for the prompt, and give the console back as one run
+    of text with every row padded to the full width -- as stopped() does, so
+    a line that wrapped at a space reads whole."""
+    c.command(line)
+    return "".join(row.ljust(COLS) for row in c.rows())
+
+
+def test_exec_out_takes_the_output_instead_of_printing_it():
+    with catching("talker") as c:
+        assert c.ready(), c.rows()
+        text = ran(c, "cap 256 talker")
+        assert "got [hello from talker|] status 0 len 18" in text, c.rows()
+        assert text.count("hello from talker") == 1, "it was printed as well as captured"
+
+
+def test_exec_out_still_returns_the_status():
+    with catching("exiter", "div0") as c:
+        assert c.ready(), c.rows()
+        assert "got [leaving|] status 3 len 8" in ran(c, "cap 256 exiter"), c.rows()
+        assert "got [] status -100 len 0" in ran(c, "cap 256 div0"), c.rows()
+
+
+def test_a_grandchilds_output_is_captured_too():
+    with catching("relay", "talker") as c:
+        assert c.ready(), c.rows()
+        text = ran(c, "cap 256 relay")
+        assert "got [relay says hi|hello from talker|] status 0 len 32" in text, c.rows()
+        assert text.count("relay says hi") == 1, "it was printed as well as captured"
+
+
+def test_output_past_the_buffer_is_dropped_and_the_length_says_so():
+    with catching("spammer") as c:
+        assert c.ready(), c.rows()
+        text = ran(c, "cap 32 spammer")
+        assert "got [0123456789|0123456789|012345678] status 0 len 31" in text, c.rows()
+
+
+def test_stderr_still_reaches_the_console_while_stdout_is_captured():
+    with catching("errtalk") as c:
+        assert c.ready(), c.rows()
+        assert c.command("cap 256 errtalk") == ["err", "got [out|] status 0 len 4"], c.rows()
+
+
+def test_a_capture_inside_a_capture_comes_back_to_the_outer_one():
+    """The inner cap's own line is captured by the outer one, which is only
+    true if exec_out put the outer capture back when the inner ended."""
+    with catching("talker") as c:
+        assert c.ready(), c.rows()
+        text = ran(c, "cap 256 cap 256 talker")
+        assert "got [got [hello from talker|] status 0 len 18|] status 0 len 4" in text, c.rows()
+        assert text.count("hello from talker") == 1, "a line escaped a capture"
+
+
+def test_a_capture_is_over_when_the_program_it_covered_ends():
+    with catching("talker") as c:
+        assert c.ready(), c.rows()
+        ran(c, "cap 256 talker")
+        assert c.command("echo hi") == ["hi"], c.rows()
+        assert "got [hello from talker|] status 0 len 18" in ran(c, "cap 256 talker"), c.rows()
+
+
+@cases(("no room", "0"), ("only a terminator", "1"))
+def test_a_capture_with_no_room_is_refused_and_the_program_never_runs(label, size):
+    with catching("talker") as c:
+        assert c.ready(), c.rows()
+        text = ran(c, f"cap {size} talker")
+        assert "got [] status -9 len 0" in text, c.rows()
+        assert "hello from talker" not in text, "it ran anyway"
+
+
+def test_a_program_that_cannot_start_is_reported_as_exec_reports_it():
+    with catching("talker") as c:
+        assert c.ready(), c.rows()
+        assert "got [] status -1 len 0" in ran(c, "cap 256 nope"), c.rows()
+        said = serial(c)
+    assert "[kernel] exec /bin/nope.bin: no such file or directory" in said, said
+
+
 # --- boot.conf, the splash and the startup program: docs/phase6_plan.md -----------
 
 STANDINS["splasharg"] = r"""#include <pigeon/sys.h>

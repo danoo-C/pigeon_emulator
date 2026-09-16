@@ -18,6 +18,7 @@ typedef int  (*sys_int_stat)(int, sys_stat_t *);
 typedef int  (*sys_path_stat)(char *, sys_stat_t *);
 typedef int  (*sys_buf_size)(char *, unsigned);
 typedef int  (*sys_exec_fn)(char *, int, char **);
+typedef int  (*sys_exec_out_fn)(char *, int, char **, char *, unsigned);
 typedef void (*sys_exit_fn)(int);
 typedef int  (*sys_none)(void);
 typedef int  (*sys_path_path)(char *, char *);
@@ -66,6 +67,10 @@ int exec(char *path, int argc, char **argv) {
     return ((sys_exec_fn)SYS_SLOT(SYS_EXEC))(path, argc, argv);
 }
 
+int exec_out(char *path, int argc, char **argv, char *buf, unsigned size) {
+    return ((sys_exec_out_fn)SYS_SLOT(SYS_EXEC_OUT))(path, argc, argv, buf, size);
+}
+
 void exit(int code) { ((sys_exit_fn)SYS_SLOT(SYS_EXIT))(code); }
 
 int getkey(void) { return ((sys_none)SYS_SLOT(SYS_GETKEY))(); }
@@ -93,6 +98,7 @@ char *sys_strerror(int status) {
     if (status == -6) return "disk full";
     if (status == -7) return "too many open files";
     if (status == E_BADF) return "not an open file";
+    if (status == -9) return "bad argument";
     if (status == -10) return "name too long";
     if (status == -11) return "busy";
     if (status == -19) return "read-only disk";

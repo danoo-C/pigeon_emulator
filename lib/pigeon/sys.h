@@ -40,6 +40,13 @@ int rename(char *from, char *to);           /* on one disk; to must not exist */
 
 /* --- programs ------------------------------------------------------------ */
 int  exec(char *path, int argc, char **argv);  /* runs it, waits: its status */
+
+/* exec, with what the program writes to STDOUT -- and what the programs it
+ * runs write -- going into buf instead of the console. STDERR still reaches
+ * the screen. buf is left NUL-terminated and holds at most size - 1 bytes;
+ * output past that is dropped, and a result exactly that long is how you
+ * know. Its status is exec's. Buffers over 64 KB are used to 64 KB. */
+int  exec_out(char *path, int argc, char **argv, char *buf, unsigned size);
 void exit(int code);                        /* ends this program, now      */
 int  getkey(void);                          /* a key, or -1; never waits   */
 int  setcomplete(char *dir, char *builtins);  /* Tab's commands: a directory of
