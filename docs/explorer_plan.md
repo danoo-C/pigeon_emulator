@@ -56,9 +56,12 @@ From the chat and your answers, 2026-09-16:
   program left, stops all 16 timers, empties the key and mouse queues, points
   the display back at the screen, mounts the disk again and puts the current
   directory back, and redraws its console *(checked: `kernel.c` `k_tidy`)*.
-  Two consequences for the explorer: **its screen is gone** when a child ends
-  — the console is drawn over it — and **a child's `cd` can't move the
-  explorer**.
+  Two consequences for the explorer: **its screen is gone** when a child
+  ends, and it is the console that replaces it. *(Corrected while building:
+  this section first said a child's `cd` could not move the explorer.
+  `k_tidy` reads the current directory the child left, remounts, and puts
+  **that** back, so a `cd` in a shell the explorer started does move it --
+  which is why §4.5 step 3 goes back to the folder it was showing.)*
 - **The console and the explorer share one screen.** Anything a program
   prints lands on the same 32×12 grid of text the explorer draws its list on,
   so a child that prints (`ls`, `cat`) leaves its output on top of the
@@ -213,10 +216,12 @@ and `GLYPH_W/H` rather than typed *(§2)*:
   right-aligned. The selected row is inverse. A name too long for the row is
   cut with a `~`.
 - **Row 11:** the status line — what it just did, or the error.
-- **Drawing goes straight to the screen, with no back buffer,** as `files.c`
-  does, and only when something changed. A back buffer would be a page flip
-  the kernel undoes after every child *(§2, `k_tidy`)*, for a list that is
-  redrawn a few times a second at most.
+- **Drawing goes straight to the screen, with no back buffer,** and only
+  when something changed. `user/files.c` does use one, but it never starts
+  another program: the console draws at `DISPLAY_START`, and a child's output
+  has to be visible while it runs, so the display is left pointing where the
+  kernel left it. *(Corrected while building: this first said "as `files.c`
+  does".)*
 
 Keys, `files.c`'s where they exist: Up/Down, PgUp/PgDn, Home/End move; Enter
 opens; Backspace goes to the parent; Esc quits; `F5` reloads; `?` shows the
@@ -247,8 +252,10 @@ with — each of them the same code the menu items call.
   `/bin/img.bin -s = .bmp` would have.
 - **The menu** is a framed box, its items one per row, the item under the
   pointer highlighted; a click runs it, Esc or a click outside closes it, and
-  Up/Down/Enter work it from the keyboard. It is drawn over the list, and the
-  list is drawn again when it closes — nothing underneath is saved, since the
+  Up/Down/Enter work it from the keyboard. It opens where you clicked, snapped
+  to the rows and columns the list uses, so its words line up with the names
+  under it *(added while building)*. It is drawn over the list, and the list
+  is drawn again when it closes — nothing underneath is saved, since the
   explorer can redraw itself whenever it likes. A box near the bottom or the
   right edge is nudged back on screen.
 - **`New file...`** asks for a name, then opens it with the rule that matches
@@ -267,13 +274,15 @@ The whole of "it comes back to the explorer" is that the explorer calls
 
 1. **Before:** `chdir` to the folder being shown, if it isn't there already.
 2. **The call itself:** `exec(program, argc, argv)`.
-3. **After, always (Q4):** whatever the child left on the screen stays — its
-   own drawing, or its console output with the kernel's console drawn over
-   the explorer's list *(§2)* — and the explorer prints `[ press any key ]`
-   on the console under it. The next key reloads the folder, since the child
-   may have made or removed files, and draws the list again. So `ls` through
-   `EXEC` reads like the shell running it, and `img` holds its picture one key
-   longer.
+3. **After, always (Q4):** the kernel has drawn its console over this
+   screen, so what is there is the console, the child's output on it, and
+   `[ press any key ]` printed under that. The next key reloads the folder,
+   since the child may have made or removed files, and draws the list again.
+   So `ls` through `EXEC` reads like the shell running it. *(Corrected while
+   building: this first said a child's own drawing stayed up. `k_tidy` calls
+   `con_redraw`, which clears the screen and draws the console's text, so a
+   picture `img` drew is gone by the time the explorer is asked again --
+   `img` holds it while it runs, which is what it is for.)*
 4. **`setbreak(0)`** while the explorer itself is running, as `edit` does, so
    Ctrl+C doesn't kill the explorer; children get the break back on from the
    kernel anyway *(§2)*.
@@ -507,3 +516,37 @@ All three answered on 2026-09-16, in the chat.
   **Decided (left to me):** `.ext` and `*.*` only, matched without case
   (§4.1). Nothing on the disc needs more, and the parser has one place to
   grow when something does (§7).
+
+---
+
+## 10. As built
+
+Built to this plan on 2026-09-16, in the six steps of §5.
+
+- **`user/os/bin/explorer.c`,** 1,074 lines: the list, the conf, `exec` and the
+  pause, the menus, the name prompt and the confirm. It draws with
+  `<pigeon/display.h>`, reads keys and the mouse with `<pigeon/input.h>` --
+  every press arrives in one ordered stream through `key_read()`, named keys
+  included -- and does everything else through `<pigeon/sys.h>`. `setbreak(0)`
+  makes Ctrl+C a key here rather than the end of the program; a child gets
+  the break back from the kernel, so Ctrl+C in it lands back in the list.
+- **`user/os/etc/explorer.conf`** is §3's three rules, `.bmp` opening
+  `img -s`.
+- **The disc** gains `/bin/explorer.bin` and `/etc/explorer.conf`: 28 files,
+  and the install and project tests count them.
+  `user/os/readme.txt` names it at the prompt.
+- **`tests/test_explorer.py`,** 28 tests: the list and its order, the arrows
+  and the page keys, `..` and the root, every kind of rule and every mistake
+  in a conf, the pause and the folder being read again after a program, a
+  program that leaves the current directory somewhere else, the wheel, a
+  click and a second click, both menus, `New folder...`, `Rename...`,
+  `Delete` asking first, `Open with...`, `Shell here` and `exit`, Esc, and
+  the key list. It reads the screen with `tests/test_files.py`'s font reader,
+  since the explorer lays its rows out exactly as `user/files.c` does.
+- **Two things the tests had to learn.** A snapshot taken while the explorer
+  draws is half a frame, so a test waits for the status line -- drawn last,
+  never empty -- and for the screen to stop changing. And a menu is drawn
+  where you clicked, which is why it snaps to the list's grid: off it, the
+  font reader cannot read a word.
+- **Not built, and not planned:** copy and move, several patterns on one
+  line, a per-folder conf, icons (§7).

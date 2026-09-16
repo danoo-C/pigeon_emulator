@@ -31,6 +31,7 @@ system    = kernel.c            # what the installed hard disk boots: the kernel
 /bin/splash.bin  = bin/splash.c   # the boot screen /etc/boot.conf names
 /bin/reboot.bin  = bin/reboot.c
 /bin/img.bin     = bin/img.c      # shows a BMP until Esc
+/bin/explorer.bin = bin/explorer.c   # the file explorer /etc/explorer.conf drives
 
 /bin/graph.bin   = ../graph.c   # the graphing calculator; Esc goes back to the shell
 /bin/cube.bin    = ../cube.c
@@ -42,3 +43,4 @@ system    = kernel.c            # what the installed hard disk boots: the kernel
 /docs/readme.txt = readme.txt
 /etc/shell_header.conf = etc/shell_header.conf   # the prompt (docs/shell.md)
 /etc/boot.conf   = etc/boot.conf  # what runs after the kernel (docs/phase6_plan.md)
+/etc/explorer.conf = etc/explorer.conf   # what the explorer opens files with (docs/explorer.md)
