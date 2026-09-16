@@ -625,7 +625,12 @@ def row_of(console, text):
 
 @contextlib.contextmanager
 def terminal():
-    with booted(extra=[("/bin/term.bin", standin("term"))]) as c:
+    """The shell with a colorless prompt. Its built-in one is red (sh.c), and
+    these tests read the ink of the row under a program's output, which is a
+    prompt: they are about the console and what the kernel resets, not about
+    what the shell paints its prompt."""
+    with booted(extra=[("/bin/term.bin", standin("term")),
+                       ("/etc/shell_header.conf", b"``CWD``> ")]) as c:
         assert c.ready(), c.rows()
         yield c
 
