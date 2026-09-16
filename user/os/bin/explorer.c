@@ -690,10 +690,11 @@ static void wait_for_a_key(void) {
  * somewhere else. */
 static void run(char *path, int argc, char **argv) {
     int status;
-
+    print("\x1b[3J\x1b[2J");
     status = exec(path, argc, argv);
     if (status < 0) printf("%s: %s\n", argv[0], sys_strerror(status));
     else if (status > 0) printf("%s: exit %d\n", argv[0], status);
+    //print("\x1b[3J\x1b[2J");
     print("[ press any key ]");
     wait_for_a_key();
     print("\n");
