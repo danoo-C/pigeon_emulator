@@ -44,6 +44,7 @@
 #define PROGRAMS      0x01000000u   /* where the first program goes          */
 #define PROGRAMS_TOP  0x07F00000u   /* the hardware stack's megabyte above   */
 #define MIN_HEAP      0x10000u      /* room a program must have past its frames */
+#define CAPTURE_MAX   0x10000u      /* the most exec_out will write into a buffer */
 #define MAX_DEPTH     8             /* the kernel, and 7 programs in a chain */
 #define HANDLES       16            /* fs.c has 8; room to spare             */
 #define TIMERS        16u           /* timer ids stopped after a program      */
@@ -109,6 +110,7 @@ extern int w_stat;
 extern int w_chdir;
 extern int w_getcwd;
 extern int w_exec;
+extern int w_exec_out;
 extern int w_exit;
 extern int w_getkey;
 extern int w_mkdir;
@@ -184,6 +186,14 @@ char back_look[3200];           /* a ring with back_next where the next one goes
 unsigned back_count;
 unsigned back_next;
 unsigned view_back;             /* rows the view is scrolled back; 0 is the screen    */
+
+/* A capture (exec_out): while out_buf is set, what the program at out_depth
+ * or deeper writes to STDOUT goes there instead of the console. Every
+ * exec_out puts back the capture it interrupted, so captures nest. */
+char *out_buf;                  /* NULL when nothing is captured             */
+unsigned out_size;              /* its room, the terminator included         */
+unsigned out_len;               /* what is in it                             */
+int out_depth;                  /* the shallowest program it covers          */
 
 unsigned page_owner;            /* the program that turned paging on; 0 none */
 unsigned page_rows;             /* rows the output moved down since the last wait */
@@ -1122,6 +1132,18 @@ static char *k_strerror(int status) {
 
 int k_write(int fd, char *buf, unsigned n) {
     unsigned i;
+    if (fd == STDOUT && out_buf != NULL && depth >= out_depth) {
+        /* Captured: into the buffer, not onto the screen. What doesn't fit is
+         * dropped, and the caller knows by the length it gets back. */
+        for (i = 0u; i < n; i++) {
+            if (out_len + 1u < out_size) {
+                out_buf[out_len] = buf[i];
+                out_len++;
+            }
+        }
+        out_buf[out_len] = 0;
+        return (int)n;
+    }
     if (fd == STDOUT || fd == STDERR) {
         page_counting = page_owner != 0u ? 1u : 0u;
         for (i = 0u; i < n; i++) {
@@ -1359,6 +1381,35 @@ int k_exec(char *path, int argc, char **argv) {
     return status;
 }
 
+/* exec, with the program's STDOUT -- and that of everything it runs -- going
+ * into buf instead of the console (docs/pgs_plan.md 4.5). The capture that
+ * was running is remembered and put back, so a program that captures a
+ * program that captures needs nothing extra, and a fault or Ctrl+C in the
+ * child comes back through here like any other status. */
+int k_exec_out(char *path, int argc, char **argv, char *buf, unsigned size) {
+    char *was_buf = out_buf;
+    unsigned was_size = out_size;
+    unsigned was_len = out_len;
+    int was_depth = out_depth;
+    unsigned ran = 0u;
+    int status;
+
+    if (buf == NULL || size < 2u) return FS_EINVAL;
+    if (size > CAPTURE_MAX) size = CAPTURE_MAX;     /* a wrong size can only reach so far */
+    out_buf = buf;
+    out_size = size;
+    out_len = 0u;
+    out_depth = depth + 1;
+    buf[0] = 0;
+    status = k_run(path, argc, argv, &ran);
+    if (ran == 0u) dbg_printf("[kernel] exec %s: %s\n", path, k_strerror(status));
+    out_buf = was_buf;
+    out_size = was_size;
+    out_len = was_len;
+    out_depth = was_depth;
+    return status;
+}
+
 void k_exit(int code) {
     procs[depth].how = K_HOW_EXIT;
     ((abort_fn)&exec_abort)(code, &procs[depth].save_sp);
@@ -1413,6 +1464,7 @@ static void k_tables(void) {
     table[SYS_SETCOMPLETE] = (unsigned)&w_setcomplete;
     table[SYS_SETBREAK] = (unsigned)&w_setbreak;
     table[SYS_PAGING] = (unsigned)&w_paging;
+    table[SYS_EXEC_OUT] = (unsigned)&w_exec_out;
     vectors[VEC_DIV_ZERO] = (unsigned)&fault_div;
     vectors[VEC_BAD_OPCODE] = (unsigned)&fault_opcode;
     vectors[VEC_BAD_FETCH] = (unsigned)&fault_fetch;

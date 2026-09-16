@@ -159,9 +159,11 @@ what `/etc/boot.conf` names: a splash screen, which any key cuts short, then
 the shell ([docs/phase6_plan.md](docs/phase6_plan.md)). `ls /bin` lists what it can run: `mkdir`, `cp`,
 `mv`, `rm` and the other file commands, `graph` — the graphing
 calculator — `img FILE.bmp`, which shows an image (`-s` stretches it to
-the screen), and `explorer`, the file explorer you drive with the mouse,
+the screen), `explorer`, the file explorer you drive with the mouse,
 which opens what you click with the program `/etc/explorer.conf` names for it
-([docs/explorer.md](docs/explorer.md)); in all of them, Esc or Ctrl+C comes
+([docs/explorer.md](docs/explorer.md)), and `pgs`, which runs `.pgs` scripts —
+variables, `$(a command)`, `if`, `while` and `for`
+([docs/pgs.md](docs/pgs.md)); in all of them, Esc or Ctrl+C comes
 back to the prompt ([docs/kernel.md](docs/kernel.md)). The prompt is the file
 `/etc/shell_header.conf` ([docs/shell.md](docs/shell.md)). Installing erases the hard disk,
 hence `--disk disks/os.img` rather than the `disks/hdd.img` your programs
@@ -258,7 +260,7 @@ firmware/bios2.c      second-stage BIOS, built for 0x07000000: boot screen, coun
 firmware/boot.asm     boot sector: the code in block 0 of a bootable disk
 user/                 example programs (.asm and .c alike)
 user/os/              PigeonOS: the disc's project file, the installer, the kernel
-user/os/bin/          the shell and its programs: sh, ls, cat, echo, mkdir, rmdir, rm, mv, cp, clear, more, edit, img, explorer
+user/os/bin/          the shell and its programs: sh, ls, cat, echo, mkdir, rmdir, rm, mv, cp, clear, more, edit, img, explorer, pgs
 user/os/etc/          the installed system's settings: shell_header.conf the prompt, boot.conf what boots, explorer.conf what opens what
 lib/pigeon/           the C libraries: mem, string, stdio, stdarg, fs, cd, display, input, math, sys
 compiler/             pigeon-cc: C -> assembly
@@ -441,6 +443,7 @@ python3 tests/test_kernel.py      # the kernel and its shell, booted from a test
 python3 tests/test_stdio.py       # printf's conversions, checked against Python's %
 python3 tests/test_edit.py        # edit, the mini nano, driven through the kernel
 python3 tests/test_explorer.py    # explorer, the file explorer: its rules, menus and clicks
+python3 tests/test_pgs.py         # pgs, the shell's scripts: variables, $( ), blocks
 python3 tests/test_pfs.py         # PigeonFS disk images, through tools/pfs.py
 python3 tests/test_fs.py          # PigeonFS on the guest, checked against pfs.py
 python3 -m pytest                 # all of them, in parallel: pip install -r requirements-dev.txt

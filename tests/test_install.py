@@ -34,12 +34,13 @@ from test_project import EXAMPLE, quiet                               # noqa: E4
 
 MiB = 1 << 20
 PROMPT = "ENTER install   ESC cancel"
-INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt", "/etc/shell_header.conf",
+INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt", "/docs/hello.pgs",
+             "/etc/shell_header.conf",
              "/etc/boot.conf", "/etc/explorer.conf", "/etc/bmp/pigeon.bmp",
              "/etc/bmp/eye-mask.bmp"] + [
     f"/bin/{name}.bin" for name in ("sh", "ls", "cat", "echo", "mkdir", "rmdir", "rm", "mv",
                                     "cp", "clear", "more", "edit", "graph", "cube", "files", "corrupter", "splash", "reboot", "img",
-                                    "explorer")]
+                                    "explorer", "pgs")]
 
 # The example disc, built once for the whole file.
 _BUILD = tempfile.TemporaryDirectory()

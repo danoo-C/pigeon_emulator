@@ -370,7 +370,11 @@ def test_a_program_that_wanders_off_leaves_the_explorer_where_it_was():
         open_selected(c, "docs/")
         assert wait(c, lambda rows: rows[HEADER].startswith("2:/docs")), body(c)
         open_selected(c, "note.txt")
-        assert wait_console(c, lambda rows: "wandered" in "".join(rows)), c.rows()
+        # The pause, not the program's own line: the kernel empties the key
+        # queue when a program ends, so a key pressed while it still runs is
+        # thrown away and the pause would wait for one that never comes.
+        assert wait_console(c, lambda rows: "[ press any key ]" in "".join(rows)), c.rows()
+        assert "wandered" in "".join(c.rows()), c.rows()
         c.type("x")
         assert wait(c, lambda rows: rows[HEADER].startswith("2:/docs")), screen(c)[HEADER]
 

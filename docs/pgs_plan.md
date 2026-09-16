@@ -1,7 +1,7 @@
 # `pgs`: shell scripts for PigeonOS
 
-> **Status: final plan, 2026-09-16; every question is decided
-> ([§8](#8-your-answers), [§9](#9-follow-ups)). Nothing is built yet.** A small scripting language,
+> **Status: built, 2026-09-16 ([§10](#10-as-built)); every question is
+> decided ([§8](#8-your-answers), [§9](#9-follow-ups)).** A small scripting language,
 > `/bin/pgs.bin`, running `.pgs` files: variables, commands, the output of a
 > command captured into a variable, and enough control flow to make those
 > worth having. The capture is the one part the kernel has to grow a system
@@ -212,9 +212,15 @@ $out = $(ls /bin)           ;; a command's output (§4.5)
 - **The name is `$word` on the left of a `=`.** A line whose first word starts
   with `$` and whose second word is `=` is an assignment; everything else is a
   command. That one rule is the whole grammar of it (Q2).
-- **Names** are letters, digits and `_`, at most 31 characters. **Values** are
-  text, at most 255 bytes, and there are at most 32 variables (Q11). A value
-  that doesn't fit is an error on that line, not a quiet cut.
+- **Names** are letters, digits and `_`, at most 31 characters. There are at
+  most 32 variables (Q11). A value that doesn't fit is an error on that line,
+  not a quiet cut.
+  *(Corrected while building: values were to be 255 bytes, which cannot hold
+  a captured listing -- and `$files = $(ls /bin)` then `for $line in $files`
+  is §3's own example. A value is now a block on the heap, as big as a
+  capture: 8 KB. Setting one frees the block it had, and `mem.c`'s first fit
+  hands the same block back when the new value fits it, which is what a loop
+  assigning one variable does *(checked: `mem.c` `malloc`)*.)*
 - **An unset variable stops the script** — `hello.pgs:4: no such variable:
   $nmae` (Q5). There is no `set -u` to turn on here, and a typo that silently
   becomes an empty string is the most expensive bug a small language can
@@ -654,3 +660,39 @@ All six answered on 2026-09-16, in this file.
 
   **Decided (you):** `STDOUT` only; a program's complaints stay visible
   (§4.5).
+
+---
+
+## 10. As built
+
+Built to this plan on 2026-09-16, in the order §5 gives.
+
+- **`exec_out()` in the kernel,** one system call and one test at the top of
+  `k_write`: `syscall.h` slot 20, a wrapper in `kernel.asm`, `k_exec_out` in
+  `kernel.c`, `sys.c` and `sys.h`. The depth rule gave the grandchildren case
+  for free, as §4.5 hoped, and a capture inside a capture needed nothing
+  beyond saving and restoring the one that was running. Ten tests in
+  `tests/test_kernel.py`.
+- **`user/os/bin/pgs.c`,** about 1,100 lines: lines and `;;` comments, `#`
+  settings, the splitter that expands each word on its own, variables, `$( )`,
+  `if`/`else`/`end`, `while`/`end`, `for ... in`/`end`, `let`, `break`, and
+  the builtins `echo`, `cd`, `pwd`, `read` and `exit`. Built, it is 156 KB.
+- **`user/os/bin/sh.c` gained six lines and four:** `/etc/startup.pgs` before
+  the first prompt, and a `.pgs` typed at the prompt run as a script (F1, F3).
+- **The disc** gains `/bin/pgs.bin` and `/docs/hello.pgs`, and
+  `/etc/explorer.conf` gains `/bin/pgs.bin = .pgs`: 30 files, which the
+  install and project tests count.
+- **`tests/test_pgs.py`, 72 tests,** driving real scripts through the kernel
+  at the prompt: every kind of test, blocks inside blocks, a branch that is
+  skipped without being expanded, `for` over a listing and over nothing,
+  `break`, `let`'s sums and its two mistakes, every message in §4.8 with its
+  line, the settings, `read`, the startup script running for every shell, and
+  a `.pgs` typed by name.
+- **Three things the build corrected**, each marked where it belongs: values
+  are 8 KB on the heap rather than 255 bytes (§4.3), `read` is a keyword
+  rather than a builtin, since its `$name` must not be expanded before it is
+  set, and a command run as a *test* never triggers `# stop-on-error` --
+  `if moan` is a question, not a failure.
+- **Not built here:** redirection ([redirect_plan.md](redirect_plan.md)) and
+  the graphics mode ([graphics_plan.md](graphics_plan.md)), both planned and
+  both after this.

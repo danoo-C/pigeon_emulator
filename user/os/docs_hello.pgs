@@ -1,0 +1,26 @@
+;; /docs/hello.pgs -- what a .pgs script looks like (docs/pgs.md).
+;; Run it with `pgs /docs/hello.pgs`, or click it in the explorer.
+
+$name = world
+echo hello $name
+
+$here = $(pwd)
+echo you are in $here
+
+$files = $(ls /bin)
+echo /bin holds:
+for $one in $files
+    echo "  " $one
+end
+
+$i = 0
+while $i -lt 3
+    echo tick $i
+    let $i = $i + 1
+end
+
+if -e /etc/explorer.conf
+    echo the explorer has its rules
+else
+    echo no explorer.conf here
+end

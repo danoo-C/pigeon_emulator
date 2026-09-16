@@ -30,7 +30,8 @@
 #define SYS_SETCOMPLETE 17
 #define SYS_SETBREAK 18
 #define SYS_PAGING   19
-#define SYS_COUNT    20
+#define SYS_EXEC_OUT 20
+#define SYS_COUNT    21
 
 /* --- the console: every program starts with these; open() gives 3 up -- */
 #define STDIN  0
