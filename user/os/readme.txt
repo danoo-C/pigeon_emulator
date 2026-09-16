@@ -20,6 +20,9 @@ Try, at the prompt:
   files     (Esc comes back)
   img /etc/bmp/pigeon.bmp
             (Esc comes back)
+  pgs /docs/hello.pgs
+            a script; read it
+            with more or edit
   explorer  the file explorer:
             click about, Esc
             comes back. What it

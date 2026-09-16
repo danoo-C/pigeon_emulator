@@ -29,7 +29,11 @@
  * complaints go to STDERR for the same reason: a script whose output is
  * being captured can still say what went wrong.
  *
- * Everything that isn't a builtin is a program, found as the shell finds
+ * if/else/end, while/end and for/end make the shapes; `let` does whole-number
+ * sums, `break` leaves the innermost loop, and `read $name` takes a typed
+ * line. echo, cd, pwd and exit are the builtins.
+ *
+ * Everything else is a program, found as the shell finds
  * one: /bin/<name>.bin first, then <name>.bin where you are, with the .bin
  * added when it is missing. A program that fails doesn't stop the script --
  * that is what $? is for -- unless the script said `# stop-on-error`.
@@ -84,6 +88,25 @@ static char *sink;                  /* where it goes, and how much room    */
 static char *sink_end;
 
 static char value_buf[VALUE_MAX];   /* an assignment's value, expanded     */
+
+/* Blocks: if/else/end, while/end and for/end, innermost last. A line runs
+ * when every block it is inside is running, so `break` is one flag and the
+ * lines after it are skipped without looking at them. */
+#define BLOCKS  8
+#define B_IF    1
+#define B_WHILE 2
+#define B_FOR   3
+
+static int b_kind[BLOCKS];
+static int b_run[BLOCKS];           /* 1 while this block's body runs      */
+static int b_taken[BLOCKS];         /* an if whose branch ran: else is not */
+static int b_line[BLOCKS];          /* the line it started on              */
+static char b_name[BLOCKS * NAME_MAX];  /* a for's variable                */
+static char *b_text[BLOCKS];        /* a for's value, on the heap          */
+static unsigned b_pos[BLOCKS];      /* how far through it we are           */
+static int n_blocks;
+static int jump_to;                 /* the line to carry on from, or -1    */
+static int in_test;                 /* a command being run as a test       */
 
 /* --- saying what went wrong ----------------------------------------------
  *
@@ -459,6 +482,167 @@ static int expand_value(char *src, char *dst, unsigned room) {
     return 1;
 }
 
+/* --- blocks ---------------------------------------------------------------------- */
+
+/* A line runs only when every block around it is running. */
+static int live_below(int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        if (b_run[i] == 0) return 0;
+    }
+    return 1;
+}
+
+static int live(void) {
+    return live_below(n_blocks);
+}
+
+static int push_block(int kind, int run, int line) {
+    if (n_blocks == BLOCKS) {
+        fail("blocks inside blocks, more than 8 deep", "");
+        return 0;
+    }
+    b_kind[n_blocks] = kind;
+    b_run[n_blocks] = run;
+    b_taken[n_blocks] = run;
+    b_line[n_blocks] = line;
+    b_text[n_blocks] = NULL;
+    b_pos[n_blocks] = 0u;
+    b_name[(unsigned)n_blocks * NAME_MAX] = 0;
+    n_blocks++;
+    return 1;
+}
+
+static void pop_block(void) {
+    n_blocks--;
+    if (b_text[n_blocks] != NULL) {
+        free(b_text[n_blocks]);
+        b_text[n_blocks] = NULL;
+    }
+}
+
+/* --- what a test says ------------------------------------------------------------
+ *
+ * `$a == b`, the numbers with -lt -le -gt -ge, `-e -d -f path`, or a command,
+ * which is true when its status is 0. The words are already expanded. */
+
+static int compare(char *a, char *op, char *b, int *out) {
+    int left;
+    int right;
+    if (strcmp(op, "==") == 0) {
+        *out = (strcmp(a, b) == 0) ? 1 : 0;
+        return 1;
+    }
+    if (strcmp(op, "!=") == 0) {
+        *out = (strcmp(a, b) != 0) ? 1 : 0;
+        return 1;
+    }
+    left = atoi(a);
+    right = atoi(b);
+    if (strcmp(op, "-lt") == 0) { *out = (left < right) ? 1 : 0; return 1; }
+    if (strcmp(op, "-le") == 0) { *out = (left <= right) ? 1 : 0; return 1; }
+    if (strcmp(op, "-gt") == 0) { *out = (left > right) ? 1 : 0; return 1; }
+    if (strcmp(op, "-ge") == 0) { *out = (left >= right) ? 1 : 0; return 1; }
+    return 0;
+}
+
+static void run_command_words(int count, char **w);
+
+static int test_words(int count, char **w, int *out) {
+    sys_stat_t st;
+    int kind;
+
+    if (count == 0) {
+        fail("nothing to test", "");
+        return 0;
+    }
+    if (count >= 2 && (strcmp(w[0], "-e") == 0 || strcmp(w[0], "-d") == 0
+                       || strcmp(w[0], "-f") == 0)) {
+        kind = (stat(w[1], &st) >= 0) ? (int)st.type : 0;
+        if (strcmp(w[0], "-e") == 0) *out = (kind != 0) ? 1 : 0;
+        else if (strcmp(w[0], "-d") == 0) *out = (kind == S_DIR) ? 1 : 0;
+        else *out = (kind == S_FILE) ? 1 : 0;
+        return 1;
+    }
+    if (count == 3 && compare(w[0], w[1], w[2], out) != 0) return 1;
+    if (count == 2 && (strcmp(w[1], "==") == 0 || strcmp(w[1], "!=") == 0
+                       || strcmp(w[1], "-lt") == 0 || strcmp(w[1], "-le") == 0
+                       || strcmp(w[1], "-gt") == 0 || strcmp(w[1], "-ge") == 0)) {
+        fail("nothing to compare with: ", w[1]);
+        return 0;
+    }
+    run_command_words(count, w);                /* a command: 0 is true */
+    *out = (last_status == 0) ? 1 : 0;
+    return 1;
+}
+
+/* --- let: whole numbers, + - * / % and ( ) as their own words --------------------- */
+
+static int expr_at(int *i, int count, char **w, int *out);
+
+static int factor_at(int *i, int count, char **w, int *out) {
+    char *word;
+    if (*i >= count) {
+        fail("the sum stops short", "");
+        return 0;
+    }
+    word = w[*i];
+    if (strcmp(word, "(") == 0) {
+        *i = *i + 1;
+        if (!expr_at(i, count, w, out)) return 0;
+        if (*i >= count || strcmp(w[*i], ")") != 0) {
+            fail("no ) in the sum", "");
+            return 0;
+        }
+        *i = *i + 1;
+        return 1;
+    }
+    if (*word != '-' && *word != '+' && isdigit((int)*word) == 0) {
+        fail("not a number: ", word);
+        return 0;
+    }
+    if ((*word == '-' || *word == '+') && isdigit((int)word[1]) == 0) {
+        fail("not a number: ", word);
+        return 0;
+    }
+    *out = atoi(word);
+    *i = *i + 1;
+    return 1;
+}
+
+static int term_at(int *i, int count, char **w, int *out) {
+    int right;
+    if (!factor_at(i, count, w, out)) return 0;
+    while (*i < count && (strcmp(w[*i], "*") == 0 || strcmp(w[*i], "/") == 0
+                          || strcmp(w[*i], "%") == 0)) {
+        char *op = w[*i];
+        *i = *i + 1;
+        if (!factor_at(i, count, w, &right)) return 0;
+        if (strcmp(op, "*") == 0) {
+            *out = *out * right;
+        } else {
+            if (right == 0) {
+                fail("divide by zero", "");
+                return 0;
+            }
+            *out = (strcmp(op, "/") == 0) ? (*out / right) : (*out % right);
+        }
+    }
+    return 1;
+}
+
+static int expr_at(int *i, int count, char **w, int *out) {
+    int right;
+    if (!term_at(i, count, w, out)) return 0;
+    while (*i < count && (strcmp(w[*i], "+") == 0 || strcmp(w[*i], "-") == 0)) {
+        char *op = w[*i];
+        *i = *i + 1;
+        if (!term_at(i, count, w, &right)) return 0;
+        *out = (strcmp(op, "+") == 0) ? (*out + right) : (*out - right);
+    }
+    return 1;
+}
+
 /* --- the builtins -------------------------------------------------------------- */
 
 static void run_builtin(int count, char **w) {
@@ -557,38 +741,271 @@ static int assignment(char *line) {
     return 1;
 }
 
-static void run_command(char *line) {
+static void run_command_words(int count, char **w) {
     char path[PATH];
-    int count;
+    char number[STR_UTOA_MAX];
 
-    count = split_words(line, words, store, STORE, WORDS, 0);
-    if (count <= 0) return;             /* nothing, or a mistake already said */
+    if (count <= 0) return;
     started = 1;
-    if (is_builtin(words[0])) {
-        run_builtin(count, words);
-    } else if (!find_program(words[0], path)) {
-        warn(words[0], ": not found");
+    if (is_builtin(w[0])) {
+        run_builtin(count, w);
+    } else if (!find_program(w[0], path)) {
+        warn(w[0], ": not found");
         last_status = E_NOENT;
     } else {
-        last_status = exec(path, count, words);
+        last_status = exec(path, count, w);
     }
-    if (last_status != 0 && stop_on_error != 0 && running != 0) {
-        char number[STR_UTOA_MAX];
+    /* A test asks a command how it went; it is never the end of the script. */
+    if (last_status != 0 && stop_on_error != 0 && in_test == 0 && running != 0) {
         itoa(last_status, number);
         fail("stopped: ", number);
         status_out = last_status;
     }
 }
 
+static void run_command(char *line) {
+    int count = split_words(line, words, store, STORE, WORDS, 0);
+    if (count < 0) return;
+    run_command_words(count, words);
+}
+
+/* --- the block words -------------------------------------------------------------
+ *
+ * These are read before anything is expanded, so a block inside a part that
+ * isn't running is still counted, and an unset name in a branch that never
+ * runs is not a mistake. */
+
+/* The next line of a for's value into its variable: 0 when there are none
+ * left. */
+static int next_item(int b) {
+    char *value = b_text[b];
+    unsigned start;
+    unsigned stop;
+    char save;
+    int ok;
+
+    if (value == NULL) return 0;
+    start = b_pos[b];
+    if (value[start] == 0) return 0;
+    stop = start;
+    while (value[stop] != 0 && value[stop] != '\n') stop++;
+    save = value[stop];
+    value[stop] = 0;
+    ok = var_set(b_name + (unsigned)b * NAME_MAX, value + start);
+    value[stop] = save;
+    b_pos[b] = (save == 0) ? stop : stop + 1u;
+    return ok;
+}
+
+static int ask(char *rest, int *yes) {
+    int count = split_words(rest, words, store, STORE, WORDS, 0);
+    int ok;
+    if (count < 0) return 0;
+    in_test = 1;
+    ok = test_words(count, words, yes);
+    in_test = 0;
+    return ok;
+}
+
+static void do_if(char *rest) {
+    int parent = live();
+    int yes = 0;
+    if (parent != 0 && !ask(rest, &yes)) return;
+    push_block(B_IF, (parent != 0 && yes != 0) ? 1 : 0, (int)at - 1);
+}
+
+static void do_else(void) {
+    int top = n_blocks - 1;
+    if (n_blocks == 0 || b_kind[top] != B_IF) {
+        fail("an else with no if", "");
+        return;
+    }
+    b_run[top] = (live_below(top) != 0 && b_taken[top] == 0) ? 1 : 0;
+    if (b_run[top] != 0) b_taken[top] = 1;
+}
+
+static void do_while(char *rest) {
+    int parent = live();
+    int yes = 0;
+    if (parent != 0 && !ask(rest, &yes)) return;
+    push_block(B_WHILE, (parent != 0 && yes != 0) ? 1 : 0, (int)at - 1);
+}
+
+/* for $name in VALUE: the value is taken once, and walked a line at a time. */
+static void do_for(char *rest) {
+    char name[NAME_MAX];
+    char *p = trim(rest);
+    char *copy;
+    unsigned n = 0u;
+    int parent = live();
+    int here;
+
+    if (*p != '$') {
+        fail("for wants $name in ...", "");
+        return;
+    }
+    p++;
+    while (is_name_char((int)p[n]) != 0 && n + 1u < NAME_MAX) {
+        name[n] = p[n];
+        n++;
+    }
+    name[n] = 0;
+    p = p + n;
+    while (*p == ' ' || *p == '\t') p++;
+    if (n == 0u || p[0] != 'i' || p[1] != 'n' || (p[2] != ' ' && p[2] != '\t')) {
+        fail("for wants $name in ...", "");
+        return;
+    }
+    p = p + 2;
+    while (*p == ' ' || *p == '\t') p++;    /* not part of the first line */
+    if (parent == 0) {
+        push_block(B_FOR, 0, (int)at - 1);
+        return;
+    }
+    if (!expand_value(p, value_buf, VALUE_MAX)) return;
+    if (!push_block(B_FOR, 1, (int)at - 1)) return;
+    here = n_blocks - 1;
+    copy = (char *)malloc(strlen(value_buf) + 1u);
+    if (copy == NULL) {
+        pop_block();
+        fail("no room for what for walks", "");
+        return;
+    }
+    strcpy(copy, value_buf);
+    b_text[here] = copy;
+    strlcpy(b_name + (unsigned)here * NAME_MAX, name, NAME_MAX);
+    if (next_item(here) == 0) b_run[here] = 0;      /* nothing to walk: no turns */
+}
+
+static void do_end(void) {
+    int top = n_blocks - 1;
+
+    if (n_blocks == 0) {
+        fail("an end with no if, while or for", "");
+        return;
+    }
+    if (b_kind[top] == B_WHILE && b_run[top] != 0) {
+        jump_to = b_line[top];              /* the while line again, test and all */
+        pop_block();
+        return;
+    }
+    if (b_kind[top] == B_FOR && b_run[top] != 0 && next_item(top) != 0) {
+        jump_to = b_line[top] + 1;          /* the body again, the value kept */
+        return;
+    }
+    pop_block();
+}
+
+static void do_break(void) {
+    int i;
+    if (live() == 0) return;                /* in a part that isn't running */
+    for (i = n_blocks - 1; i >= 0; i--) {
+        if (b_kind[i] == B_WHILE || b_kind[i] == B_FOR) {
+            b_run[i] = 0;                   /* the rest of the body is skipped,
+                                             * and end will not go round again */
+            return;
+        }
+    }
+    fail("a break outside a while or for", "");
+}
+
+/* let $name = a sum of whole numbers, ( ) their own words. */
+static void do_let(char *rest) {
+    char name[NAME_MAX];
+    char number[STR_UTOA_MAX];
+    char *p = trim(rest);
+    unsigned n = 0u;
+    int count;
+    int i = 0;
+    int value = 0;
+
+    if (*p != '$') {
+        fail("let wants $name = ...", "");
+        return;
+    }
+    p++;
+    while (is_name_char((int)p[n]) != 0 && n + 1u < NAME_MAX) {
+        name[n] = p[n];
+        n++;
+    }
+    name[n] = 0;
+    p = p + n;
+    while (*p == ' ' || *p == '\t') p++;
+    if (n == 0u || *p != '=') {
+        fail("let wants $name = ...", "");
+        return;
+    }
+    p++;
+    count = split_words(p, words, store, STORE, WORDS, 0);
+    if (count < 0) return;
+    if (!expr_at(&i, count, words, &value)) return;
+    if (i != count) {
+        fail("more after the sum: ", words[i]);
+        return;
+    }
+    itoa(value, number);
+    var_set(name, number);
+}
+
+/* read $name: a typed line into a variable. A keyword, not a builtin, for
+ * the same reason let is one -- the name must not be expanded before it is
+ * set, and there is nothing sensible for $(read $x) to mean. */
+static void do_read(char *rest) {
+    char input[256];
+    char *p = trim(rest);
+    int n;
+
+    if (*p != '$' || is_name_char((int)p[1]) == 0) {
+        fail("read wants $name", "");
+        return;
+    }
+    n = read(STDIN, input, sizeof(input) - 1u);
+    if (n < 0) {
+        warn("read: ", sys_strerror(n));
+        last_status = 1;
+        return;
+    }
+    input[n] = 0;
+    while (n > 0 && (input[n - 1] == '\n' || input[n - 1] == '\r')) {
+        n--;
+        input[n] = 0;
+    }
+    if (var_set(p + 1, input)) last_status = 0;
+}
+
+/* The first word of a line, as written. Keywords are short, so a longer one
+ * is cut and matches nothing, which is all this is for. */
+static void first_word(char *line, char *out, unsigned room) {
+    unsigned n = 0u;
+    while (line[n] != 0 && line[n] != ' ' && line[n] != '\t' && n + 1u < room) {
+        out[n] = line[n];
+        n++;
+    }
+    out[n] = 0;
+}
+
 static void do_line(char *line) {
+    char word[16];
     char *p = trim(line);
+    char *rest;
 
     if (*p == 0) return;
     if (p[0] == ';' && p[1] == ';') return;
-    if (*p == '#') {
-        directive(p);
-        return;
-    }
+    first_word(p, word, sizeof(word));
+    rest = p + strlen(word);
+    while (*rest == ' ' || *rest == '\t') rest++;
+
+    if (strcmp(word, "if") == 0) { started = 1; do_if(rest); return; }
+    if (strcmp(word, "else") == 0) { do_else(); return; }
+    if (strcmp(word, "end") == 0) { do_end(); return; }
+    if (strcmp(word, "while") == 0) { started = 1; do_while(rest); return; }
+    if (strcmp(word, "for") == 0) { started = 1; do_for(rest); return; }
+    if (strcmp(word, "break") == 0) { do_break(); return; }
+
+    if (live() == 0) return;            /* skipped, and not even expanded */
+    if (*p == '#') { directive(p); return; }
+    if (strcmp(word, "let") == 0) { started = 1; do_let(rest); return; }
+    if (strcmp(word, "read") == 0) { started = 1; do_read(rest); return; }
     if (assignment(p)) return;
     run_command(p);
 }
@@ -666,9 +1083,19 @@ int main(int argc, char **argv) {
     if (!split_lines()) return 1;
 
     running = 1;
-    for (i = 0; i < n_lines && running != 0; i++) {
+    i = 0;
+    while (i < n_lines && running != 0) {
         at = (unsigned)i + 1u;
+        jump_to = -1;
         do_line(lines[i]);
+        i = (jump_to >= 0) ? jump_to : i + 1;
+    }
+    if (running != 0 && n_blocks > 0) {
+        char *kind = "for";
+        if (b_kind[n_blocks - 1] == B_IF) kind = "if";
+        if (b_kind[n_blocks - 1] == B_WHILE) kind = "while";
+        at = (unsigned)b_line[n_blocks - 1] + 1u;
+        fail("no end for this ", kind);
     }
     return status_out;
 }

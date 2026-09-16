@@ -1,7 +1,7 @@
 # `pgs`: shell scripts for PigeonOS
 
-> **Status: final plan, 2026-09-16; every question is decided
-> ([§8](#8-your-answers), [§9](#9-follow-ups)). Nothing is built yet.** A small scripting language,
+> **Status: built, 2026-09-16 ([§10](#10-as-built)); every question is
+> decided ([§8](#8-your-answers), [§9](#9-follow-ups)).** A small scripting language,
 > `/bin/pgs.bin`, running `.pgs` files: variables, commands, the output of a
 > command captured into a variable, and enough control flow to make those
 > worth having. The capture is the one part the kernel has to grow a system
@@ -660,3 +660,39 @@ All six answered on 2026-09-16, in this file.
 
   **Decided (you):** `STDOUT` only; a program's complaints stay visible
   (§4.5).
+
+---
+
+## 10. As built
+
+Built to this plan on 2026-09-16, in the order §5 gives.
+
+- **`exec_out()` in the kernel,** one system call and one test at the top of
+  `k_write`: `syscall.h` slot 20, a wrapper in `kernel.asm`, `k_exec_out` in
+  `kernel.c`, `sys.c` and `sys.h`. The depth rule gave the grandchildren case
+  for free, as §4.5 hoped, and a capture inside a capture needed nothing
+  beyond saving and restoring the one that was running. Ten tests in
+  `tests/test_kernel.py`.
+- **`user/os/bin/pgs.c`,** about 1,100 lines: lines and `;;` comments, `#`
+  settings, the splitter that expands each word on its own, variables, `$( )`,
+  `if`/`else`/`end`, `while`/`end`, `for ... in`/`end`, `let`, `break`, and
+  the builtins `echo`, `cd`, `pwd`, `read` and `exit`. Built, it is 156 KB.
+- **`user/os/bin/sh.c` gained six lines and four:** `/etc/startup.pgs` before
+  the first prompt, and a `.pgs` typed at the prompt run as a script (F1, F3).
+- **The disc** gains `/bin/pgs.bin` and `/docs/hello.pgs`, and
+  `/etc/explorer.conf` gains `/bin/pgs.bin = .pgs`: 30 files, which the
+  install and project tests count.
+- **`tests/test_pgs.py`, 72 tests,** driving real scripts through the kernel
+  at the prompt: every kind of test, blocks inside blocks, a branch that is
+  skipped without being expanded, `for` over a listing and over nothing,
+  `break`, `let`'s sums and its two mistakes, every message in §4.8 with its
+  line, the settings, `read`, the startup script running for every shell, and
+  a `.pgs` typed by name.
+- **Three things the build corrected**, each marked where it belongs: values
+  are 8 KB on the heap rather than 255 bytes (§4.3), `read` is a keyword
+  rather than a builtin, since its `$name` must not be expanded before it is
+  set, and a command run as a *test* never triggers `# stop-on-error` --
+  `if moan` is a question, not a failure.
+- **Not built here:** redirection ([redirect_plan.md](redirect_plan.md)) and
+  the graphics mode ([graphics_plan.md](graphics_plan.md)), both planned and
+  both after this.

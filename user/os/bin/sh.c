@@ -15,8 +15,12 @@
  *
  * A name with no '/' is /bin/<name>.bin, then <name>.bin here; a name with
  * one is a path. The .bin is added when it is missing (docs/kernel_exec.md
- * Q4). exit ends the shell, and the kernel starts it again, which reads the
- * prompt file again too.
+ * Q4). A name ending in .pgs that is a file here is a script, and runs
+ * through /bin/pgs.bin (docs/pgs.md). exit ends the shell, and the kernel
+ * starts it again, which reads the prompt file again too.
+ *
+ * /etc/startup.pgs, when there is one, is run before the first prompt --
+ * every shell runs it, the way every shell reads .bashrc.
  */
 #include <pigeon/stdio.h>
 #include <pigeon/string.h>
@@ -26,6 +30,8 @@
 #define WORDS       16
 #define PATH        264
 #define PROMPT_FILE "/etc/shell_header.conf"
+#define STARTUP     "/etc/startup.pgs"     /* a script every shell runs first */
+#define PGS         "/bin/pgs.bin"
 #define PROMPT_MAX  255u            /* bytes in each line of it */
 #define FILE_MAX    1024u
 #define BUILT_IN    "``RED````CWD``> ``RESET``"
@@ -216,12 +222,35 @@ static void show_prompt(char *text) {
     }
 }
 
+/* A .pgs is a script, run by /bin/pgs.bin: the one thing the shell knows
+ * about the language (docs/pgs_plan.md F1). Its own name is the argument, so
+ * `setup.pgs` at the prompt is `pgs setup.pgs`. */
+static int is_script(char *name) {
+    unsigned n = strlen(name);
+    return (n > 4u && strcmp(name + n - 4u, ".pgs") == 0) ? 1 : 0;
+}
+
+/* /etc/startup.pgs, before the first prompt, when it is there. Every shell
+ * runs it, as .bashrc is run by every shell: a shell has no way to know
+ * whether it is the first one (docs/pgs_plan.md 4.9). */
+static void run_startup(void) {
+    char *argv[3];
+    sys_stat_t st;
+    if (stat(STARTUP, &st) < 0 || st.type != S_FILE) return;
+    if (stat(PGS, &st) < 0 || st.type != S_FILE) return;
+    argv[0] = "pgs";
+    argv[1] = STARTUP;
+    argv[2] = (char *)0;
+    exec(PGS, 2, argv);
+}
+
 static void help(void) {
     print("cd DIR   go to a directory\n");
     print("exit     end the shell\n");
     print("help     this\n");
-    print("Anything else runs a program;\n");
-    print("ls /bin shows them.\n");
+    print("Anything else runs a program,\n");
+    print("or a .pgs script; ls /bin\n");
+    print("shows the programs.\n");
 }
 
 int main(int argc, char **argv) {
@@ -235,6 +264,7 @@ int main(int argc, char **argv) {
 
     setcomplete("/bin", "cd exit help");   /* for Tab: find() looks in /bin first */
     load_prompt();
+    run_startup();
     shown = prompt;
     if (first[0] != 0) shown = first;       /* line 2, once */
     while (1) {
@@ -262,7 +292,14 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        if (!find(words[0], path)) {
+        if (is_script(words[0]) && is_file(words[0])) {
+            /* setup.pgs -> pgs setup.pgs, with the rest of the line after it */
+            for (n = count; n > 0; n--) words[n] = words[n - 1];
+            words[0] = "pgs";
+            count++;
+            words[count] = (char *)0;
+            strlcpy(path, PGS, PATH);
+        } else if (!find(words[0], path)) {
             printf("%s: not found\n", words[0]);
             last_status = 1;
             continue;
