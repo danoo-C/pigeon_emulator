@@ -20,6 +20,11 @@ Try, at the prompt:
   files     (Esc comes back)
   img /etc/bmp/pigeon.bmp
             (Esc comes back)
+  explorer  the file explorer:
+            click about, Esc
+            comes back. What it
+            opens files with is
+            /etc/explorer.conf
   help
 
 The prompt is the file

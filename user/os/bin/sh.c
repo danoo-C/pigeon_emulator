@@ -28,7 +28,7 @@
 #define PROMPT_FILE "/etc/shell_header.conf"
 #define PROMPT_MAX  255u            /* bytes in each line of it */
 #define FILE_MAX    1024u
-#define BUILT_IN    "``CWD``> "
+#define BUILT_IN    "``RED````CWD``> ``RESET``"
 
 static char prompt[256];            /* line 1: the prompt */
 static char first[256];             /* line 2: the first prompt, or empty */

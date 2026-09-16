@@ -625,7 +625,12 @@ def row_of(console, text):
 
 @contextlib.contextmanager
 def terminal():
-    with booted(extra=[("/bin/term.bin", standin("term"))]) as c:
+    """The shell with a colorless prompt. Its built-in one is red (sh.c), and
+    these tests read the ink of the row under a program's output, which is a
+    prompt: they are about the console and what the kernel resets, not about
+    what the shell paints its prompt."""
+    with booted(extra=[("/bin/term.bin", standin("term")),
+                       ("/etc/shell_header.conf", b"``CWD``> ")]) as c:
         assert c.ready(), c.rows()
         yield c
 
@@ -1682,12 +1687,15 @@ YELLOW = 0xFFFFFF00
 
 def splash_files(ms, image=True, eyes=True):
     """The real splash, /etc/bmp/pigeon.bmp and eye-mask.bmp unless left out,
-    and a boot.conf showing it for `ms`."""
+    and a boot.conf showing it for `ms` -- or, for None, one that doesn't name
+    it at all, so it can be run from the prompt with no argument."""
     extra = [("/bin/splash.bin", shell_program("splash"))]
     if image:
         extra.append(("/etc/bmp/pigeon.bmp", PIGEON_BMP.read_bytes()))
     if eyes:
         extra.append(("/etc/bmp/eye-mask.bmp", EYE_MASK_BMP.read_bytes()))
+    if ms is None:
+        return "startup = /bin/sh.bin\n", extra
     return f"splash = /bin/splash.bin\nsplash_ms = {ms}\nstartup = /bin/sh.bin\n", extra
 
 
@@ -1739,23 +1747,19 @@ def blend(base, t):
     return 0xFF000000 | channels[0] << 16 | channels[1] << 8 | channels[2]
 
 
-def test_the_eyes_flash_yellow_smoothly_and_nothing_else_moves():
-    """At every look: outside eye-mask.bmp's white the screen is the pigeon,
-    and every eye pixel is its own colour blended toward yellow by the one
-    amount, which over 2.5 s comes near both ends."""
+def eye_amounts(screens):
+    """How far the eyes are blended toward yellow, 0 to 256, in each screen
+    that has them drawn: outside eye-mask.bmp's white the screen must be the
+    pigeon, and every eye pixel its own colour blended by the one amount."""
     from test_bmp import STRETCH, reference
     size = DISPLAY_W * DISPLAY_H
     pigeon = reference(PIGEON_BMP.read_bytes(), DISPLAY_W, DISPLAY_H, STRETCH)
     mask = reference(EYE_MASK_BMP.read_bytes(), DISPLAY_W, DISPLAY_H, STRETCH)
     eyes = [i for i in range(size) if (mask[i] >> 8 & 255) >= 128]
-    assert len(eyes) == 36, len(eyes)
+    assert len(eyes) == 28, len(eyes)
     others = [i for i in range(size) if (mask[i] >> 8 & 255) < 128]
-    conf, extra = splash_files(2500)
-    with booted_with(conf, extra) as c:
-        seen = watch_splash(c, every=True)
-        assert c.ready(), c.rows()
     amounts = []
-    for screen in seen["screens"]:
+    for screen in screens:
         words = struct.unpack(f"<{size}I", screen)
         assert all(words[i] == pigeon[i] for i in others), "a pixel outside the eyes changed"
         if all(words[i] == pigeon[i] for i in eyes):
@@ -1763,10 +1767,27 @@ def test_the_eyes_flash_yellow_smoothly_and_nothing_else_moves():
         found = [t for t in range(257) if all(words[i] == blend(pigeon[i], t) for i in eyes)]
         assert found, "the eyes aren't one blend of their own colours and yellow"
         amounts.append(found[0])
+    return amounts
+
+
+def flash_turns(amounts):
+    """How often the eyes turned from brightening to dimming, or back."""
+    steps = [b - a for a, b in zip(amounts, amounts[1:]) if b != a]
+    return sum(1 for a, b in zip(steps, steps[1:]) if (a > 0) != (b > 0))
+
+
+def test_the_eyes_flash_yellow_smoothly_and_nothing_else_moves():
+    """At every look the eyes are one blend of their own colours and yellow,
+    which over 2.5 s comes near both ends, and nothing else on the screen
+    moves."""
+    conf, extra = splash_files(2500)
+    with booted_with(conf, extra) as c:
+        seen = watch_splash(c, every=True)
+        assert c.ready(), c.rows()
+    amounts = eye_amounts(seen["screens"])
     assert len(set(amounts)) >= 10, f"only {sorted(set(amounts))}: not a smooth flash"
     assert max(amounts) >= 230 and min(amounts) <= 26, f"from {min(amounts)} to {max(amounts)} of 256"
-    steps = [b - a for a, b in zip(amounts, amounts[1:]) if b != a]
-    turns = sum(1 for a, b in zip(steps, steps[1:]) if (a > 0) != (b > 0))
+    turns = flash_turns(amounts)
     assert turns >= 3, f"the brightness turned {turns} times in 2.5 s: not a flash a second ({amounts})"
 
 
@@ -1800,6 +1821,37 @@ def test_a_key_ends_the_splash_early_and_never_reaches_the_shell():
         assert c.rows()[:2] == ["PigeonOS", "2:/> _"], "the key reached the shell: " + repr(c.rows())
     assert seen["screen"] == pigeon_screen()
     assert seen["looks"] <= 3, f"{seen['looks']} looks at the timer after the key"
+
+
+def test_with_no_argument_the_splash_has_no_countdown_and_waits_for_a_key():
+    """Run from the prompt with no length: it holds the pigeon well past the
+    longest countdown there is, 60,000 ms, and only a key ends it -- which the
+    kernel then keeps from the shell, as it does the key that cuts boot's
+    splash short."""
+    conf, extra = splash_files(None)
+    with booted_with(conf, extra) as c:
+        assert c.ready(), c.rows()
+        seen = watch_splash(c, key_at=1400)      # about 70 s on the stepping clock
+        assert c.command("splash") == [], c.rows()
+        assert last_row(c.rows()) == "2:/> _", "the key reached the shell: " + repr(c.rows())
+        said = serial(c)
+    assert seen["screen"] == pigeon_screen(), "the screen wasn't pigeon.bmp while the splash waited"
+    assert 1400 <= seen["looks"] <= 1410, f"{seen['looks']} looks: it counted down after all"
+    assert "[kernel] /bin/splash.bin ended: 0" in said, said
+
+
+def test_with_no_countdown_the_eyes_go_on_flashing():
+    """Without a length the timer is started again for each flash, so the eyes
+    must keep brightening and dimming: about three flashes over the 3 s here."""
+    conf, extra = splash_files(None)
+    with booted_with(conf, extra) as c:
+        assert c.ready(), c.rows()
+        seen = watch_splash(c, key_at=60, every=True)
+        assert c.command("splash") == [], c.rows()
+    amounts = eye_amounts(seen["screens"])
+    assert max(amounts) >= 230 and min(amounts) <= 26, f"from {min(amounts)} to {max(amounts)} of 256"
+    turns = flash_turns(amounts)
+    assert turns >= 3, f"the brightness turned {turns} times in 3 s: the flashes stopped ({amounts})"
 
 
 def test_a_splash_image_that_will_not_load_is_reported_and_boot_carries_on():
