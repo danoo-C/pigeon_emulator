@@ -274,6 +274,16 @@ w_paging:
     EI
     RET
 
+w_keepscreen:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_keepscreen
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
 w_exit:
     DI
     MOV C, #__g_in_kernel

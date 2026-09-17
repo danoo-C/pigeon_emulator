@@ -80,7 +80,8 @@ void disp_vline(unsigned x, unsigned y, unsigned h, color_t c);
 void disp_rect(unsigned x, unsigned y, unsigned w, unsigned h, color_t c);
 void disp_frame(unsigned x, unsigned y, unsigned w, unsigned h, color_t c);
 void disp_line(int x0, int y0, int x1, int y1, color_t c);
-void disp_circle(int cx, int cy, int r, color_t c);
+void disp_circle(int cx, int cy, int r, color_t c);   /* an outline */
+void disp_disc(int cx, int cy, int r, color_t c);     /* filled     */
 
 /* Move the pixel rows from y to y + h by dy rows, up when dy is negative,
  * and fill the rows left behind with bg; what moves out of the band is

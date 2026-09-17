@@ -154,10 +154,12 @@ the shell ([docs/phase6_plan.md](docs/phase6_plan.md)). `ls /bin` lists what it 
 calculator — `img FILE.bmp`, which shows an image (`-s` stretches it to
 the screen), `explorer`, the file explorer you drive with the mouse,
 which opens what you click with the program `/etc/explorer.conf` names for it
-([docs/explorer.md](docs/explorer.md)), and `pgs`, which runs `.pgs` scripts —
+([docs/explorer.md](docs/explorer.md)), `pgs`, which runs `.pgs` scripts —
 variables, `$(a command)`, `if`, `while` and `for`
-([docs/pgs.md](docs/pgs.md)); in all of them, Esc or Ctrl+C comes
-back to the prompt ([docs/kernel.md](docs/kernel.md)). The prompt is the file
+([docs/pgs.md](docs/pgs.md)) — and `graphics`, which draws shapes, text and
+images, as many to a call as you write, on a screen a script can keep to
+itself ([docs/graphics.md](docs/graphics.md)); in all of them, Esc or Ctrl+C
+comes back to the prompt ([docs/kernel.md](docs/kernel.md)). The prompt is the file
 `/etc/shell_header.conf` ([docs/shell.md](docs/shell.md)). Installing erases the hard disk,
 hence `--disk disks/os.img` rather than the `disks/hdd.img` your programs
 save to ([docs/os_cd.md](docs/os_cd.md) §8).

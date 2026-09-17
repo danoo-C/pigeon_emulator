@@ -1,0 +1,28 @@
+;; /docs/logo.pgs -- a script that owns the screen (docs/graphics.md).
+;; Run it with `pgs /docs/logo.pgs`, or click it in the explorer.
+;;
+;; `# graphics` means a black screen with no console on it, kept between the
+;; commands below. Nothing but graphics.bin paints there: an echo in this
+;; script goes nowhere, which is not a mistake -- take this line out and the
+;; words come back.
+# graphics
+
+;; The sky, the sun and the ground, in one call: loading the program costs
+;; far more than any drawing it does, so a call carries as many shapes as it
+;; can. A line that ends in \ carries on to the next.
+graphics -clear 0xFF101018 \
+         -disc 150 22 12 0xFFFFCC33 \
+         -rect 0 82 192 26 0xFF1E3A1E \
+         -frame 3 3 186 102 0xFF3A3A4A
+
+;; The bird and its name, drawn over what is already there -- which is what
+;; `# graphics` is for: without it the console would be back by now.
+;; -wait holds the picture until a key and says which one ended it, so $( )
+;; hands the script the key. 27 is Esc.
+$key = $(graphics -f /etc/bmp/pigeon.bmp 60 14 72 62 STRETCH \
+                  -text 68 90 PigeonOS 0xFFFFFFFF \
+                  -wait)
+
+graphics -clear 0xFF000000 \
+         -text 4 50 "that was key $key" 0xFF88FF88 \
+         -wait

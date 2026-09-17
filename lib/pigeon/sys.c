@@ -96,6 +96,8 @@ int setbreak(int on) { return ((sys_int)SYS_SLOT(SYS_SETBREAK))(on); }
 
 int paging(int on) { return ((sys_int)SYS_SLOT(SYS_PAGING))(on); }
 
+int keepscreen(int on) { return ((sys_int)SYS_SLOT(SYS_KEEPSCREEN))(on); }
+
 void print(char *s) {
     unsigned n = 0u;
     while (s[n] != 0) n++;

@@ -8,6 +8,9 @@
  *
  *     ;; what this script does
  *     # stop-on-error                a program that fails ends the script
+ *     # graphics                     the script owns the screen: black, kept
+ *                                    between commands, and nothing but
+ *                                    graphics.bin paints on it
  *
  *     $name = world                  a value: the rest of the line, expanded
  *     $files = $(ls /bin)            what a program printed, instead
@@ -41,11 +44,16 @@
  * added when it is missing. A program that fails doesn't stop the script --
  * that is what $? is for -- unless the script said `# stop-on-error`.
  *
+ * A line that ends in `\` is joined to the next one -- a drawing call with
+ * a shape to a line is what it was added for. Inside quotes a backslash is
+ * text, and the line numbers in messages stay the script's own.
+ *
  * Values live on the heap, one block each, at most 8 KB: the same size as a
  * capture, so a listing can be kept in a variable. Setting one frees the
  * block it had, and mem.c's first fit hands the same block back when the new
  * value fits it, which is what a loop assigning the same variable does.
  */
+#include <pigeon/display.h>
 #include <pigeon/mem.h>
 #include <pigeon/stdio.h>
 #include <pigeon/string.h>
@@ -57,22 +65,30 @@
 #define NAME_MAX    32u             /* 31 and a terminator                 */
 #define VALUE_MAX   8192u           /* as big as a capture                 */
 #define CAPTURE     8192u
-#define WORDS       16              /* words in a command                  */
+#define WORDS       32              /* words in a command: a graphics call
+                                     * is six of them a shape             */
 #define STORE       16384u          /* all the words of one line, packed   */
 #define INNER_STORE 2048u           /* and of the command inside a $( )    */
 #define PATH        264
 
 static char text[SCRIPT_MAX + 1u];  /* the script, read whole              */
 static char *lines[LINES_MAX];
+static unsigned line_no[LINES_MAX]; /* the script's own numbering, which a
+                                     * continued line does not change      */
 static int n_lines;
 
 static char *script;                /* its path, as it was given to us     */
-static unsigned at;                 /* the line being run, from 1          */
+static unsigned at;                 /* the line being run, as the script
+                                     * numbers it: what a message says     */
+static int at_index;                /* and which of lines[] that is        */
 static int running;
 static int status_out;              /* what pgs itself returns             */
 static int last_status;             /* $?                                  */
 static int started;                 /* a command has been run: no more settings */
 static int stop_on_error;           /* # stop-on-error                     */
+static int graphics_mode;           /* # graphics                          */
+static int screen_kept;             /* and the screen is ours already      */
+static char gfx_bin[64];            /* where a command's output goes then  */
 
 static char **args;                 /* $0 is the script, $1.. its arguments */
 static int n_args;
@@ -126,9 +142,31 @@ static void say(char *s) {
     write(STDERR, s, strlen(s));
 }
 
+/* `# graphics`: the screen the script owns. Black, and kept between the
+ * programs it runs -- the kernel paints its console back over the picture
+ * after each one otherwise (docs/graphics_plan.md 4.3). Once, before the
+ * first command, so a header with a mistake in it does not blank the
+ * screen on its way out. */
+static void graphics_start(void) {
+    if (graphics_mode == 0 || screen_kept != 0) return;
+    screen_kept = 1;
+    keepscreen(1);
+    disp_clear(BLACK);
+}
+
+/* And off again, for a message that has to be read. The console comes back
+ * when pgs ends, whatever happens, since the kernel clears the screen with
+ * the program that kept it. */
+static void graphics_off(void) {
+    if (graphics_mode == 0) return;
+    graphics_mode = 0;
+    if (screen_kept != 0) keepscreen(0);
+}
+
 /* "hello.pgs:7: no such variable: $nmae", and the script stops. */
 static void fail(char *what, char *detail) {
     char line[512];
+    graphics_off();                 /* a message is read on a console */
     snprintf(line, sizeof(line), "%s:%u: %s%s\n", script, at, what, detail);
     say(line);
     running = 0;
@@ -164,6 +202,11 @@ static void out(char *s) {
     unsigned n = strlen(s);
     unsigned i;
     if (capturing == 0) {
+        /* Nothing paints on a graphics script's screen: an echo goes where
+         * a program's output goes, which is nowhere, and is not a mistake
+         * -- a script gets run both ways while it is being written. A
+         * redirection still writes its file. */
+        if (graphics_mode != 0 && out_fd < 0) return;
         /* A builtin's own words: to the file when the line redirects, since
          * `echo hello > note.txt` is a large part of why a script wants > at
          * all (docs/redirect_plan.md 3.3). */
@@ -725,6 +768,10 @@ static void directive(char *line) {
         stop_on_error = 1;
         return;
     }
+    if (strcmp(word, "graphics") == 0) {
+        graphics_mode = 1;
+        return;
+    }
     fail("no such setting: ", word);
 }
 
@@ -851,6 +898,7 @@ static void run_command_words(int count, char **w) {
 
     if (count <= 0) return;
     started = 1;
+    graphics_start();
     if (!take_redirects(&count, w)) return;
     if (count == 0) {
         fail("nothing to run", "");
@@ -884,6 +932,10 @@ static void run_command_words(int count, char **w) {
             /* find_program has been past the program, so it is the file. */
             warn((redirect_in != NULL) ? redirect_in : redirect_out, ": not found");
         }
+    } else if (graphics_mode != 0) {
+        /* Its output into a buffer that is thrown away: on a screen the
+         * script owns, only graphics.bin draws (docs/graphics_plan.md 4.2). */
+        last_status = exec_out(path, count, w, gfx_bin, sizeof(gfx_bin));
     } else {
         last_status = exec(path, count, w);
     }
@@ -943,7 +995,7 @@ static void do_if(char *rest) {
     int parent = live();
     int yes = 0;
     if (parent != 0 && !ask(rest, &yes)) return;
-    push_block(B_IF, (parent != 0 && yes != 0) ? 1 : 0, (int)at - 1);
+    push_block(B_IF, (parent != 0 && yes != 0) ? 1 : 0, at_index);
 }
 
 static void do_else(void) {
@@ -960,7 +1012,7 @@ static void do_while(char *rest) {
     int parent = live();
     int yes = 0;
     if (parent != 0 && !ask(rest, &yes)) return;
-    push_block(B_WHILE, (parent != 0 && yes != 0) ? 1 : 0, (int)at - 1);
+    push_block(B_WHILE, (parent != 0 && yes != 0) ? 1 : 0, at_index);
 }
 
 /* for $name in VALUE: the value is taken once, and walked a line at a time. */
@@ -991,11 +1043,11 @@ static void do_for(char *rest) {
     p = p + 2;
     while (*p == ' ' || *p == '\t') p++;    /* not part of the first line */
     if (parent == 0) {
-        push_block(B_FOR, 0, (int)at - 1);
+        push_block(B_FOR, 0, at_index);
         return;
     }
     if (!expand_value(p, value_buf, VALUE_MAX)) return;
-    if (!push_block(B_FOR, 1, (int)at - 1)) return;
+    if (!push_block(B_FOR, 1, at_index)) return;
     here = n_blocks - 1;
     copy = (char *)malloc(strlen(value_buf) + 1u);
     if (copy == NULL) {
@@ -1179,10 +1231,46 @@ static int load_script(char *path) {
     return 1;
 }
 
+/* The end of the line that starts at p: the first newline not held open by
+ * a backslash. Each one it passes becomes two spaces, so the words split as
+ * though the whole thing had been typed on one line and every other byte
+ * stays where it is -- the lines are cut in place. *physical counts what it
+ * swallowed, so a message still names the line the script has.
+ *
+ * A backslash inside quotes is text, and so is one before anything but a
+ * newline: `\$`, `\\` and `\"` are the script's own escapes. A comment runs
+ * to the end of its line, and cannot continue it. */
+static char *logical_end(char *p, unsigned *physical) {
+    int quoted = 0;
+
+    while (*p != 0) {
+        if (*p == '\n') return p;
+        if (quoted == 0 && p[0] == ';' && p[1] == ';') {
+            while (*p != 0 && *p != '\n') p++;
+            return p;
+        }
+        if (*p == '"') {
+            quoted = (quoted == 0) ? 1 : 0;
+            p++;
+        } else if (*p == '\\' && p[1] == '\n' && quoted == 0) {
+            p[0] = ' ';
+            p[1] = ' ';
+            *physical = *physical + 1u;
+            p = p + 2;
+        } else if (*p == '\\' && p[1] != 0 && p[1] != '\n') {
+            p = p + 2;                  /* an escape, never over a newline */
+        } else {
+            p++;
+        }
+    }
+    return p;
+}
+
 /* The script's lines, cut in place. A last line with no newline counts. */
 static int split_lines(void) {
     char *p = text;
-    char *nl;
+    char *end;
+    unsigned physical = 1u;
 
     n_lines = 0;
     while (1) {
@@ -1191,11 +1279,13 @@ static int split_lines(void) {
             return 0;
         }
         lines[n_lines] = p;
+        line_no[n_lines] = physical;
         n_lines++;
-        nl = strchr(p, '\n');
-        if (nl == NULL) break;
-        *nl = 0;
-        p = nl + 1;
+        end = logical_end(p, &physical);
+        if (*end == 0) break;
+        *end = 0;
+        physical++;
+        p = end + 1;
         if (*p == 0) break;
     }
     return 1;
@@ -1218,7 +1308,8 @@ int main(int argc, char **argv) {
     running = 1;
     i = 0;
     while (i < n_lines && running != 0) {
-        at = (unsigned)i + 1u;
+        at = line_no[i];
+        at_index = i;
         jump_to = -1;
         do_line(lines[i]);
         i = (jump_to >= 0) ? jump_to : i + 1;
@@ -1227,7 +1318,7 @@ int main(int argc, char **argv) {
         char *kind = "for";
         if (b_kind[n_blocks - 1] == B_IF) kind = "if";
         if (b_kind[n_blocks - 1] == B_WHILE) kind = "while";
-        at = (unsigned)b_line[n_blocks - 1] + 1u;
+        at = line_no[b_line[n_blocks - 1]];
         fail("no end for this ", kind);
     }
     return status_out;

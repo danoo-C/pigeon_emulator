@@ -31,7 +31,9 @@
 #include <pigeon/sys.h>
 
 #define LINE        256
-#define WORDS       16
+#define WORDS       32          /* a line is 255 characters, and one drawing
+                                    * call fills it: graphics takes six words a
+                                    * shape (docs/graphics.md) */
 #define PATH        264
 #define PROMPT_FILE "/etc/shell_header.conf"
 #define STARTUP     "/etc/startup.pgs"     /* a script every shell runs first */

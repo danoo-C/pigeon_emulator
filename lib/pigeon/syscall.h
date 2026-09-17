@@ -32,7 +32,8 @@
 #define SYS_PAGING   19
 #define SYS_EXEC_OUT 20
 #define SYS_EXEC_IO  21
-#define SYS_COUNT    22
+#define SYS_KEEPSCREEN 22
+#define SYS_COUNT    23
 
 /* --- exec_io(): what happens to the file it writes into ----------------- */
 #define R_TRUNC  0          /* >  : written beside it, and put in place at the end */

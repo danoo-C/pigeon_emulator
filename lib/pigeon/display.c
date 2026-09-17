@@ -283,6 +283,33 @@ void disp_circle(int cx, int cy, int r, color_t c) {
     }
 }
 
+/* One row of a disc. Both ends are clipped here, while they are still
+ * signed: disp_hline's coordinates are unsigned, so a span starting left
+ * of the screen would arrive as a huge x and draw nothing at all. */
+static void disp_span(int x0, int x1, int y, color_t c) {
+    if (y < 0 || x1 < 0) return;
+    if (x0 < 0) x0 = 0;
+    disp_hline((unsigned)x0, (unsigned)y, (unsigned)(x1 - x0 + 1), c);
+}
+
+/* A filled circle: disp_circle's algorithm with spans instead of points,
+ * so the eight octant pixels become four rows between their two x's.
+ * The rows overlap where the octants meet, which costs a few writes and
+ * nothing else -- a pixel is stored, not blended. */
+void disp_disc(int cx, int cy, int r, color_t c) {
+    int x = r; int y = 0; int err = 1 - r;
+    if (r < 0) return;
+    while (x >= y) {
+        disp_span(cx - x, cx + x, cy + y, c);
+        disp_span(cx - x, cx + x, cy - y, c);
+        disp_span(cx - y, cx + y, cy + x, c);
+        disp_span(cx - y, cx + y, cy - x, c);
+        y++;
+        if (err < 0) { err = err + 2 * y + 1; }
+        else         { x--; err = err + 2 * (y - x) + 1; }
+    }
+}
+
 /* 5x7 font, printable ASCII 0x20..0x7E, in a 6x8 cell. One byte per
  * glyph row; only the top 5 bits are used, tested high to low. Rows 0..6
  * are the body and row 6 is the baseline, so uppercase and digits are a

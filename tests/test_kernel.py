@@ -1112,6 +1112,68 @@ def test_break_is_on_for_a_child_and_off_again_for_its_parent():
         assert "spin: stopped" in lines(c.rows()), c.rows()
 
 
+# --- keepscreen: docs/graphics_plan.md 4.3 ---------------------------------------
+
+def with_keeper(*extra):
+    return [("/bin/keeper.bin", standin("keeper")),
+            ("/bin/crasher.bin", standin("crasher"))] + list(extra)
+
+
+def test_the_console_is_not_redrawn_after_a_child_while_the_screen_is_kept():
+    """The whole point: a script drawing in several calls would otherwise have
+    its picture wiped between one and the next."""
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        assert c.command("keeper 1") == ["kept 0"], c.rows()
+
+
+def test_without_it_the_console_lands_on_top_of_the_picture():
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        assert c.command("keeper 0") == ["wiped 0"], c.rows()
+
+
+def test_the_programs_it_runs_inherit_it():
+    """The deeper keeper asks for nothing -- keepscreen(0) -- and still keeps
+    its picture, because the program that ran it owns the screen. It says so
+    too: what it was, for a program that wants to put it back."""
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        assert c.command("keeper 1 deep") == ["kept 1", "kept 0"], c.rows()
+
+
+def test_the_console_comes_back_when_the_program_that_kept_it_ends():
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        c.command("keeper 1")
+        fb = c.machine.display_io.snapshot()
+        assert rgb_at(fb, DISPLAY_W - 1, DISPLAY_H - 2) != (255, 0, 255), \
+            "the pixel outlived the program that drew it"
+
+
+def test_a_program_that_faults_does_not_leave_the_console_invisible():
+    """keepscreen is cleared however the program ends, so the next one is
+    tidied up after as usual: the following keeper asks for nothing and its
+    pixel is wiped."""
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        assert c.command("crasher") == ["crasher: divided by zero"], c.rows()
+        assert c.command("keeper 0") == ["wiped 0"], c.rows()
+
+
+def test_turning_it_off_deeper_down_leaves_its_owner_holding_it():
+    """keepscreen(0) ends it only for the program that turned it on, as
+    paging does: the child asks for it off and the screen is still kept."""
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        assert c.command("keeper 1 deep")[0] == "kept 1", c.rows()
+
+
+def rgb_at(fb, x, y):
+    i = (y * DISPLAY_W + x) * 4
+    return (fb[i + 2], fb[i + 1], fb[i])
+
+
 # --- paging and more: docs/phase4b_plan.md step 6 ---------------------------------
 
 def inverse_cell(fb, row, col):
@@ -1564,6 +1626,39 @@ def test_an_exec_costs_its_two_lines_and_no_more():
 # --- exec_out: a program's output into a buffer (docs/pgs_plan.md 4.5) ------------
 
 # A program that says what arguments it was given: "[args][a][b]".
+STANDINS["keeper"] = r"""#include <pigeon/display.h>
+#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+
+/* keeper ON [DEEP]: keepscreen as ON says, a pixel in a corner the console
+ * has no text in, a child run, and then whether the pixel is still there --
+ * which is to say whether the console was painted back over it. DEEP makes
+ * the child another keeper, so a program that inherits the screen is a
+ * program that ran one. */
+int main(int argc, char **argv) {
+    char *child[2];
+    int was;
+
+    was = keepscreen(argv[1][0] == '1');
+    disp_set(DISP_W - 1u, DISP_H - 2u, 0xFFFF00FF);
+    child[0] = "keeper";
+    child[1] = "0";
+    if (argc > 2) exec("/bin/keeper.bin", 2, child);
+    else exec("/bin/echo.bin", 1, child);
+    printf("%s %d\n",
+           disp_get(DISP_W - 1u, DISP_H - 2u) == 0xFFFF00FF ? "kept" : "wiped", was);
+    return 0;
+}
+"""
+
+STANDINS["crasher"] = r"""#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    int zero = argc - 1;
+    keepscreen(1);
+    return 1 / zero;            /* it ends holding the screen */
+}
+"""
+
 STANDINS["args"] = r"""#include <pigeon/sys.h>
 int main(int argc, char **argv) {
     int i;

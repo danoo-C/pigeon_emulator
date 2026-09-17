@@ -49,13 +49,27 @@ again inside it, down to the kernel's eight programs.
 
 ## 2. Lines
 
-- **One command a line.** No `;`, no `&&`, no line continuation.
+- **One command a line.** No `;`, no `&&`.
+- **A line that ends in `\` carries on to the next one,** the two joined
+  with a space where the backslash and the newline were. Inside quotes a backslash is text, a `\\`
+  is an escaped backslash rather than a continuation, and a `;;` comment
+  cannot continue a line. The line numbers in messages stay the script's own,
+  so a continuation does not shift everything under it. A drawing call is
+  what it was added for ([graphics.md](graphics.md) §4).
 - **`;;` starts a comment,** to the end of the line, anywhere outside quotes.
-- **A line starting with `#` is a setting,** not a comment: `# stop-on-error`
-  is the only one so far. Settings live in the header, before the first
-  command, and a word `pgs` doesn't know is a mistake with its line number —
-  a silently ignored typo is what the language is built to avoid.
+- **A line starting with `#` is a setting,** not a comment. There are two:
+
+  | | |
+  |---|---|
+  | `# stop-on-error` | a program that fails ends the script |
+  | `# graphics` | the script owns the screen ([graphics.md](graphics.md) §4) |
+
+  Settings live in the header, before the first command, and a word `pgs`
+  doesn't know is a mistake with its line number — a silently ignored typo is
+  what the language is built to avoid.
 - **A line is a command,** an assignment, a setting, a block word, or blank.
+- **Up to 32 words a command,** `graphics` included; it was 16 until one
+  drawing call needed more.
 
 ## 3. Words
 
@@ -68,7 +82,7 @@ edit $file                  ;; edit gets one argument, not two
 ```
 
 `\$` is a dollar, `\\` a backslash, `\"` a quote. There are no single quotes.
-At most 16 words a command, and the words of one line together at most 16 KB.
+At most 32 words a command, and the words of one line together at most 16 KB.
 
 ## 4. Variables
 

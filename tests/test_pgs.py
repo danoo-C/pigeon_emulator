@@ -11,8 +11,10 @@ Console.output() cannot tell the difference.
     python3 tests/test_pgs.py      (or: python3 -m pytest tests/)
 """
 import contextlib
+import io
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +26,11 @@ from _runner import cases, run_module                                   # noqa: 
 from pfs import PgfsImage                                               # noqa: E402
 from test_kernel import (                                              # noqa: E402
     COLS, PROMPT, STANDINS, Console, last_row, make_disk, shell_program, standin)
+from test_graphics import (                                            # noqa: E402
+    GREEN, GREEN_RGB, MAGENTA, MAGENTA_RGB, MARK, held, press_until, rgb, type_in)
+from test_kernel import PIGEON_BMP                                     # noqa: E402
+from emulator.devices.keycodes import KEY_ESC                          # noqa: E402
+from emulator.memory_map import DISPLAY_H, DISPLAY_W                   # noqa: E402
 
 # A program with something to say and a status to go with it.
 STANDINS["moan"] = r"""#include <pigeon/sys.h>
@@ -414,6 +421,49 @@ def test_the_discs_own_example_script_runs():
     assert "/s.pgs:" not in text, f"the script complained: {text}"
 
 
+def test_the_discs_own_drawing_script_runs():
+    """user/os/docs_logo.pgs is /docs/logo.pgs on the installed disc: the
+    example of a `# graphics` script, with a continued line, an image and a
+    key taken from -wait. It holds the screen twice, so it is read by
+    watching the screen and pressing Esc, as a person would."""
+    source = (REPO_ROOT / "user" / "os" / "docs_logo.pgs").read_text()
+    with drawing(source, files=[("/etc/bmp/pigeon.bmp", PIGEON_BMP.read_bytes())]) as c:
+        type_in(c, "pgs /s.pgs\n")
+        assert wait_for(c, lambda fb: white_in(fb, 88, 98) > 5), \
+            f"the logo never finished drawing: {c.rows()}"
+        fb = c.machine.display_io.snapshot()
+        assert rgb(fb, 150, 22) == (255, 204, 51), "the sun, from the first call"
+        assert rgb(fb, 5, 95) == (30, 58, 30), "the ground, from the same one"
+        # 27 is what the script then puts on the screen, in green
+        assert press_until(c, KEY_ESC,
+                           lambda: any_pixel(c.machine.display_io.snapshot(),
+                                             (136, 255, 136))), \
+            f"the key it was given never came back: {c.rows()}"
+        assert press_until(c, KEY_ESC, lambda: PROMPT.match(last_row(c.rows()))), c.rows()
+        text = "".join(row.ljust(COLS) for row in c.rows())
+    assert "/s.pgs:" not in text, f"the script complained: {text}"
+
+
+def wait_for(c, wanted, seconds=90):
+    give_up = time.time() + seconds
+    while time.time() < give_up:
+        with contextlib.redirect_stdout(io.StringIO()):
+            c.machine.run(deadline=time.time() + 0.1)
+        if wanted(c.machine.display_io.snapshot()):
+            return True
+    return False
+
+
+def white_in(fb, top, bottom):
+    return sum(1 for y in range(top, bottom) for x in range(DISPLAY_W)
+               if rgb(fb, x, y) == (255, 255, 255))
+
+
+def any_pixel(fb, colour):
+    return any(rgb(fb, x, y) == colour
+               for y in range(0, DISPLAY_H, 2) for x in range(0, DISPLAY_W, 2))
+
+
 # --- > >> and < in a script (docs/redirect_plan.md 3.3) ---------------------------------
 
 def test_a_program_writes_into_a_file():
@@ -469,6 +519,115 @@ def test_a_value_may_hold_the_marker_in_quotes():
 def test_a_file_that_cannot_be_written_is_said():
     text = screen("args one > /nodir/out.txt\n", programs=["args"])
     assert "/s.pgs:1: /nodir/out.txt: not found" in text, text
+
+
+# --- # graphics: a script that owns the screen (docs/graphics_plan.md 4.2) -------
+
+def drawing(source, files=(), programs=()):
+    """The kernel with graphics.bin on its disk, and the script on /s.pgs."""
+    return booted_with(source, files=[("/bin/graphics.bin", shell_program("graphics"))]
+                       + list(files), programs=programs)
+
+
+def ends_holding(body):
+    """A `# graphics` script that draws `body` and then holds the screen with
+    the mark on it, which is what a test waits for."""
+    return "# graphics\n" + body + f"graphics -px 191 107 {MARK} -wait\n"
+
+
+def not_black(fb):
+    return sum(1 for y in range(DISPLAY_H) for x in range(DISPLAY_W)
+               if rgb(fb, x, y) != (0, 0, 0))
+
+
+def test_a_graphics_script_keeps_what_it_drew_between_commands():
+    """The whole point of the mode: without it the kernel paints its console
+    back over the first call's picture before the second one runs."""
+    with drawing(ends_holding(f"graphics -rect 0 0 20 20 {MAGENTA}\n"
+                              f"graphics -disc 96 54 20 {GREEN}\n")) as c:
+        fb, shown = held(c, "pgs /s.pgs")
+        assert rgb(fb, 5, 5) == MAGENTA_RGB, "the first call's rect was wiped"
+        assert rgb(fb, 96, 54) == GREEN_RGB, "the second call's disc is missing"
+        assert shown == [], shown
+
+
+def test_the_screen_starts_black():
+    """pgs clears it once, before the first command, so the console the shell
+    left behind is not sitting under the picture."""
+    with drawing(ends_holding("")) as c:
+        fb, _ = held(c, "pgs /s.pgs")
+        assert not_black(fb) == 1, "something other than the mark is on the screen"
+
+
+def test_an_echo_in_a_graphics_script_paints_nothing_and_is_not_a_mistake():
+    """A script gets run both ways while it is being written; where the words
+    went is in docs/pgs.md."""
+    with drawing(ends_holding("echo hello\n")) as c:
+        fb, shown = held(c, "pgs /s.pgs")
+        assert not_black(fb) == 1, "echo painted on the screen"
+        assert shown == [], shown
+
+
+def test_a_program_in_a_graphics_script_paints_nothing_either():
+    with drawing(ends_holding("moan\n"), programs=["moan"]) as c:
+        fb, shown = held(c, "pgs /s.pgs")
+        assert not_black(fb) == 1, "a program's output painted on the screen"
+        assert shown == [], shown
+
+
+def test_a_mistake_turns_the_mode_off_so_the_message_can_be_read():
+    with drawing("# graphics\n"
+                 f"graphics -rect 0 0 20 20 {MAGENTA}\n"
+                 "echo $nmae\n") as c:
+        shown = c.command("pgs /s.pgs")
+        assert "/s.pgs:3: no such variable: $nmae" in " ".join(shown), shown
+        fb = c.machine.display_io.snapshot()
+        assert rgb(fb, 5, 5) != MAGENTA_RGB, "the picture outlived the script"
+
+
+def test_without_the_setting_the_console_comes_back_between_commands():
+    """The same script without `# graphics`: the kernel redraws after each
+    program, so only the last call's picture is there to be held."""
+    with drawing(f"graphics -rect 0 0 20 20 {MAGENTA}\n"
+                 f"graphics -disc 96 54 20 {GREEN} -px 191 107 {MARK} -wait\n") as c:
+        fb, _ = held(c, "pgs /s.pgs")
+        assert rgb(fb, 96, 54) == GREEN_RGB
+        assert rgb(fb, 5, 5) != MAGENTA_RGB, "the first picture should be gone"
+
+
+# --- a line continued with \\ : docs/graphics_plan.md step 4 ---------------------
+
+def test_a_line_that_ends_in_a_backslash_is_one_command():
+    """What a drawing call with a shape a line is for."""
+    source = "args one \\\n  two three\n"
+    assert run(source, programs=["args"]) == ["[args][one][two][three]"]
+
+
+def test_a_continued_line_does_not_shift_the_line_numbers():
+    """The lines are joined, but a message still names the line the script
+    has: a continuation that moved every number after it would be worse than
+    no continuation at all."""
+    source = "echo one \\\ntwo\necho $nmae\n"
+    text = screen(source)
+    assert "/s.pgs:3: no such variable: $nmae" in text, text
+
+
+def test_an_escaped_backslash_at_the_end_is_not_a_continuation():
+    source = "echo a\\\\\necho b\n"
+    assert run(source) == ["a\\", "b"]
+
+
+def test_a_comment_cannot_continue_a_line():
+    source = "echo a ;; note \\\necho b\n"
+    assert run(source) == ["a", "b"]
+
+
+def test_a_backslash_inside_quotes_is_not_a_continuation():
+    """Inside quotes a backslash is text, so the newline ends the line as it
+    would anywhere else -- and the quote left open says so, which is how you
+    can tell the next line was not swallowed into this one."""
+    text = screen('echo "a \\\necho b\n')
+    assert '/s.pgs:1: a " with no " after it' in text, text
 
 
 if __name__ == "__main__":

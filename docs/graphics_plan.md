@@ -1,9 +1,10 @@
 # `# graphics`: scripts that own the screen, and `graphics.bin`
 
-> **Status: final plan, 2026-09-16; every question is decided
+> **Status: built, 2026-09-17 ([§8](#8-as-built)); every question is decided
 > ([§7](#7-your-answers)). Written because [pgs_plan.md](pgs_plan.md)'s F4
 > asked for it, and built after `pgs` and after
-> [redirect_plan.md](redirect_plan.md).** Your idea, from pgs_plan.md's Q13: a
+> [redirect_plan.md](redirect_plan.md); the manual is
+> [graphics.md](graphics.md).** Your idea, from pgs_plan.md's Q13: a
 > script that says `# graphics` gets the screen to itself, black and without
 > a console on it, and draws on it by running `graphics.bin`. Facts marked
 > *(checked)* were read in the code; the rest is reasoned.
@@ -309,3 +310,69 @@ Answered in this file on 2026-09-16.
    is the one line long enough to want it, §3's example uses it, and it is
    about ten lines in `pgs`'s line reader. `pgs` ships without it until then,
    as [pgs_plan.md](pgs_plan.md) §4.2 says.
+
+---
+
+## 8. As built
+
+Built to this plan on 2026-09-17, in the order §5 gives. Six things it
+corrected or had to add.
+
+- **A line had to hold more words.** The shell and `pgs` split a command into
+  at most **16** words, `argv[0]` included -- and §3's own example is 26.
+  `graphics` spends six words on a shape, so the one call that carries five
+  of them could not be typed. Both are now **32** *(`sh.c`, `pgs.c`; the
+  words point into the line either way, so it costs two pointer arrays)*. It
+  is in [shell.md](shell.md) §5 and [pgs.md](pgs.md) §2, since it is the
+  first thing a long drawing call runs into.
+- **`-wait` empties the key queue before it waits.** The kernel's line editor
+  reads key *events* and the shell reads *characters*, and those are two
+  queues: the Enter that started the command is still sitting in the event
+  queue when `graphics` starts, and would have ended the wait at once. `img`
+  never noticed because it waits for Esc in particular.
+- **`-f` is checked in the check pass, with `bmp_info`.** §4.1 said a wrong
+  operation draws nothing; a file that is missing or is not a BMP is the
+  likeliest mistake of all, and `bmp_info` reads only the header, so it is
+  checked with the rest and `graphics -clear ... -f /nope.bmp ...` clears
+  nothing. Only the heap failing can now stop a list part-way. Six numbers in
+  a row being easy to miscount, a `-f` with a width or a height of nothing
+  says which of the two it is.
+- **The near edges are clipped here, the far ones by the library.**
+  `disp_rect` and `disp_hline` take unsigned coordinates, so a shape starting
+  left of or above the screen would wrap to a huge one and vanish whole.
+  `graphics` clips those two edges while they are still signed, `disp_disc`
+  does the same for its spans, and `-frame` is four `disp_line`s for the same
+  reason. `-rect -5 -5 20 20` draws the corner that is on the screen.
+- **A continued line keeps the script's own line numbers.** Joining two lines
+  into one would have shifted every message under it by one. `pgs` keeps
+  `line_no[]` beside `lines[]`, so `logical_end()` can swallow as many
+  newlines as the backslashes ask for and `hello.pgs:7:` still means line 7.
+  Also: a `;;` comment cannot continue a line, and a backslash inside quotes
+  is text -- the newline ends the line, and the quote left open says so.
+- **`graphics`'s own complaints are invisible inside `# graphics`.** They are
+  a program's STDOUT, which the mode captures and throws away (§4.2). `pgs`'s
+  messages are STDERR and are not captured, which is why an error still
+  reaches the console. Run the script without the setting to see what a bad
+  list says.
+
+Step 1's tests went to `tests/test_libs.py`, not `tests/test_display.py`:
+that file tests the display *device*, and the library's shapes are tested
+where the rest of them are.
+
+`/docs/logo.pgs` puts `-wait` in the same call as the drawing it holds, so
+the script is three program loads rather than five, and shows `$( )` taking
+the key from one of them.
+
+Two things the tests had to learn, both worth knowing for the next program
+that draws: a key pressed in the microseconds between the last shape and
+`-wait`'s drain is thrown away, so they press again until it lands; and the
+HID's key-event queue holds 256 edges and drops the oldest, so a command over
+about 120 characters typed in one go loses its head before the kernel reads a
+byte of it.
+
+- **Tests:** 19 in `tests/test_graphics.py` (each operation at the pixel,
+  several in one call, clipping, a mistake anywhere drawing nothing, the
+  messages, images in three modes, `-wait` and the key it reports), 12 in
+  `tests/test_pgs.py` (the mode, the continuation, and the shipped script
+  run), 6 in `tests/test_kernel.py` for `keepscreen`, and 3 in
+  `tests/test_libs.py` for `disp_disc` -- 40 in all.

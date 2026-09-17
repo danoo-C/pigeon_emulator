@@ -74,6 +74,11 @@ int  setbreak(int on);                      /* Ctrl+C as the break for this
 int  paging(int on);                        /* -- more -- after each screen of
                                                this program's output and its
                                                children's, until it ends     */
+int  keepscreen(int on);                    /* the console is not painted back
+                                               over the screen between the
+                                               programs this one runs, so a
+                                               picture drawn in several calls
+                                               stays: what it was            */
 
 /* --- for people ---------------------------------------------------------- */
 void  print(char *s);                       /* a string to STDOUT          */

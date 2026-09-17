@@ -437,6 +437,38 @@ def test_circle_is_centred():
             1, "display.c")
 
 
+def test_disc_is_the_circle_filled():
+    """The same points as the circle, and the centre as well: the one
+    difference between the two, and why both exist."""
+    returns(DISPLAY + "int main(void){ int cx=DISP_W/2, cy=DISP_H/2;"
+                      " disp_disc(cx,cy,10,WHITE);"
+                      " return disp_get(cx+10,cy) && disp_get(cx-10,cy)"
+                      " && disp_get(cx,cy+10) && disp_get(cx,cy)"
+                      " && disp_get(cx+5,cy+5) && !disp_get(cx+12,cy) ? 1 : 0; }",
+            1, "display.c")
+
+
+def test_disc_covers_about_its_area():
+    """pi r^2 within a rasterising margin -- enough to catch a disc drawn
+    as an outline, or one drawing its spans twice as wide."""
+    cpu = run(DISPLAY + "int main(void){ disp_disc(DISP_W/2,DISP_H/2,20,RED);"
+                        " return 0; }", "display.c")
+    drawn = lit_pixels(cpu.ram)
+    assert 1100 < drawn < 1400, f"r=20 drew {drawn} pixels, pi r^2 is 1257"
+
+
+def test_disc_off_the_left_edge_clips():
+    """A span starting at a negative x is clipped while it is still signed.
+    Unclipped it would reach disp_hline as a huge unsigned x, be refused
+    whole, and leave the visible half of the disc unpainted."""
+    returns(DISPLAY + "int main(void){ disp_disc(0,DISP_H/2,10,WHITE);"
+                      " return disp_get(0,DISP_H/2) && disp_get(9,DISP_H/2) ? 1:0; }",
+            1, "display.c")
+    cpu = run(DISPLAY + "int main(void){ disp_disc(-5,-5,10,WHITE); return 0; }",
+              "display.c")
+    assert 0 < lit_pixels(cpu.ram) < 100, "a corner disc draws its corner, and only that"
+
+
 def test_text_draws_something_legible():
     cpu = run(DISPLAY + 'int main(void){ disp_clear(BLACK); disp_text(1,1,"Hi",WHITE);'
                         ' return 0; }', "display.c")

@@ -31,7 +31,7 @@ for (;;) {
 }
 ```
 
-- **Splitting:** at spaces, with double quotes grouping words; up to 16 words.
+- **Splitting:** at spaces, with double quotes grouping words; up to 32 words.
 - **Built-ins:** `cd` (it changes the kernel's current directory, so it can't
   be a program), `exit`, and `help`.
 - **Finding programs:** a name with no `/` is `/bin/<name>.bin`, then
@@ -197,7 +197,8 @@ same keys, not only the shell.
   back through.
 - **History is kept in memory,** so it starts empty at each boot. An empty
   line, or one repeating the last, isn't kept. A line holds up to 255
-  characters.
+  characters and 32 words — the word count was 16 until a `graphics` call,
+  which spends six words a shape, outgrew it ([graphics.md](graphics.md) §6).
 - **Keys typed while a program runs are thrown away when it ends,** so the
   Esc that closes `graph` never reaches the prompt.
 

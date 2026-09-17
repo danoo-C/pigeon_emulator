@@ -121,6 +121,7 @@ extern int w_rename;
 extern int w_setcomplete;
 extern int w_setbreak;
 extern int w_paging;
+extern int w_keepscreen;
 extern int kswallow;
 extern int fault_div;
 extern int fault_opcode;
@@ -205,6 +206,7 @@ int in_file;                    /* STDIN out of this one, a line at a time   */
 int in_file_depth;
 
 unsigned page_owner;            /* the program that turned paging on; 0 none */
+unsigned screen_owner;          /* the program keeping the screen; 0 none */
 unsigned page_rows;             /* rows the output moved down since the last wait */
 unsigned page_counting;         /* 1 while a write's rows count              */
 
@@ -1276,6 +1278,28 @@ int k_paging(int on) {
     return 0;
 }
 
+/* The console is not painted back over the screen between the programs this
+ * one runs, so a script that draws in several calls keeps its picture
+ * (docs/graphics_plan.md 4.3). Paging's shape exactly: the depth that turned
+ * it on owns it, the programs it runs inherit it, and k_run clears it when
+ * that program ends -- so a script that crashes cannot leave the console
+ * invisible. Its own tidy still redraws, which is what brings the console
+ * back when it ends.
+ *
+ * It does not stop a program writing to the console, which still paints
+ * where it writes: a script that wants the screen to itself captures what
+ * it runs. Nor does it move the display, so k_tidy still points that at
+ * DISPLAY_START after a program that flipped pages. */
+int k_keepscreen(int on) {
+    int was = screen_owner != 0u ? 1 : 0;
+    if (on != 0) {
+        screen_owner = (unsigned)depth;
+    } else if (screen_owner == (unsigned)depth) {
+        screen_owner = 0u;
+    }
+    return was;
+}
+
 /* --- running programs ------------------------------------------------------ */
 
 /* Put back what a program may have left behind: files open, timers
@@ -1316,7 +1340,11 @@ static void k_tidy(void) {
     con_marked = 0u;
     con_top = 0u;                           /* nor a scroll region */
     con_bottom = CON_ROWS - 1u;
-    con_redraw();
+    /* Not while a program is keeping the screen: its children end without
+     * the console landing on top of the picture. k_run has cleared the
+     * owner by the time the owner's own tidy runs, so the console always
+     * comes back. */
+    if (screen_owner == 0u) con_redraw();
 }
 
 /* How the program at `depth` ended, on the debug port. */
@@ -1396,6 +1424,7 @@ static int k_run(char *path, int argc, char **argv, unsigned *ran) {
     started = 1u;                           /* a program it ran may have failed to start */
     k_log_end(status);
     if (page_owner >= (unsigned)depth) page_owner = 0u;     /* paging ends with its program */
+    if (screen_owner >= (unsigned)depth) screen_owner = 0u; /* and so does the screen */
     k_tidy();
     depth--;
     if (depth > 0) k_break(procs[depth].breaks);            /* its parent runs again, as it had it */
@@ -1579,6 +1608,7 @@ static void k_tables(void) {
     table[SYS_PAGING] = (unsigned)&w_paging;
     table[SYS_EXEC_OUT] = (unsigned)&w_exec_out;
     table[SYS_EXEC_IO] = (unsigned)&w_exec_io;
+    table[SYS_KEEPSCREEN] = (unsigned)&w_keepscreen;
     vectors[VEC_DIV_ZERO] = (unsigned)&fault_div;
     vectors[VEC_BAD_OPCODE] = (unsigned)&fault_opcode;
     vectors[VEC_BAD_FETCH] = (unsigned)&fault_fetch;

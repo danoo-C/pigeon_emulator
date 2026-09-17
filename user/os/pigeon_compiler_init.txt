@@ -33,6 +33,7 @@ system    = kernel.c            # what the installed hard disk boots: the kernel
 /bin/img.bin     = bin/img.c      # shows a BMP until Esc
 /bin/explorer.bin = bin/explorer.c   # the file explorer /etc/explorer.conf drives
 /bin/pgs.bin     = bin/pgs.c      # .pgs scripts (docs/pgs.md)
+/bin/graphics.bin = bin/graphics.c   # shapes, text and images (docs/graphics.md)
 
 /bin/graph.bin   = ../graph.c   # the graphing calculator; Esc goes back to the shell
 /bin/cube.bin    = ../cube.c
@@ -43,6 +44,7 @@ system    = kernel.c            # what the installed hard disk boots: the kernel
 /etc/bmp/eye-mask.bmp = etc/bmp/eye-mask.bmp   # where the splash's eyes flash
 /docs/readme.txt = readme.txt
 /docs/hello.pgs  = docs_hello.pgs   # a script to read and to run
+/docs/logo.pgs   = docs_logo.pgs    # and one that draws (docs/graphics.md)
 /etc/shell_header.conf = etc/shell_header.conf   # the prompt (docs/shell.md)
 /etc/boot.conf   = etc/boot.conf  # what runs after the kernel (docs/phase6_plan.md)
 /etc/explorer.conf = etc/explorer.conf   # what the explorer opens files with (docs/explorer.md)
