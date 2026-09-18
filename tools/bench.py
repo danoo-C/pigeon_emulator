@@ -68,7 +68,7 @@ def bench_gac():
     import re
     import struct
     from emulator.devices.display_io import DisplayIO
-    from emulator.devices.gac import CMD_FILL, CMD_SET_FONT, CMD_TEXT, GAC
+    from emulator.devices.gac import CMD_BLIT_ALPHA, CMD_FILL, CMD_SET_FONT, CMD_TEXT, GAC
     from emulator.devices.vram import VRAM
     from emulator.memory_map import DISPLAY_MODES, IO_START, IOHeader
 
@@ -92,13 +92,25 @@ def bench_gac():
         call(CMD_FILL, "<IiiiiI", 0, 0, 0, 1280, 720, 0xFF101018)
     fill = (time.perf_counter() - start) / 20 * 1000
 
+    # Blending reads every byte it writes: §4.5's numbers are the ones most
+    # likely to rot, so they are measured here, through the device.
+    start = time.perf_counter()
+    for _ in range(5):
+        call(CMD_FILL, "<IiiiiI", 0, 0, 0, 1280, 720, 0x80FF0000)
+    blended = (time.perf_counter() - start) / 5 * 1000
+    back, _ = vram.alloc(1280, 720)            # a second screen to lay over the first
+    start = time.perf_counter()
+    for _ in range(3):
+        call(CMD_BLIT_ALPHA, "<IiiIiiiiI", back, 0, 0, 0, 0, 0, 1280, 720, 128)
+    blit_alpha = (time.perf_counter() - start) / 3 * 1000
+
     rng = random.Random(1)
     lines = [bytes(rng.randrange(0x21, 0x7F) for _ in range(1280 // 6)) for _ in range(720 // 9)]
     start = time.perf_counter()
     for row, text in enumerate(lines):
         call(CMD_TEXT, "<IiiIII", 0, 0, row * 9, 0xFFC0C0C0, 0xFF101018, len(text), tail=text)
     console = (time.perf_counter() - start) * 1000
-    return fill, console
+    return fill, console, blended, blit_alpha
 
 
 def bench_display():
@@ -171,8 +183,10 @@ if __name__ == "__main__":
     heap, aperture = bench_memory()
     print(f"Word write, heap  {heap:>12.1f} ns")
     print(f"Word write, VRAM  {aperture:>12.1f} ns      (through the aperture: one pixel)")
-    fill, console = bench_gac()
+    fill, console, blended, blit_alpha = bench_gac()
     print(f"GAC fill, 720p    {fill:>12.3f} ms      a whole 1280x720 screen, one command")
+    print(f"  blended         {blended:>12.3f} ms      the same at alpha 0x80 (§4.5: 3.65)")
+    print(f"  BLIT_ALPHA      {blit_alpha:>12.1f} ms      a whole screen over another (§4.5: 18.5)")
     print(f"GAC text, 720p    {console:>12.1f} ms      a whole 213x80 console, 80 commands")
     ms = bench_display()
     print(f"Frame conversion  {ms:>12.3f} ms      (was 2.22 ms; "

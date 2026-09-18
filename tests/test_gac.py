@@ -21,10 +21,10 @@ import test_libs                                                      # noqa: E4
 from _runner import cases, run_module                                 # noqa: E402
 from emulator.devices.display_io import DisplayIO                     # noqa: E402
 from emulator.devices.gac import (                                    # noqa: E402
-    CMD_BATCH, CMD_BLIT, CMD_BLIT_SCALED, CMD_CIRCLE, CMD_DAMAGE, CMD_DISC, CMD_FILL,
+    CMD_BATCH, CMD_BLIT, CMD_BLIT_ALPHA, CMD_BLIT_SCALED, CMD_CIRCLE, CMD_DAMAGE, CMD_DISC, CMD_FILL,
     CMD_FRAME, CMD_INFO, CMD_LINE, CMD_NOP, CMD_RAM_FREE, CMD_RAM_SURFACE, CMD_SCROLL,
-    CMD_SET_FONT, CMD_TEXT, FEATURE_TEXT, GAC, GAC_MAGIC, MAX_EXTENT, RAM_HANDLE,
-    WINDOW_BYTES)
+    CMD_SET_FONT, CMD_TEXT, FEATURE_BLEND, FEATURE_TEXT, GAC, GAC_MAGIC, MAX_EXTENT,
+    MAX_ROW_PIXELS, RAM_HANDLE, WINDOW_BYTES, blend_rows)
 from emulator.devices.vram import CMD_ALLOC, CMD_FREE, VRAM                # noqa: E402
 from emulator.io_controller import IOChannel, IOController           # noqa: E402
 from emulator.memory_map import (                                     # noqa: E402
@@ -222,7 +222,7 @@ def test_the_gac_draws_exactly_what_display_c_draws(label, seed):
 # --- the device ---------------------------------------------------------------------
 
 def test_info_answers_the_magic_first():
-    assert Rig().words(CMD_INFO) == (GAC_MAGIC, FEATURE_TEXT, WINDOW_BYTES)
+    assert Rig().words(CMD_INFO) == (GAC_MAGIC, FEATURE_TEXT | FEATURE_BLEND, WINDOW_BYTES)
 
 
 @cases(CMD_NOP, CMD_DAMAGE)
@@ -547,6 +547,171 @@ def test_a_batch_running_off_the_window_draws_nothing():
     s = rig.screen
     assert send_batch(rig, record(CMD_FILL, s, 0, 0, 5, 5, 0xFFFFFFFF), count=600) == (0, 600)
     assert rig.fb() == bytes(DISPLAY_SIZE)
+
+
+# --- blending (3b) -----------------------------------------------------------------------
+
+def blend(d, s, a):
+    """The formula, one channel of one pixel: the reference everything is
+    checked against."""
+    return (d * (255 - a) + s * a + 127) // 255
+
+
+def blend_pixel(dst, colour):
+    """A 0xAARRGGBB colour over a destination pixel word: B, G and R
+    blended, the destination's own alpha kept."""
+    a = colour >> 24
+    out = dst & 0xFF000000
+    for shift in (0, 8, 16):
+        out |= blend((dst >> shift) & 0xFF, (colour >> shift) & 0xFF, a) << shift
+    return out
+
+
+def noise(rig, address, pixels, seed):
+    rng = random.Random(seed)
+    rig.ram.mem[address:address + pixels * 4] = bytes(rng.randrange(256)
+                                                      for _ in range(pixels * 4))
+
+
+@cases(0x80FF0000, 0x01123456, 0xFE00FF7F, 0x40FFFFFF)
+def test_a_translucent_fill_matches_the_formula_on_every_pixel(colour):
+    rig = Rig()
+    noise(rig, DISPLAY_START, W * H, colour)
+    before = rig.fb()
+    assert rig.ok(CMD_FILL, rig.screen, 20, 10, 100, 60, colour)
+    fb = rig.fb()
+    for y in range(H):
+        for x in range(W):
+            want = pixel(before, x, y)
+            if 20 <= x < 120 and 10 <= y < 70:
+                want = blend_pixel(want, colour)
+            assert pixel(fb, x, y) == want, (x, y)
+
+
+def test_alpha_zero_draws_nothing_and_says_so():
+    rig = Rig()
+    rig.font()
+    noise(rig, DISPLAY_START, W * H, 7)
+    before = rig.fb()
+    s = rig.screen
+    for command, args in ((CMD_FILL, (0, 0, W, H)), (CMD_FRAME, (5, 5, 50, 50)),
+                          (CMD_LINE, (0, 0, W, H)), (CMD_CIRCLE, (50, 50, 20)),
+                          (CMD_DISC, (50, 50, 20))):
+        assert rig.ok(command, s, *args, 0x00FFFFFF), command
+    assert rig.text(s, 0, 0, "invisible", 0x00FFFFFF, 0x00FFFFFF)
+    assert rig.fb() == before
+
+
+def test_a_colour_over_itself_is_itself():
+    """Rounding to nearest: blending never drifts a colour it already is."""
+    rig = Rig()
+    rig.ok(CMD_FILL, rig.screen, 0, 0, W, H, 0xFF3A6EA5)
+    for alpha in (1, 77, 128, 254):
+        rig.ok(CMD_FILL, rig.screen, 0, 0, W, H, (alpha << 24) | 0x3A6EA5)
+    assert pixel(rig.fb(), 50, 50) == 0xFF3A6EA5
+
+
+@cases(("frame", CMD_FRAME, (20, 20, 40, 30)), ("circle", CMD_CIRCLE, (90, 54, 30)),
+       ("disc", CMD_DISC, (90, 54, 30)), ("line", CMD_LINE, (0, 0, 150, 90)),
+       ("tiny disc", CMD_DISC, (10, 10, 1)))
+def test_a_translucent_shape_blends_each_pixel_exactly_once(label, command, args):
+    """display.c stores these pixels twice; blended twice they would come
+    out darker than the rest of the shape."""
+    rig = Rig()
+    rig.ok(CMD_FILL, rig.screen, 0, 0, W, H, 0xFF000000)
+    assert rig.ok(command, rig.screen, *args, 0x80FFFFFF)
+    once = blend_pixel(0xFF000000, 0x80FFFFFF)
+    fb = rig.fb()
+    seen = {pixel(fb, x, y) for y in range(H) for x in range(W)}
+    assert seen == {0xFF000000, once}, f"{label}: {sorted(hex(v) for v in seen)}"
+
+
+def test_translucent_text_lays_its_ink_over_its_background():
+    rig = Rig()
+    rig.font()
+    rig.ok(CMD_FILL, rig.screen, 0, 0, W, H, 0xFF204080)
+    assert rig.text(rig.screen, 0, 0, "I", 0x80FFFFFF, 0x80000000)
+    fb = rig.fb()
+    under = blend_pixel(0xFF204080, 0x80000000)
+    assert pixel(fb, 0, 0) == under, "the cell's background"
+    assert pixel(fb, 2, 0) == blend_pixel(under, 0x80FFFFFF), "the I's top bar"
+    assert pixel(fb, 6, 0) == 0xFF204080, "past the cell"
+
+
+def test_a_translucent_scroll_background_blends():
+    rig = Rig()
+    rig.ok(CMD_FILL, rig.screen, 0, 0, W, H, 0xFF000000)
+    assert rig.ok(CMD_SCROLL, rig.screen, 0, 0, W, 20, -5, 0x80FF0000)
+    fb = rig.fb()
+    assert pixel(fb, 0, 17) == blend_pixel(0xFF000000, 0x80FF0000)
+    assert pixel(fb, 0, 10) == 0xFF000000
+
+
+def test_the_destinations_alpha_byte_is_kept():
+    rig = Rig()
+    rig.ram.mem[DISPLAY_START:DISPLAY_START + DISPLAY_SIZE] = (
+        struct.pack("<I", 0x7F102030) * (W * H))
+    rig.ok(CMD_FILL, rig.screen, 0, 0, W, H, 0x80FFFFFF)
+    assert pixel(rig.fb(), 3, 3) == blend_pixel(0x7F102030, 0x80FFFFFF)
+    assert pixel(rig.fb(), 3, 3) >> 24 == 0x7F
+
+
+@cases(1, 64, 128, 200, 254)
+def test_blit_alpha_matches_the_formula_byte_for_byte(alpha):
+    rig = Rig()
+    src = rig.words(CMD_RAM_SURFACE, HEAP_START + 8192, 60, 40)[0]
+    noise(rig, HEAP_START + 8192, 60 * 40, alpha)
+    noise(rig, DISPLAY_START, W * H, alpha + 1000)
+    before = rig.fb()
+    image = bytes(rig.ram.mem[HEAP_START + 8192:HEAP_START + 8192 + 60 * 40 * 4])
+    assert rig.ok(CMD_BLIT_ALPHA, src, 0, 0, rig.screen, 30, 20, 60, 40, alpha)
+    fb = rig.fb()
+    for y in range(H):
+        for x in range(W):
+            want = pixel(before, x, y)
+            if 30 <= x < 90 and 20 <= y < 60:
+                s = pixel(image, x - 30, y - 20, w=60)
+                want = blend_pixel(want, (alpha << 24) | (s & 0xFFFFFF))
+            assert pixel(fb, x, y) == want, (x, y)
+
+
+def test_blend_rows_is_exact_across_a_row_wider_than_its_constants():
+    rng = random.Random(3)
+    n = (MAX_ROW_PIXELS + 37) * 4
+    dst = bytes(rng.randrange(256) for _ in range(MAX_ROW_PIXELS * 4))
+    src = bytes(rng.randrange(256) for _ in range(MAX_ROW_PIXELS * 4))
+    got = blend_rows(dst, src, 99)
+    for i in range(0, len(dst), 4):
+        for c in range(3):
+            assert got[i + c] == blend(dst[i + c], src[i + c], 99), (i, c)
+        assert got[i + 3] == dst[i + 3]
+    rig = Rig()
+    wide = rig.words(CMD_RAM_SURFACE, HEAP_START + 8192, n // 4, 1)[0]
+    assert rig.ok(CMD_BLIT_ALPHA, wide, 0, 0, wide, 1, 0, n // 4, 1, 128), "in pieces"
+
+
+def test_blit_alpha_at_the_ends_of_its_range():
+    rig = Rig()
+    noise(rig, DISPLAY_START, W * H, 11)
+    before = rig.fb()
+    assert rig.ok(CMD_BLIT_ALPHA, rig.screen, 0, 0, rig.screen, 5, 5, 50, 50, 0)
+    assert rig.fb() == before, "alpha 0 changed something"
+    assert rig.ok(CMD_BLIT_ALPHA, rig.screen, 0, 0, rig.screen, 100, 5, 50, 50, 255)
+    assert pixel(rig.fb(), 100, 5) == pixel(before, 0, 0), "alpha 255 is a blit"
+    assert not rig.ok(CMD_BLIT_ALPHA, rig.screen, 0, 0, rig.screen, 5, 5, 50, 50, 256)
+
+
+def test_blit_alpha_onto_itself_reads_each_row_before_writing_it():
+    rig = Rig()
+    noise(rig, DISPLAY_START, W * H, 12)
+    before = rig.fb()
+    assert rig.ok(CMD_BLIT_ALPHA, rig.screen, 10, 10, rig.screen, 10, 13, 40, 20, 128)
+    fb = rig.fb()
+    for y in range(20):
+        for x in range(40):
+            s = pixel(before, 10 + x, 10 + y)
+            want = blend_pixel(pixel(before, 10 + x, 13 + y), (128 << 24) | (s & 0xFFFFFF))
+            assert pixel(fb, 10 + x, 13 + y) == want, (x, y)
 
 
 # --- on the bus and in the machine ------------------------------------------------------

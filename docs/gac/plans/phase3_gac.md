@@ -1,7 +1,7 @@
 # Phase 3: `CH_GAC`, the accelerator
 
-> Part of [the GAC plan](../README.md). **Status: planned, every question
-> decided ([§7](#7-decisions)), 2026-09-18; being built.** Needs Phase 2
+> Part of [the GAC plan](../README.md). **Status: built, 2026-09-18
+> ([§8](#8-as-built)); every question decided ([§7](#7-decisions)).** Needs Phase 2
 > (built). Design: [design.md §5.3](../design.md#53-ch_gac--10--the-accelerator)
 > and [§5.3.1](../design.md#531-alpha-blending-in-v1-q9); the numbers are §4.3
 > and §4.5. Decisions: Q8, Q9, Q10, Q11, Q13 in
@@ -310,3 +310,66 @@ stands, and the body above already says what each one means.
    **Decided (you), 2026-09-18:** the recommendation, and done: `1730bdd`
    (`gui.pgs`, with the tests at 33), `eade0f2` (the `ADD` experiment, as you
    left it), `c9a17ef` (Phases 1 and 2), `b7ef940` (this plan).
+
+---
+
+## 8. As built
+
+Built 2026-09-18: 3a in `354dcfc`, 3b in the commit after it.
+`emulator/devices/gac.py` is new, and its docstring's command table is the
+reference. `CH_GAC = 10` is in `memory_map.py`, and `Machine` registers it
+beside `CH_VRAM`. The design is as §2 to §4 above, with these additions:
+
+- **`LINE`, `CIRCLE` and `DISC` refuse anything over 2¹⁷ pixels** (answer
+  `0`). Coordinates are signed 32-bit, and Bresenham walks every pixel
+  whether or not it is visible, so a guest asking for a line from −2³¹
+  would hold the emulator for hours. 131,072 pixels is a hundred times the
+  widest screen. Not in the plan; found while writing the loop.
+- **`BLIT_SCALED` answers `0` when its source rectangle is not wholly
+  inside the source surface.** The destination clips as usual. Clipping the
+  source would change which pixels `bmp.c`'s mapping picks, so the request
+  is refused instead of drawn wrongly.
+- **The window is copied (4 KB) at the start of each command.** Nothing a
+  command draws can then change the arguments it is still reading, and a
+  `BATCH`'s records are plain bytes.
+- **Blending is one object per colour, not a flag.** `ink(colour)` answers
+  an opaque `Ink`, a `ClearInk` for alpha 0, or a `BlendInk` with its three
+  translate tables. Every primitive calls `span`/`pixel`/`over` on
+  whichever it got, so no primitive knows which kind it has, and the opaque
+  path is exactly 3a's.
+- **The SWAR division is `(x + 1 + (x >> 8)) >> 8`.** It is checked to
+  equal `x // 255` for every x a blend can produce (0 to 65,152), so
+  `BLIT_ALPHA` is byte-for-byte the per-pixel formula, as the tests confirm.
+  Rows wider than 4,096 pixels are blended in pieces.
+
+**Measured** (`tools/bench.py`, 1280 × 720, through the device's callback):
+
+| | here | the plan's figure |
+|---|---|---|
+| full-screen `FILL`, opaque | 0.64–0.71 ms | 0.288 ms (the bare slice) |
+| full-screen `FILL`, alpha 0x80 | 4.7 ms | 3.65 ms (§4.5) |
+| full-screen `BLIT_ALPHA` | 25 ms | 18.5 ms (§4.5) |
+| a whole 213 × 80 console of `TEXT`, with a background | 17–19 ms | 12.6 ms (§3) |
+
+Each is a little over the bare figure, which timed the inner operation alone
+and not the bus call, the window copy and the per-row loop around it. The
+opaque fill builds the whole screen's colour bytes each call (3.6 MB). That
+could be cached, as `CH_DISPLAY`'s fill does, if Phase 8's measurements say
+it matters.
+
+**Tests:** `tests/test_gac.py`, 86 cases. **The equality test passes on
+three scenes**: a fixed one covering every primitive, every edge, text with
+descenders and scrolls both ways, and two seeded random ones of 60 shapes.
+`display.c` and the GAC agree on every byte. Each blend is checked against
+the per-pixel formula. Each shape is checked to blend each pixel exactly
+once, and that test does catch the fault: swapping in `display.c`'s
+overlapping disc makes it fail with pixels blended up to six times. The
+largest file's peak is 324 MB, the same as `test_display.py`.
+
+**The suite:** 1,815 passed, none failed.
+
+**For Phase 5:** `display.h`'s comment *"Alpha is NOT blended"* is still
+true of the library's software path, and becomes false for anything routed
+to the GAC. It changes with `graphics.md` §1 in Phase 7, as §6 of the design
+says.
+

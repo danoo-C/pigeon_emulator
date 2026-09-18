@@ -26,6 +26,7 @@ about 12 ms here.
   11   SCROLL       dst, x, y, w, h, dy, bg                     1 / 0
   12   BATCH        count, then records: cmd, nwords, args...   ran, refused
   13   DAMAGE       --                                          0 (reserved)
+  14   BLIT_ALPHA   src, sx, sy, dst, dx, dy, w, h, alpha       1 / 0
   15   RAM_SURFACE  address, w, h                               handle, or 0
   16   RAM_FREE     -- (the handle in ADDRESS)                  1 / 0
 
@@ -62,6 +63,20 @@ glyphs' row masks, precomputed by SET_FONT, joined into one big integer,
 and `(dst & ~mask) | (fg & mask)`. Eight big-integer operations a line of
 text, not eight per glyph.
 
+**Blending.** Every command with a colour blends on its alpha byte:
+0xFF... is stored exactly as before, 0x00... draws nothing, and anything
+between lays the colour over what is there,
+`d' = (d * (255 - a) + s * a + 127) / 255` per channel, rounded to nearest
+so a colour over itself is itself. The destination keeps its own alpha
+byte -- the scanout ignores alpha, and three channels is a cheaper table
+than four. A blend has to read every byte it writes, so it cannot be a
+slice assignment; per channel it is a 256-entry `bytes.translate` table
+instead, built once per command. BLIT copies bytes verbatim, alpha and
+all; BLIT_ALPHA lays a whole rectangle over another at one alpha, with the
+arithmetic done on a row at a time as one big integer (SWAR). A copy that
+honours each source pixel's own alpha is not here: no table and no single
+multiply fits it (docs/gac/design.md §9).
+
 The GAC writes the surface buffers directly, as CH_DISPLAY's FILL does. It
 does not set ram.vram_dirty: that flag means "written through the
 aperture, damage unknown", and Phase 8 has the GAC report its own damage.
@@ -90,12 +105,14 @@ CMD_TEXT = 10
 CMD_SCROLL = 11
 CMD_BATCH = 12
 CMD_DAMAGE = 13
+CMD_BLIT_ALPHA = 14
 CMD_RAM_SURFACE = 15
 CMD_RAM_FREE = 16
 
 #: "PGGA" in byte order, the convention of CH_VRAM's VRAM_MAGIC.
 GAC_MAGIC = 0x41474750
 FEATURE_TEXT = 1
+FEATURE_BLEND = 2
 #: RAM surfaces' handles start here, so they can never be a VRAM handle.
 RAM_HANDLE = 0x80000000
 #: The longest line, the biggest radius: a guest asking for a line 2**31
@@ -120,6 +137,7 @@ _ARGS = {
     CMD_SET_FONT: "<IIIIIII",
     CMD_TEXT: "<IiiIII",
     CMD_SCROLL: "<IiiiiiI",
+    CMD_BLIT_ALPHA: "<IiiIiiiiI",
 }
 _STRUCTS = {cmd: struct.Struct(fmt) for cmd, fmt in _ARGS.items()}
 
@@ -137,9 +155,10 @@ class Target:
 
 
 class Ink:
-    """How a colour lands on a surface. Opaque: the colour's bytes are
-    stored. Phase 3b adds the blending one, with the same two methods, so
-    no primitive knows which it has."""
+    """How a colour lands on a surface: `span` for a run of pixels, `pixel`
+    for one, `over` for what a row of bytes becomes under it. This one is
+    opaque -- the colour's bytes are stored. `ink()` picks which kind a
+    colour needs, so no primitive knows which it has."""
     __slots__ = ("word",)
 
     def __init__(self, colour: int):
@@ -150,6 +169,102 @@ class Ink:
 
     def pixel(self, buf, offset: int) -> None:
         buf[offset:offset + 4] = self.word
+
+    def over(self, row: bytes) -> bytes:
+        return self.word * (len(row) // 4)
+
+
+class ClearInk:
+    """Alpha 0: nothing lands."""
+    __slots__ = ()
+
+    def span(self, buf, offset: int, pixels: int) -> None:
+        pass
+
+    def pixel(self, buf, offset: int) -> None:
+        pass
+
+    def over(self, row: bytes) -> bytes:
+        return bytes(row)
+
+
+def blend_table(source: int, alpha: int) -> bytes:
+    """What each destination byte becomes with `source` laid over it at
+    `alpha`: one channel's whole blend as a 256-entry translate table."""
+    keep = 255 - alpha
+    return bytes((d * keep + source * alpha + 127) // 255 for d in range(256))
+
+
+class BlendInk:
+    """0 < alpha < 255: the colour over what is there. One translate table
+    per channel, B, G and R, since a fixed colour makes the blend a map of
+    one byte to one byte; the alpha byte is left alone."""
+    __slots__ = ("tables",)
+
+    def __init__(self, colour: int):
+        alpha = (colour >> 24) & 0xFF
+        self.tables = (blend_table(colour & 0xFF, alpha),
+                       blend_table((colour >> 8) & 0xFF, alpha),
+                       blend_table((colour >> 16) & 0xFF, alpha))
+
+    def over(self, row) -> bytes:
+        out = bytearray(row)
+        for channel, table in enumerate(self.tables):
+            out[channel::4] = out[channel::4].translate(table)
+        return bytes(out)
+
+    def span(self, buf, offset: int, pixels: int) -> None:
+        end = offset + pixels * 4
+        buf[offset:end] = self.over(buf[offset:end])
+
+    def pixel(self, buf, offset: int) -> None:
+        b, g, r = self.tables
+        buf[offset] = b[buf[offset]]
+        buf[offset + 1] = g[buf[offset + 1]]
+        buf[offset + 2] = r[buf[offset + 2]]
+
+
+_CLEAR = ClearInk()
+
+
+def ink(colour: int):
+    """The ink a colour needs. Opaque first, and untouched: every colour in
+    the tree today is 0xFF..., and none of them gets one step slower."""
+    alpha = (colour >> 24) & 0xFF
+    if alpha == 0xFF:
+        return Ink(colour)
+    if alpha == 0:
+        return _CLEAR
+    return BlendInk(colour)
+
+
+# SWAR constants for BLIT_ALPHA, for rows of up to MAX_ROW_PIXELS: a lane
+# mask with a zero byte after each lane byte, so each product has 16 bits
+# of room, and the constants the division needs, in every lane.
+MAX_ROW_PIXELS = 1 << 12
+_LANES = int.from_bytes(b"\xff\x00" * (MAX_ROW_PIXELS * 2), "little")
+_ROUND = int.from_bytes(b"\x7f\x00" * (MAX_ROW_PIXELS * 2), "little")
+_ONES = int.from_bytes(b"\x01\x00" * (MAX_ROW_PIXELS * 2), "little")
+_ALPHA = int.from_bytes(b"\x00\x00\x00\xff" * MAX_ROW_PIXELS, "little")
+
+
+def blend_rows(dst: bytes, src: bytes, alpha: int) -> bytes:
+    """`src` over `dst` at one alpha, every byte at once: the bytes split
+    into even and odd lanes, each lane set multiplied by one big-integer
+    multiply, and divided by 255 as (x + 1 + (x >> 8)) >> 8 -- exact for
+    every x a blend can make, 0..65152. The alpha bytes are dst's. Byte for
+    byte what blend_table's formula gives."""
+    n = len(dst)
+    whole = (1 << (n * 8)) - 1
+    lanes, rounding, ones = _LANES & whole, _ROUND & whole, _ONES & whole
+    d = int.from_bytes(dst, "little")
+    s = int.from_bytes(src, "little")
+    out = 0
+    for shift in (0, 8):
+        x = ((d >> shift) & lanes) * (255 - alpha) + ((s >> shift) & lanes) * alpha + rounding
+        out |= (((x + ones + ((x >> 8) & lanes)) >> 8) & lanes) << shift
+    keep = _ALPHA & whole
+    return ((out & ~keep) | (d & keep)).to_bytes(n, "little")
 
 
 class Font:
@@ -346,6 +461,31 @@ class GAC:
             s, d = src.at(sx, sy + i), dst.at(dx, dy + i)
             dbuf[d:d + n] = sbuf[s:s + n]
 
+    def _blit_alpha(self, src: Target, sx: int, sy: int, dst: Target, dx: int, dy: int,
+                    w: int, h: int, alpha: int) -> bool:
+        """BLIT, laid over the destination at one alpha."""
+        if alpha > 255:
+            return False
+        if alpha == 255:
+            self._blit(src, sx, sy, dst, dx, dy, w, h)
+            return True
+        clipped = self._clip_copy(src, sx, sy, dst, dx, dy, w, h)
+        if alpha == 0 or clipped is None:
+            return True
+        sx, sy, dx, dy, w, h = clipped
+        sbuf, dbuf = src.buf, dst.buf
+        rows = range(h)
+        if sbuf is dbuf and dst.at(dx, dy) > src.at(sx, sy):
+            rows = reversed(rows)
+        for i in rows:
+            s, d = src.at(sx, sy + i), dst.at(dx, dy + i)
+            # A row wider than the SWAR constants goes in pieces.
+            for part in range(0, w, MAX_ROW_PIXELS):
+                n = min(MAX_ROW_PIXELS, w - part) * 4
+                ps, pd = s + part * 4, d + part * 4
+                dbuf[pd:pd + n] = blend_rows(dbuf[pd:pd + n], sbuf[ps:ps + n], alpha)
+        return True
+
     def _blit_scaled(self, src: Target, sx: int, sy: int, sw: int, sh: int,
                      dst: Target, dx: int, dy: int, dw: int, dh: int) -> bool:
         """Nearest neighbour with bmp.c's mapping, i * size / n: destination
@@ -383,17 +523,17 @@ class GAC:
             return
         h = y1 - y0
         n = abs(dy)
-        ink = Ink(bg)
+        paint = ink(bg)
         if n >= h:
-            self._rect(t, ink, x0, y0, x1 - x0, h)
+            self._rect(t, paint, x0, y0, x1 - x0, h)
             return
         kept = h - n
         if dy < 0:
             self._blit(t, x0, y0 + n, t, x0, y0, x1 - x0, kept)
-            self._rect(t, ink, x0, y0 + kept, x1 - x0, n)
+            self._rect(t, paint, x0, y0 + kept, x1 - x0, n)
         else:
             self._blit(t, x0, y0, t, x0, y0 + n, x1 - x0, kept)
-            self._rect(t, ink, x0, y0, x1 - x0, n)
+            self._rect(t, paint, x0, y0, x1 - x0, n)
 
     # --- text -----------------------------------------------------------------
 
@@ -407,11 +547,10 @@ class GAC:
             return
         lo, hi = left * 4, right * 4
         width = hi - lo
-        fg_row = int.from_bytes((fg & 0xFFFFFFFF).to_bytes(4, "little") * (width // 4), "little")
-        opaque_bg = (bg >> 24) & 0xFF != 0
-        if opaque_bg:
-            bg_row = int.from_bytes((bg & 0xFFFFFFFF).to_bytes(4, "little") * (width // 4),
-                                    "little")
+        fg_ink, bg_ink = ink(fg), ink(bg)
+        # An opaque colour's row is the same on every row: built once.
+        fg_row = (int.from_bytes(fg_ink.over(bytes(width)), "little")
+                  if isinstance(fg_ink, Ink) else None)
         buf = t.buf
         for r in range(font.cell_h):
             row = y + r
@@ -419,8 +558,13 @@ class GAC:
                 continue
             mask = int.from_bytes(font.row_mask(text, r)[lo:hi], "little")
             o = t.at(x + left, row)
-            under = bg_row if opaque_bg else int.from_bytes(buf[o:o + width], "little")
-            buf[o:o + width] = ((under & ~mask) | (fg_row & mask)).to_bytes(width, "little")
+            # The background over what is there (alpha 0: what is there),
+            # then the ink over that, and the mask picks between the two.
+            under = bg_ink.over(buf[o:o + width])
+            over = fg_row if fg_row is not None else int.from_bytes(fg_ink.over(under),
+                                                                    "little")
+            under = int.from_bytes(under, "little")
+            buf[o:o + width] = ((under & ~mask) | (over & mask)).to_bytes(width, "little")
 
     def _set_font(self, address: int, glyph_w: int, glyph_h: int, cell_w: int,
                   cell_h: int, first: int, count: int) -> bool:
@@ -446,21 +590,21 @@ class GAC:
         if t is None:
             return False
         if command == CMD_FILL:
-            self._rect(t, Ink(a[5]), *a[1:5])
+            self._rect(t, ink(a[5]), *a[1:5])
         elif command == CMD_FRAME:
-            self._frame(t, Ink(a[5]), *a[1:5])
+            self._frame(t, ink(a[5]), *a[1:5])
         elif command == CMD_LINE:
             x0, y0, x1, y1 = a[1:5]
             if max(abs(x1 - x0), abs(y1 - y0)) > MAX_EXTENT:
                 return False
-            self._points(t, Ink(a[5]), self._line_points(x0, y0, x1, y1))
+            self._points(t, ink(a[5]), self._line_points(x0, y0, x1, y1))
         elif command in (CMD_CIRCLE, CMD_DISC):
             _, cx, cy, r, colour = a
             if r > MAX_EXTENT:
                 return False
             if r >= 0:
                 (self._circle if command == CMD_CIRCLE else self._disc)(
-                    t, Ink(colour), cx, cy, r)
+                    t, ink(colour), cx, cy, r)
         elif command == CMD_SCROLL:
             self._scroll(t, *a[1:])
         elif command == CMD_TEXT:
@@ -479,6 +623,11 @@ class GAC:
             if dst is None:
                 return False
             return self._blit_scaled(t, *a[1:5], dst, *a[6:])
+        elif command == CMD_BLIT_ALPHA:
+            dst = self.target(a[3])
+            if dst is None:
+                return False
+            return self._blit_alpha(t, a[1], a[2], dst, *a[4:])
         return True
 
     def batch(self, window) -> Tuple[int, int]:
@@ -521,7 +670,8 @@ class GAC:
         if command == CMD_RAM_FREE:
             return _OK if self.ram_surfaces.pop(address, None) is not None else _NO
         if command == CMD_INFO:
-            return struct.pack("<III", GAC_MAGIC, FEATURE_TEXT, WINDOW_BYTES)
+            return struct.pack("<III", GAC_MAGIC, FEATURE_TEXT | FEATURE_BLEND,
+                               WINDOW_BYTES)
         if command in (CMD_NOP, CMD_DAMAGE):
             return _NO
         log.warning("GAC: unknown command %d", command)
