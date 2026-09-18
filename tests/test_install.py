@@ -35,7 +35,7 @@ from test_project import EXAMPLE, quiet                               # noqa: E4
 MiB = 1 << 20
 PROMPT = "ENTER install   ESC cancel"
 INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt", "/docs/hello.pgs",
-             "/docs/logo.pgs",
+             "/docs/logo.pgs", "/docs/gui.pgs",
              "/etc/shell_header.conf",
              "/etc/boot.conf", "/etc/explorer.conf", "/etc/bmp/pigeon.bmp",
              "/etc/bmp/eye-mask.bmp"] + [

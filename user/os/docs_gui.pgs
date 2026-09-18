@@ -1,0 +1,91 @@
+;; /docs/gui.pgs -- a little GUI, drawn with graphics.bin and driven by keys.
+;;
+;;     pgs /docs/gui.pgs           (or click it in the explorer)
+;;
+;; There is no mouse here: graphics.bin's -wait hands back the key that ended
+;; it, so the buttons are keys. 1, 2 and 3 press them; Esc leaves.
+;;
+;; Every frame is four calls of graphics.bin and each call loads 92 KB off the
+;; disk, so it redraws at the speed of a slide show. That is the shape of the
+;; thing: a GUI that has to be quick wants to be a C program over
+;; <pigeon/display.h>, the way the explorer is.
+# graphics
+
+;; The state the screen is drawn from.
+$shape = none
+$label = (none)
+$dim   = 0xFF303048
+$lit   = 0xFF3A6EA5
+$ink   = 0xFFFFFFFF
+$grey  = 0xFF9090A0
+$edge  = 0xFF5A5A7A
+$b1    = $dim
+$b2    = $dim
+$b3    = $dim
+$key   = 0
+
+while $key != 27
+    ;; The chrome: the background, the title bar and the box at the bottom.
+    graphics -clear 0xFF202028 \
+             -rect 0 0 192 11 0xFF3A3A5A \
+             -text 4 2 "pgs GUI demo" $ink \
+             -frame 66 80 122 20 $edge
+
+    ;; The buttons, two to a call: a line holds 32 words, and a rectangle
+    ;; with a label on it is eleven of them.
+    graphics -rect 4 20 54 16 $b1 \
+             -text 8 25 "1 circle" $ink \
+             -rect 4 40 54 16 $b2 \
+             -text 8 45 "2 rect" $ink
+
+    graphics -rect 4 60 54 16 $b3 \
+             -text 8 65 "3 label" $ink \
+             -text 4 92 "Esc quit" $grey \
+             -text 70 86 "label: $label" $grey
+
+    ;; The canvas, and the key that ends the frame. -wait is part of the same
+    ;; call, so nothing waits before the picture is up.
+    if $shape == circle
+        $key = $(graphics -frame 66 16 122 60 $edge \
+                          -disc 127 46 24 0xFF66CCFF \
+                          -wait)
+    else
+        if $shape == rect
+            $key = $(graphics -frame 66 16 122 60 $edge \
+                              -rect 100 30 56 32 0xFFFFAA44 \
+                              -wait)
+        else
+            $key = $(graphics -frame 66 16 122 60 $edge \
+                              -text 84 42 "press 1 2 or 3" $grey \
+                              -wait)
+        end
+    end
+
+    ;; 49, 50 and 51 are 1, 2 and 3: a printable key is its own ASCII.
+    if $key == 49
+        $shape = circle
+        $b1 = $lit
+        $b2 = $dim
+        $b3 = $dim
+    end
+
+    if $key == 50
+        $shape = rect
+        $b1 = $dim
+        $b2 = $lit
+        $b3 = $dim
+    end
+
+    if $key == 51
+        $b1 = $dim
+        $b2 = $dim
+        $b3 = $lit
+        ;; `read` is the kernel's line editor, and it paints what you type on
+        ;; the console underneath the picture, near the top. The dark strip is
+        ;; there to catch it.
+        graphics -rect 0 12 192 24 0xFF101018 \
+                 -frame 0 12 192 24 $edge \
+                 -text 4 14 "type a label, then Enter" $grey
+        read $label
+    end
+end
