@@ -14,7 +14,7 @@ from emulator.cpu import CPU
 from emulator.devices.display_io import DisplayIO
 from emulator.instruction_set import NONE_REG, encode
 from emulator.io_controller import IOController
-from emulator.memory_map import DISPLAY_SIZE, RAM_SIZE
+from emulator.memory_map import DISPLAY_SIZE, HEAP_START, RAM_SIZE, VRAM_SIZE
 from emulator.ram import RAM
 
 ITERATIONS = 2_000_000
@@ -43,6 +43,21 @@ def bench_io_idle():
     for _ in range(200_000):
         io.update()
     return 200_000 / (time.perf_counter() - start)
+
+
+def bench_memory():
+    """A word written into the heap, and one through the video-memory
+    aperture above RAM (docs/gac/phase1_aperture.md). The first must not
+    move when the aperture exists; the second is what one pixel costs."""
+    ram = RAM(RAM_SIZE, VRAM_SIZE)
+    results = []
+    for addr in (HEAP_START, ram.vram_base + 4096):
+        write = ram.write_word
+        start = time.perf_counter()
+        for _ in range(1_000_000):
+            write(addr, 0x12345678)
+        results.append((time.perf_counter() - start) * 1000)   # ns per write
+    return results
 
 
 def bench_display():
@@ -112,6 +127,9 @@ if __name__ == "__main__":
 
     print(f"IO update, idle   {bench_io_idle():>12,.0f} calls/s "
           f"(no longer on the per-instruction path)")
+    heap, aperture = bench_memory()
+    print(f"Word write, heap  {heap:>12.1f} ns")
+    print(f"Word write, VRAM  {aperture:>12.1f} ns      (through the aperture: one pixel)")
     ms = bench_display()
     print(f"Frame conversion  {ms:>12.3f} ms      (was 2.22 ms; "
           f"{1000 / ms:,.0f} FPS ceiling)")

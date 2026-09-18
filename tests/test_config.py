@@ -126,6 +126,25 @@ def test_urls():
     ({"serial_log": 7}, "path of a file"),
     ({"serial_log": None}, None),
     ({"program_dirs": [1, 2]}, "list of folder names"),
+    ({"ram": "1G"}, None),
+    ({"ram": "2G"}, None),
+    ({"ram": "64M"}, "at least 128M"),
+    ({"ram": "4G"}, "at most 2G"),
+    ({"ram": "384M"}, "power of two"),
+    ({"ram": "lots"}, "not a size"),
+    ({"vram": None}, None),                          # null: no video memory
+    ({"vram": 0}, None),
+    ({"vram": "256M"}, "cannot be larger than ram"),
+    ({"ram": "512M", "vram": "256M"}, None),
+    ({"display_mode": [640, 360]}, None),
+    ({"display_mode": [641, 360]}, "not one of display_modes"),
+    ({"display_mode": [640]}, "a width and a height"),
+    ({"display_mode": "640x360"}, None),
+    ({"display_mode": [640, 360], "vram": None}, "needs video memory"),
+    ({"display_mode": [1280, 720], "vram": "1M"}, "does not fit"),
+    ({"display_modes": [[192, 108], [1920, 1080]]}, "larger than 1280x720"),
+    ({"display_modes": []}, "list of [w, h] pairs"),
+    ({"display_modes": [[192, 108], [256, 144]], "display_mode": [256, 144]}, None),
     ("{bad json,}", "not valid JSON"),
     ([1, 2, 3], "must contain a JSON object"),
 )
@@ -183,6 +202,42 @@ def test_the_serial_flags_override_the_keys():
     config = load_config().override(serial=args.serial, serial_log=args.serial_log)
     assert config.serial is True
     assert config.serial_log == REPO_ROOT / "logs" / "boot.log"
+
+
+def test_memory_defaults_to_the_machine_it_always_was():
+    """128 MB of RAM, as before the aperture, plus 16 MB of video memory
+    above it (docs/gac/phase1_aperture.md)."""
+    config = load_config()
+    assert config.ram == 128 << 20 and config.vram == 16 << 20
+
+
+def test_the_memory_flags_override_the_keys():
+    from emulator.cli import build_parser
+    args = build_parser().parse_args(["--ram", "1G", "--vram", "0"])
+    config = load_config().override(ram=args.ram, vram=args.vram)
+    assert config.ram == 1 << 30 and config.vram == 0
+    args = build_parser().parse_args([])
+    assert load_config().override(ram=args.ram, vram=args.vram).ram == 128 << 20
+
+
+def test_the_mode_flag_picks_the_power_on_mode():
+    from emulator.cli import build_parser
+    args = build_parser().parse_args(["--mode", "640x360"])
+    assert load_config().override(display_mode=args.display_mode).display_mode == (640, 360)
+    args = build_parser().parse_args([])
+    assert load_config().override(display_mode=args.display_mode).display_mode == (192, 108)
+
+
+@cases(({"ram": "64M"}, "at least 128M"), ({"vram": "1G"}, "cannot be larger"),
+       ({"display_mode": "641x360"}, "not one of"),
+       ({"display_mode": "640x360", "vram": "0"}, "needs video memory"))
+def test_a_bad_memory_flag_is_refused_like_the_key(flags, expected):
+    try:
+        load_config().override(**flags)
+    except ConfigError as e:
+        assert expected in str(e), e
+        return
+    raise AssertionError(f"{flags} should have been refused")
 
 
 # --- program discovery ------------------------------------------------------

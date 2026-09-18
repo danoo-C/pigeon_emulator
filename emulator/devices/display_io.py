@@ -36,6 +36,14 @@ it calls a device, so a LENGTH of 0xFF102030 -- an ordinary 0xAARRGGBB
 colour -- would ask for a 4 GB allocation and take the emulator down with
 a MemoryError and no PC to blame it on.
 
+The screen's size is the current mode, not a constant
+(docs/gac/phase2_vram.md). The VRAM device on CH_VRAM changes it, and
+points the scanout at a surface in video memory; INFO, FILL and COPY
+follow the mode, so a program built for 192 x 108 that checks INFO -- as
+disp_probe does -- falls back to software instead of writing a big mode's
+worth of bytes into a buffer sized for a small one. GET_BASE answers the
+aperture address of a VRAM surface, and SET_BASE takes it back.
+
 This device is the only one that writes to RAM outside the IO data
 window. It can, because it is constructed with the RAM it snapshots; the
 bus itself still has no general DMA path -- the HDD gained its own pair of
@@ -77,7 +85,17 @@ class DisplayIO:
     def __init__(self, ram):
         self.ram = ram
         self.display_start = DISPLAY_START
+        # The current mode. DISPLAY_W x DISPLAY_H until the VRAM device
+        # says otherwise (set_mode).
+        self.width, self.height = DISPLAY_W, DISPLAY_H
         self.display_size = DISPLAY_SIZE
+        # The other scanout source: an offset into video memory, or None
+        # while the screen is read from RAM at scanout_base. Only one of
+        # the two is live.
+        self.scanout_vram: Optional[int] = None
+        # The VRAM device, when the machine has one; Machine wires it. It
+        # is how SET_BASE takes an aperture address.
+        self.vram = None
         # Where the screen is read from. The guest moves this with
         # CMD_SET_BASE to flip pages; it is not necessarily DISPLAY_START.
         # Only ever touched from the emulator thread (the callback runs
@@ -113,8 +131,34 @@ class DisplayIO:
         assume DISPLAY_START -- after a page flip, that is only the screen
         every other frame.
         """
+        offset = self.scanout_vram
+        if offset is not None:
+            return bytes(self.ram.vram[offset:offset + self.display_size])
         base = self.scanout_base
         return bytes(self.ram.mem[base:base + self.display_size])
+
+    # --- the scanout selector, driven by the VRAM device ---------------------
+
+    def set_mode(self, width: int, height: int) -> None:
+        """A new mode: every size this device uses follows it."""
+        self.width, self.height = width, height
+        self.display_size = width * height * 4
+        self._fill_colour = self._fill_bytes = None     # sized for the old one
+
+    def scan_vram(self, offset: int) -> None:
+        """Show the screen out of video memory, from `offset`. The VRAM
+        device checks the surface before it gets here."""
+        self.scanout_vram = offset
+
+    def scan_ram(self, base: int) -> bool:
+        """Show the screen out of RAM at `base`, if the display would take
+        it there. Refused, the scanout is left as it was."""
+        if not self._valid_base(base):
+            log.warning("DISPLAY: refusing scanout base %#x", base)
+            return False
+        self.scanout_base = base
+        self.scanout_vram = None
+        return True
 
     def _valid_base(self, base: int) -> bool:
         """Can the guest point the display (or a fill) at this address?
@@ -131,7 +175,10 @@ class DisplayIO:
             # `addr & mask` in the machine. See ram.py's write_word.
             return False
         if base == DISPLAY_START:
-            return True             # back to the hardware framebuffer
+            # Back to the hardware framebuffer -- but only while a screen
+            # fits there. In a bigger mode it runs over the boot sector and
+            # into the program, and FILL would write all of it.
+            return self.display_size <= DISPLAY_SIZE
         # Anything below the program is the BIOS, the IO header, or a
         # framebuffer that has half slid off its own start. The realistic
         # way to get here is malloc() returning NULL and the guest
@@ -144,23 +191,27 @@ class DisplayIO:
                  data: bytearray) -> bytes:
         """IOController-compatible callback. See the module docstring."""
         if command == CMD_INFO:
-            return (DISPLAY_W.to_bytes(4, "little")
-                    + DISPLAY_H.to_bytes(4, "little")
+            return (self.width.to_bytes(4, "little")
+                    + self.height.to_bytes(4, "little")
                     + self.display_size.to_bytes(4, "little"))
 
         if command == CMD_GET_BASE:
+            if self.scanout_vram is not None:
+                # Where the guest would draw it: the surface in the aperture.
+                return ((self.ram.vram_base + self.scanout_vram) & 0xFFFFFFFF
+                        ).to_bytes(4, "little")
             return self.scanout_base.to_bytes(4, "little")
 
         if command == CMD_SET_BASE:
-            if not self._valid_base(address):
-                # Keep the previous base rather than clamping to
-                # DISPLAY_START: a clamp would leave the guest drawing
-                # into a buffer nobody is watching while believing it had
+            if self.vram is not None and address >= self.ram.vram_base:
+                ok = self.vram.scanout_aperture(address)
+            else:
+                # Refused, the previous base is kept rather than clamped to
+                # DISPLAY_START: a clamp would leave the guest drawing into
+                # a buffer nobody is watching while believing it had
                 # flipped. Answering 0 lets it fall back to copying.
-                log.warning("DISPLAY: refusing scanout base %#x", address)
-                return b"\x00\x00\x00\x00"
-            self.scanout_base = address
-            return b"\x01\x00\x00\x00"
+                ok = self.scan_ram(address)
+            return b"\x01\x00\x00\x00" if ok else b"\x00\x00\x00\x00"
 
         if command == CMD_FILL:
             if not self._valid_base(address):
@@ -288,7 +339,7 @@ class DisplayIO:
 
             @app.get("/info")
             async def info():
-                return {"w": DISPLAY_W, "h": DISPLAY_H, "size": self.display_size,
+                return {"w": self.width, "h": self.height, "size": self.display_size,
                         "scanout": self.scanout_base, "hid_url": self.hid_url,
                         "cd_url": self.cd_url}
 
