@@ -149,30 +149,6 @@ static void frame_rect(int x, int y, int w, int h, color_t c) {
     disp_line(x1, y, x1, y1, c);
 }
 
-/* An image's rows onto the screen, clipped on all four sides. A row at a
- * time with memcpy, not a pixel at a time with disp_set: a screenful is
- * 20,736 pixels and a call each would be most of a second. */
-static void blit(unsigned *pixels, int x, int y, int w, int h) {
-    int row = 0;
-    int at;
-    int from;
-    int n;
-
-    while (row < h) {
-        if (y + row >= 0 && y + row < DISP_H) {
-            at = x;
-            from = 0;
-            n = w;
-            if (at < 0) { from = 0 - at; n = n + at; at = 0; }
-            if (at + n > DISP_W) n = DISP_W - at;
-            if (n > 0)
-                memcpy((void *)(DISP_BASE + (unsigned)((y + row) * DISP_W + at) * 4u),
-                       pixels + row * w + from, (unsigned)n * 4u);
-        }
-        row++;
-    }
-}
-
 /* The FIFO holds the key that started this program -- the shell reads
  * characters, which is a different queue, so the Enter that ran the
  * command is still sitting here as an event. Throw away what happened
@@ -270,7 +246,8 @@ static int draw(int argc, char **argv) {
             pixels = bmp_load(a[0], (unsigned)number(a[3]), (unsigned)number(a[4]),
                               mode_of(a[5]));
             if (pixels == NULL) return oops(a[0], bmp_strerror(bmp_error()));
-            blit(pixels, number(a[1]), number(a[2]), number(a[3]), number(a[4]));
+            disp_blit(pixels, number(a[1]), number(a[2]),
+                      (unsigned)number(a[3]), (unsigned)number(a[4]));
             free(pixels);
         } else if (op == OP_WAIT) {
             printf("%u\n", wait_for_a_key());
@@ -292,6 +269,7 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
+    disp_init();  /* the screen, as the machine has it (display.h) */
     if (argc < 2) {
         usage();
         return 1;

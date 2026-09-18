@@ -26,6 +26,7 @@
  * way, as it does after any splash that doesn't fault.
  */
 #include <pigeon/bmp.h>
+#include <pigeon/display.h>
 #include <pigeon/input.h>
 #include <pigeon/io.h>
 #include <pigeon/math.h>
@@ -90,11 +91,11 @@ static unsigned blend(unsigned from, unsigned to, unsigned t) {
 
 /* The mask's white pixels into eyes[]; 0 when it won't load. */
 static int find_eyes(void) {
-    unsigned *mask = bmp_load(EYES, DISPLAY_W, DISPLAY_H, BMP_STRETCH);
+    unsigned *mask = bmp_load(EYES, DISP_W, DISP_H, BMP_STRETCH);
     unsigned i;
     if (mask == NULL) return 0;
     eye_count = 0u;
-    for (i = 0u; i < DISPLAY_W * DISPLAY_H; i++) {
+    for (i = 0u; i < DISP_W * DISP_H; i++) {
         if (((mask[i] >> 8) & 255u) >= 128u && eye_count < MAX_EYES) {
             eyes[eye_count] = i;
             eye_count++;
@@ -108,7 +109,7 @@ int main(int argc, char **argv) {
     unsigned ms = 0u;               /* 0: no countdown -- it waits for a key */
     unsigned period;                /* what the timer is started for         */
     unsigned *pixels;
-    unsigned *screen = (unsigned *)DISPLAY_START;
+    unsigned *screen;
     unsigned left;
     unsigned gone;
     unsigned t;
@@ -117,16 +118,18 @@ int main(int argc, char **argv) {
     int given;
     int eyes_found;
 
+    disp_init();                /* the screen, as the machine has it (display.h) */
+    screen = (unsigned *)DISP_BASE;   /* the eyes are a store a pixel, through this */
     if (argc > 1) {
         given = atoi(argv[1]);
         if (given > 0 && (unsigned)given <= LONGEST_MS) ms = (unsigned)given;
     }
-    pixels = bmp_load(IMAGE, DISPLAY_W, DISPLAY_H, BMP_STRETCH);
+    pixels = bmp_load(IMAGE, DISP_W, DISP_H, BMP_STRETCH);
     if (pixels == NULL) {
         say_failed(IMAGE);
         return 1;
     }
-    memcpy(screen, pixels, DISPLAY_W * DISPLAY_H * 4u);
+    disp_blit(pixels, 0, 0, DISP_W, DISP_H);
     eyes_found = find_eyes();
 
     period = ms;

@@ -360,6 +360,9 @@ Three notes that matter:
 
 #### 5.3.1 Alpha blending, in v1 (Q9)
 
+> **Changed in Phase 5** ([plans/phase5_display_lib.md](plans/phase5_display_lib.md)
+> §9): alpha 0 is stored like 0xFF, not "nothing". Only 1 to 254 blends.
+
 **Every constant-colour operation above blends on the colour's alpha byte.**
 `FILL` with `0x80FF0000` puts half-strength red over what is there;
 `0xFFFF0000` is the opaque fill it is today. That is the whole interface — no

@@ -11,7 +11,14 @@ halves.
 
 ---
 
-## Phase 6a: the five programs with compile-time sizes
+## Phase 6a: moved into Phase 5
+
+> **Moved, 2026-09-18.** With `DISP_W` a variable these programs do not
+> compile, so they changed with the library, in
+> [Phase 5](plans/phase5_display_lib.md) (its decision 1). The table below
+> is the original sketch, kept for the record.
+
+### The original sketch: the five programs with compile-time sizes
 
 Array sizes must be constant, so the compiler catches every one of these at
 build time (§8).
@@ -45,7 +52,11 @@ is done as a separate commit that changes nothing at 192 × 108.
 This is not an optimisation. It is what makes a big console possible at all
 (§4.3: 34 seconds a redraw otherwise).
 
-### 6b.4 Who owns the mode (Q6)
+### 6b.4 Who owns the mode (Q6): moved into Phase 5
+
+> **Moved, 2026-09-18**, with the surface ownership it belongs with
+> ([Phase 5](plans/phase5_display_lib.md) §3, decision 4). `reboot.bin`
+> resetting the mode went too.
 
 Only the program that asked may change the mode, and `k_tidy` puts it back
 when that program ends, the way it already restores the scanout base

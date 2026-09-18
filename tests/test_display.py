@@ -231,6 +231,16 @@ def test_an_unknown_command_is_survivable():
 # stays on its software path there. These are the tests that exercise the
 # hardware path the library actually takes in front of a user.
 
+def on_screen(display):
+    """Where the screen is read from, as CH_DISPLAY's GET_BASE says it: a RAM
+    address, or a VRAM surface's address in the aperture. A back buffer in
+    video memory (docs/gac/plans/phase5_display_lib.md) leaves scanout_base
+    where it was, so that alone no longer shows a flip."""
+    if display.scanout_vram is not None:
+        return display.ram.vram_base + display.scanout_vram
+    return display.scanout_base
+
+
 def boot(program, steps=6_000_000):
     """Run the BIOS, then the program, collecting each scanout base change.
 
@@ -256,8 +266,8 @@ def boot(program, steps=6_000_000):
         for _ in range(steps):
             if machine.step() == 1:
                 break
-            if not bases or machine.display_io.scanout_base != bases[-1]:
-                bases.append(machine.display_io.scanout_base)
+            if not bases or on_screen(machine.display_io) != bases[-1]:
+                bases.append(on_screen(machine.display_io))
     machine.close()
     return machine, bases
 

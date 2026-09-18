@@ -319,6 +319,47 @@ def test_a_guest_sets_the_mode_through_the_io_controller():
     assert vram.display.width == 640
 
 
+# --- who owns a surface (docs/gac/plans/phase5_display_lib.md §3) --------------------------
+
+def test_free_owned_frees_that_depth_and_deeper_and_nothing_else():
+    from emulator.devices.vram import CMD_FREE_OWNED, CMD_OWNER
+    vram = device()
+    kept = words(call(vram, CMD_ALLOC, window=(10, 10)))[0]         # owner 0: the kernel
+    assert words(call(vram, CMD_OWNER, address=1)) == (1,)
+    shell = words(call(vram, CMD_ALLOC, window=(10, 10)))[0]
+    call(vram, CMD_OWNER, address=2)
+    inner = [words(call(vram, CMD_ALLOC, window=(10, 10)))[0] for _ in range(3)]
+    assert words(call(vram, CMD_FREE_OWNED, address=2)) == (3,)
+    assert all(h not in vram.surfaces for h in inner)
+    assert shell in vram.surfaces and kept in vram.surfaces and 0 in vram.surfaces
+    assert words(call(vram, CMD_FREE_OWNED, address=1)) == (1,)
+    assert kept in vram.surfaces and 0 in vram.surfaces, "the kernel's, or the screen, went"
+
+
+def test_free_owned_frees_the_gacs_ram_surfaces_too():
+    from emulator.devices.gac import GAC
+    from emulator.devices.vram import CMD_FREE_OWNED, CMD_OWNER
+    vram = device()
+    gac = GAC(vram.ram, vram)
+    kernels = gac.ram_surface(DISPLAY_START, DISPLAY_W, DISPLAY_H)
+    call(vram, CMD_OWNER, address=1)
+    programs = gac.ram_surface(HEAP_START, 8, 8)
+    assert words(call(vram, CMD_FREE_OWNED, address=1)) == (1,)
+    assert programs not in gac.ram_surfaces and kernels in gac.ram_surfaces
+
+
+def test_freeing_what_is_on_screen_puts_the_screen_back():
+    """A program that flipped to its back buffer and crashed: freeing the
+    buffer must not leave the scanout on memory nobody owns."""
+    from emulator.devices.vram import CMD_FREE_OWNED, CMD_OWNER
+    vram = device(mode=(320, 180))
+    call(vram, CMD_OWNER, address=1)
+    back = words(call(vram, CMD_ALLOC, window=(320, 180)))
+    call(vram, CMD_SCANOUT, address=back[0])
+    call(vram, CMD_FREE_OWNED, address=1)
+    assert vram.display.scanout_vram == vram.surfaces[0].offset
+
+
 # --- in the machine ----------------------------------------------------------------------
 
 BIOS = REPO_ROOT / "build" / "bios.bin"

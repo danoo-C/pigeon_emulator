@@ -774,6 +774,9 @@ static int eval(int x) {
 #define BOX_H       (GLYPH_H + 3)                 /* the expression bar */
 #define BOX_TX      (2 + 2 * (GLYPH_W + 1) + 1)   /* just past the y=   */
 #define BOX_COLS    ((DISP_W - BOX_TX - 2) / (GLYPH_W + 1))
+/* Arrays are sized for the widest screen there is, DISPLAY_MAX_W: COLS is
+ * the screen's own, worked out at run time now, and cannot size one. */
+#define MAX_BOX_COLS ((DISPLAY_MAX_W - BOX_TX - 2) / (GLYPH_W + 1))
 #define STATUS_Y    (DISP_H - GLYPH_H - 1)
 #define STATUS_COLS ((DISP_W - 4) / (GLYPH_W + 1))
 #define PLOT_Y      (BOX_H + 2)
@@ -811,8 +814,8 @@ static int view_sx, view_sy;        /* half-span, Q16 */
 static int map_xstep, map_xrem, map_xmin;
 static int map_ystep, map_yrem;
 
-static int ys[PLOT_W];              /* the sampled curve, Q16 */
-static char yok[PLOT_W];            /* 0 where the sample is undefined */
+static int ys[DISPLAY_MAX_W];              /* the sampled curve, Q16 */
+static char yok[DISPLAY_MAX_W];            /* 0 where the sample is undefined */
 static int cache_valid;
 static int dirty;
 
@@ -1160,7 +1163,7 @@ static void scroll_fix(void) {
 }
 
 static void draw_box(void) {
-    char win[BOX_COLS + 1];
+    char win[MAX_BOX_COLS + 1];
     int i, cx;
     color_t ink = (p_err == NULL) ? TEXTC : ERRC;
 
@@ -1429,6 +1432,7 @@ int main(void) {
     unsigned ev;
     int i;
 
+    disp_init();  /* the screen, as the machine has it (display.h) */
     disp_use_back_buffer();     /* whole frames only -- see <pigeon/display.h> */
 
     for (i = 0; i < PLOT_W; i++) { ys[i] = 0; yok[i] = 0; }

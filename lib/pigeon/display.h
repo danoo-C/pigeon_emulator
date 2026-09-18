@@ -1,28 +1,48 @@
-/* <pigeon/display.h> -- drawing on the memory-mapped framebuffer.
+/* <pigeon/display.h> -- drawing on the screen.
  *
- * The screen is just memory, so this is pointer arithmetic and stores:
- * no IO channel, no driver. Nothing needs telling that the screen
- * changed -- the emulator snapshots the region at 30 FPS, so a store is
+ * The screen is memory, so a pixel is one store: disp_set is pointer
+ * arithmetic, no IO channel, no driver. Nothing needs telling that the
+ * screen changed -- the emulator snapshots it at 30 FPS, so a store is
  * visible within a frame.
  *
+ * Everything bigger than a pixel -- a clear, a rect, a line, a circle, a
+ * string, a scroll, an image -- is one command to the machine's graphics
+ * accelerator when it has one (docs/gac/), and drawn in software when it
+ * does not. The pictures are the same either way; the accelerator is
+ * faster, and blends.
+ *
  * Colour words are 0xAARRGGBB. The screen ignores alpha: every pixel is
- * shown opaque, so a colour is the colour you see whatever its AA, and
- * memory nothing has drawn on is black (docs/gac/plans/phase4_frontends.md).
- * These functions store AA as given and do not blend; set 0xFF, which is
- * what every colour below does.
+ * shown opaque, and memory nothing has drawn on is black. With the
+ * accelerator, every shape BLENDS on its colour's alpha -- 0x80FF0000 is
+ * half red over what is there -- and without it, or through disp_set,
+ * the colour is stored as it is. Set 0xFF unless you mean it, as every
+ * colour below does.
  */
 #ifndef PIGEON_DISPLAY_H
 #define PIGEON_DISPLAY_H
 
-/* The geometry comes from the machine, not from here. DISPLAY_W,
- * DISPLAY_H and DISPLAY_START are predefined by the compiler out of
- * emulator/memory_map.py -- the same names the assembler injects. These
- * three were literals until the screen changed shape, and nothing
- * checked them against the machine; a resolution change updated the
- * emulator and left every C program drawing at the old size. */
-#define DISP_W    DISPLAY_W
-#define DISP_H    DISPLAY_H
-#define DISP_BASE DISPLAY_START
+/* The geometry comes from the machine, at run time: the screen is
+ * whatever size its mode is (docs/gac/plans/phase5_display_lib.md).
+ * disp_init() asks, and every drawing call asks the first time if the
+ * program has not. Until then these are the power-on screen, DISPLAY_W x
+ * DISPLAY_H at DISPLAY_START -- predefined by the compiler out of
+ * emulator/memory_map.py, as the assembler injects them.
+ *
+ * Call disp_init() before laying anything out by DISP_W: a program started
+ * in another mode would otherwise see the power-on size.
+ *
+ * DISP_W and DISP_H are variables now, so they cannot size an array. Size
+ * it from DISPLAY_MAX_W / DISPLAY_MAX_H, the largest mode there is, and use
+ * DISP_W for how much of it this screen needs. DISP_BASE is where the
+ * screen is: RAM at the power-on mode, video memory otherwise. */
+extern unsigned disp_w;
+extern unsigned disp_h;
+extern unsigned disp_base;
+#define DISP_W    disp_w
+#define DISP_H    disp_h
+#define DISP_BASE disp_base
+
+int disp_init(void);        /* asks the machine; returns 1. Safe to call again. */
 
 typedef unsigned int color_t;
 
@@ -46,9 +66,9 @@ typedef unsigned int color_t;
  *     if (!disp_use_back_buffer()) { ... out of memory ... }
  *     for (;;) { draw_everything(); disp_present(); }
  *
- * The buffer comes from the heap, so it costs nothing in the program
- * image -- a screen of `.space` would otherwise be copied by the BIOS on
- * every boot.
+ * The buffer comes from video memory, or the heap on a machine without
+ * it, so it costs nothing in the program image. The kernel gives it back
+ * when the program ends.
  *
  * disp_present() is a PAGE FLIP, not a copy. It hands the display the
  * address of the buffer you just drew and hands you back the one that
@@ -70,6 +90,17 @@ typedef unsigned int color_t;
  */
 int  disp_use_back_buffer(void);   /* 0 if the heap could not provide one */
 void disp_present(void);           /* copy the back buffer to the screen  */
+
+/* --- modes ---------------------------------------------------------------
+ *
+ * A program may change the mode it runs in, and the kernel puts it back
+ * when the program ends. After a disp_setmode, DISP_W, DISP_H and DISP_BASE
+ * are the new screen's, it is black, and a back buffer has to be asked for
+ * again. 0 when the machine does not offer that mode, or has no video
+ * memory. */
+int      disp_setmode(unsigned w, unsigned h);
+int      disp_modes(unsigned *ws, unsigned *hs, int max);   /* -> how many there are */
+unsigned disp_generation(void);    /* changes whenever the mode does */
 
 /* --- pixels ------------------------------------------------------------ */
 void    disp_set(unsigned x, unsigned y, color_t c);   /* clipped */
@@ -107,5 +138,11 @@ void disp_scroll(unsigned y, unsigned h, int dy, color_t bg);
 #define GLYPH_H 8
 void disp_char(unsigned x, unsigned y, int ch, color_t fg);
 void disp_text(unsigned x, unsigned y, char *s, color_t fg);
+
+/* --- images -------------------------------------------------------------
+ *
+ * w x h pixels, a row after another, drawn with their top left at x, y and
+ * clipped to the screen -- what bmp_load() returns, say. */
+void disp_blit(unsigned *pixels, int x, int y, unsigned w, unsigned h);
 
 #endif

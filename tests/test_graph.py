@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import run_module                                     # noqa: E402
+from emulator.devices.keycodes import KEY_PGUP                      # noqa: E402
 from emulator.machine import Machine                               # noqa: E402
 from emulator.memory_map import PROGRAM_LOAD_ADDR                  # noqa: E402
 from test_libs import run                                          # noqa: E402
@@ -259,10 +260,14 @@ def test_it_draws_the_default_curve():
 
 
 def test_zooming_redraws_the_curve_differently():
+    # Page Up zooms in (graph.c's on_key), as the wheel does. This pressed
+    # KEY_UP, which graph does nothing with, and passed only because the
+    # first snapshot caught a frame still being drawn in software; with
+    # the accelerator the frame is finished by then, and the two matched.
     def zoom_in(hid):
         for _ in range(6):
-            hid.push_key(0x82, True)            # KEY_UP
-            hid.push_key(0x82, False)
+            hid.push_key(KEY_PGUP, True)
+            hid.push_key(KEY_PGUP, False)
 
     before, after = boot_and_render(zoom_in)
     assert curve_pixels(after) > 100, "the curve vanished when zoomed"

@@ -266,7 +266,9 @@ def test_library_dependencies_come_from_the_includes():
     line. Reading them off the #includes means the user does not have to."""
     libraries = libraries_for(REPO_ROOT / "user" / "demo.c")
     names = {p.name for p in libraries}
-    assert names == {"display.c", "input.c", "mem.c"}, names
+    # display.c draws through the accelerator and asks video memory the
+    # screen's size (docs/gac/plans/phase5_display_lib.md).
+    assert names == {"display.c", "gac.c", "input.c", "mem.c", "vram.c"}, names
 
 
 def test_a_c_program_with_no_includes_needs_no_libraries():

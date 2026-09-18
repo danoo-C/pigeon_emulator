@@ -34,6 +34,9 @@
 #define CELL (GLYPH_W + 1)
 #define ROW  (GLYPH_H + 1)
 #define COLS (DISP_W / CELL)
+/* Arrays are sized for the widest screen there is, DISPLAY_MAX_W: COLS is
+ * the screen's own, worked out at run time now, and cannot size one. */
+#define MAX_COLS  (DISPLAY_MAX_W / CELL)
 #define Y(r) (1u + (unsigned)(r) * ROW)
 
 #define R_TITLE  0
@@ -140,7 +143,7 @@ void join(char *out, char *dir, char *name) {
 }
 
 void progress(char *path) {
-    char line[COLS + 1];
+    char line[MAX_COLS + 1];
     char digits[12];
     strlcpy(line, "Copying ", sizeof(line));
     utoa(files_done, digits, 10u);
@@ -310,13 +313,14 @@ int install(int system) {
 int main(void) {
     char from[FS_PATH_MAX + 8];
     char text[256];
-    char line[COLS + 1];
+    char line[MAX_COLS + 1];
     char digits[12];
     unsigned bytes;
     unsigned i;
     int system;
     int r;
 
+    disp_init();  /* the screen, as the machine has it (display.h) */
     disp_clear(BG);
     disp_rect(0u, 0u, DISP_W, ROW + 1u, BAR);
     disc = *(unsigned *)BOOT_CHANNEL;

@@ -218,6 +218,7 @@ static void handle_keys(void) {
 int main(void) {
     long frame = 0;
 
+    disp_init();  /* the screen, as the machine has it (display.h) */
     disp_use_back_buffer();
 
     angle_x = 24;

@@ -34,6 +34,7 @@
 #include <pigeon/mem.h>
 #include <pigeon/string.h>
 #include <pigeon/syscall.h>
+#include <pigeon/vram.h>
 #asm "kernel.asm"
 
 #define SHELL         "/bin/sh.bin"
@@ -1303,8 +1304,9 @@ int k_keepscreen(int on) {
 /* --- running programs ------------------------------------------------------ */
 
 /* Put back what a program may have left behind: files open, timers
- * running, keys queued, the display pointed at a buffer of its own. The
- * disk is mounted afresh, since a program with its own fs.c may have
+ * running, keys queued, video memory and drawing surfaces it asked for, the
+ * screen in a mode of its own, the display pointed at a buffer of its own.
+ * The disk is mounted afresh, since a program with its own fs.c may have
  * written what this one's cache doesn't know. */
 /* The disk mounted again, with the current directory kept. A program with
  * its own fs.c may have written what this one's cache doesn't know, so this
@@ -1322,6 +1324,9 @@ static void k_remount(void) {
 static void k_tidy(void) {
     int h;
     unsigned t;
+    unsigned w;
+    unsigned ht;
+    unsigned offset;
     for (h = 0; h < HANDLES; h++) {
         if (handle_depth[h] >= depth) {     /* and programs it ran that q ended */
             if (handle_dir[h] != 0u) fs_closedir(h);
@@ -1333,7 +1338,17 @@ static void k_tidy(void) {
     while (key_read() >= 0) { }
     while (key_event() != 0u) { }
     while (mouse_event() != 0u) { }
-    k_io(CH_DISPLAY, K_DISPLAY_SET_BASE, 4u, DISPLAY_START);
+    /* What it allocated on the display devices, as with its files: the
+     * program at this depth and those it ran. k_run tagged them with the
+     * depth (docs/gac/plans/phase5_display_lib.md §3). Freeing a buffer on
+     * screen puts the screen back on video memory's own, so this comes
+     * before the mode and the base below. */
+    vram_free_owned((unsigned)depth);
+    vram_owner((unsigned)depth - 1u);
+    /* The mode, if it changed it: only the program that asked has it, and
+     * the kernel's own is back when it ends (docs/gac/decisions.md Q6). */
+    if (vram_mode(&w, &ht, &offset) && (w != disp_w || ht != disp_h)) vram_set_mode(disp_w, disp_h);
+    k_io(CH_DISPLAY, K_DISPLAY_SET_BASE, 4u, disp_base);
     k_remount();
     con_attr = CON_DEFAULT;                 /* no color left on for the shell */
     con_esc = CON_ESC_NONE;
@@ -1408,6 +1423,7 @@ static int k_run(char *path, int argc, char **argv, unsigned *ran) {
     *(unsigned *)(base + header[6] + 4u) = PROGRAMS_TOP;       /* its __heap_limit */
 
     depth++;
+    vram_owner((unsigned)depth);            /* what it allocates is its, for k_tidy */
     complete_dir[(unsigned)depth * COMPLETE_TEXT] = 0;         /* no commands for Tab yet */
     complete_builtins[(unsigned)depth * COMPLETE_TEXT] = 0;
     procs[depth].base = base;
@@ -1822,6 +1838,7 @@ int main(void) {
     __heap_limit = PROGRAMS - PROGRAM_FILE_HEADER;  /* the first header lands there */
     in_kernel = 1u;
     k_tables();
+    disp_init();  /* the screen, as the machine has it (display.h) */
     con_attr = CON_DEFAULT;
     con_bottom = CON_ROWS - 1u;
     con_clear();

@@ -57,6 +57,9 @@
  * before and every baked-in number drew off the bottom when it did. */
 #define CELL      (GLYPH_W + 1)                 /* 6 px: glyph plus a gap   */
 #define COLS      (DISP_W / CELL)               /* 32                       */
+/* Arrays are sized for the widest screen there is, DISPLAY_MAX_W: COLS is
+ * the screen's own, worked out at run time now, and cannot size one. */
+#define MAX_COLS  (DISPLAY_MAX_W / CELL)
 #define ROW       (GLYPH_H + 1)                 /* 9 px per line            */
 
 #define HEAD_Y    1
@@ -109,7 +112,7 @@ static int       truncated;
 static int       sel;                   /* highlighted entry                */
 static int       top;                   /* first entry drawn                */
 
-static char      message[COLS + 1];
+static char      message[MAX_COLS + 1];
 static color_t   msg_ink;
 
 static char     *view_buf;              /* malloc'd while M_VIEW            */
@@ -130,7 +133,7 @@ static char      prompt_buf[FS_NAME_MAX + 1];
 static int       prompt_len;
 static int       prompt_what;
 
-static char      confirm_msg[COLS + 1];
+static char      confirm_msg[MAX_COLS + 1];
 
 static char *HELP[] = {
     "up/down    move",
@@ -377,7 +380,7 @@ static int wrap_text(char *p, unsigned n) {
 /* One wrapped line onto the screen, with anything unprintable shown as
  * '.' -- a tab or a stray byte must not be handed to disp_char. */
 static void draw_wrapped_line(int line, unsigned y, char *p, color_t ink) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
     unsigned j, c;
 
     for (j = 0u; j < wrap_len[line]; j++) {
@@ -391,7 +394,7 @@ static void draw_wrapped_line(int line, unsigned y, char *p, color_t ink) {
 /* --- chrome --------------------------------------------------------------- */
 
 static void draw_header(char *left, char *right, color_t ink) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
 
     disp_rect(0, 0, DISP_W, HEAD_RULE, BAR);
     blank(row);
@@ -418,7 +421,7 @@ static void draw_list_header(void) {
 }
 
 static void draw_status(char *hint) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
     char num[STR_UTOA_MAX + 12];
     fs_volinfo info;
     color_t ink;
@@ -450,7 +453,7 @@ static void draw_status(char *hint) {
 /* --- the screens ---------------------------------------------------------- */
 
 static void draw_list(void) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
     unsigned y, h, bar, pos;
     int i, r;
 
@@ -509,7 +512,7 @@ static void draw_view(void) {
 }
 
 static void draw_prompt(void) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
     unsigned label, shown, start;
     unsigned y;
 
@@ -935,6 +938,7 @@ int main(void) {
     int code;
     int r;
 
+    disp_init();  /* the screen, as the machine has it (display.h) */
     disp_use_back_buffer();
     vol = CH_HDD;
     mode = M_LIST;

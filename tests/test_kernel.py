@@ -2390,5 +2390,125 @@ def test_the_splash_loads_and_draws_in_a_few_million_instructions_and_waits_chea
     assert per_look < 9_000, f"{per_look:,.0f} instructions a look"
 
 
+
+# --- what a program leaves on the display devices (docs/gac/plans/phase5_display_lib.md §3) ---
+
+# Grabs everything a program can on the display devices -- a bigger mode, a
+# back buffer in video memory flipped onto the screen, a spare surface, a
+# rectangle of its heap registered with the accelerator -- then ends by
+# exit, a fault or Ctrl+C, as its argument says.
+STANDINS["grab"] = r"""#include <pigeon/display.h>
+#include <pigeon/gac.h>
+#include <pigeon/mem.h>
+#include <pigeon/sys.h>
+#include <pigeon/vram.h>
+int zero;
+int main(int argc, char **argv) {
+    unsigned offset;
+    unsigned *heap;
+    disp_init();
+    if (!disp_setmode(640u, 360u)) { print("no mode\n"); return 1; }
+    if (!disp_use_back_buffer()) { print("no buffer\n"); return 2; }
+    disp_clear(RED);
+    disp_present();
+    if (vram_alloc(32u, 32u, &offset) == 0u) { print("no surface\n"); return 3; }
+    heap = (unsigned *)malloc(64u);
+    if (gac_ram_surface((unsigned)heap, 4u, 4u) == 0u) { print("no ram surface\n"); return 4; }
+    print("grabbed\n");
+    if (argc > 1 && argv[1][0] == 'f') return 10 / zero;
+    if (argc > 1 && argv[1][0] == 's') { while (1) { } }
+    return 0;
+}
+"""
+
+# Holds a surface of its own, runs grab, and checks its surface outlived
+# grab's end: the kernel frees a depth and deeper, not what is above it.
+STANDINS["holder"] = r"""#include <pigeon/sys.h>
+#include <pigeon/vram.h>
+int main(void) {
+    unsigned offset;
+    unsigned mine;
+    char *argv[2];
+    mine = vram_alloc(16u, 16u, &offset);
+    if (mine == 0u) { print("no surface\n"); return 1; }
+    argv[0] = "grab";
+    argv[1] = 0;
+    exec("/bin/grab.bin", 1, argv);
+    print(vram_free(mine) ? "mine kept\n" : "mine lost\n");
+    return 0;
+}
+"""
+
+
+def assert_nothing_left(machine, label):
+    """What the kernel had before the program, and nothing else."""
+    vram, gac, display = machine.vram, machine.gac, machine.display_io
+    assert set(vram.surfaces) == {0}, f"{label}: surfaces left: {sorted(vram.surfaces)}"
+    assert all(s[3] == 0 for s in gac.ram_surfaces.values()), \
+        f"{label}: a program's RAM surface was left: {gac.ram_surfaces}"
+    assert vram.mode == (DISPLAY_W, DISPLAY_H), f"{label}: the mode stayed {vram.mode}"
+    assert display.scanout_vram is None and display.scanout_base == DISPLAY_START, \
+        f"{label}: the screen shows {display.scanout_base:#x} / {display.scanout_vram}"
+    # The shell runs at depth 1 and the program at 2: what is allocated
+    # next belongs to the shell again.
+    assert vram.owner == 1, f"{label}: the owner is {vram.owner}, not the shell's"
+
+
+@cases(("exit", "grab", ["grabbed"]), ("a fault", "grab f", ["grabbed", "grab: divided by zero"]))
+def test_what_a_program_leaves_on_the_display_is_freed_however_it_ends(label, line, said):
+    with booted(extra=[("/bin/grab.bin", standin("grab"))]) as c:
+        assert c.ready(), c.rows()
+        assert c.command(line) == said, label
+        assert_nothing_left(c.machine, label)
+        assert c.rows()[0] == "PigeonOS", "the console was not drawn back"
+
+
+def test_what_a_program_leaves_on_the_display_is_freed_after_ctrl_c():
+    with booted(extra=[("/bin/grab.bin", standin("grab"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("grab s\n")
+        assert c.run_until(lambda rows: c.machine.vram.mode == (640, 360)
+                           and len(c.machine.vram.surfaces) == 3), "it never grabbed"
+        c.press(KEY_LCTRL, ord("c"))
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+        assert_nothing_left(c.machine, "Ctrl+C")
+
+
+def test_a_programs_surfaces_outlive_a_program_it_ran():
+    with booted(extra=[("/bin/grab.bin", standin("grab")),
+                       ("/bin/holder.bin", standin("holder"))]) as c:
+        assert c.ready(), c.rows()
+        assert c.command("holder")[-1] == "mine kept"
+        assert_nothing_left(c.machine, "holder")
+
+
+
+STANDINS["bigreboot"] = r"""#include <pigeon/display.h>
+#include <pigeon/sys.h>
+int main(void) {
+    char *argv[2];
+    disp_setmode(640u, 360u);
+    argv[0] = "reboot";
+    argv[1] = 0;
+    return exec("/bin/reboot.bin", 1, argv);
+}
+"""
+
+
+def test_a_reboot_puts_the_power_on_screen_back():
+    """reboot.bin jumps to the BIOS, which knows nothing of modes and draws
+    at DISPLAY_START: the screen must be that again, not a big mode showing
+    video memory nobody draws on (docs/gac/plans/phase5_display_lib.md §1)."""
+    with booted(extra=[("/bin/bigreboot.bin", standin("bigreboot")),
+                       ("/bin/reboot.bin", shell_program("reboot"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("bigreboot\n")
+        assert c.run_until(lambda rows: c.machine.cpu.pc < PROGRAM_LOAD_ADDR), "never rebooted"
+        vram, display = c.machine.vram, c.machine.display_io
+        assert vram.mode == (DISPLAY_W, DISPLAY_H), vram.mode
+        assert display.scanout_vram is None and display.scanout_base == DISPLAY_START
+        assert set(vram.surfaces) == {0} and not c.machine.gac.ram_surfaces
+
+
 if __name__ == "__main__":
     raise SystemExit(run_module(dict(globals()), "the kernel"))

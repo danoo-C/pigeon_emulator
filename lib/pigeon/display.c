@@ -1,6 +1,6 @@
-/* Drawing on the memory-mapped framebuffer. See display.h.
+/* Drawing on the screen. See display.h.
  *
- * Two things shape this code:
+ * Three things shape this code:
  *
  * Everything clips. user/checkerboard.asm has no clipping, walks its
  * pixel index past the end of the framebuffer, and eventually overwrites
@@ -9,11 +9,23 @@
  *
  * Coordinates are unsigned, so one `>=` catches both ends: a negative
  * value wraps to a huge one. That is also one comparison instead of two,
- * and it avoids the signed-compare sequence entirely.
+ * and it avoids the signed-compare sequence entirely. The accelerator's
+ * coordinates are signed, so a shape is only handed to it where the two
+ * mean the same thing, and the picture does not depend on which drew it.
+ *
+ * The screen's size is the machine's, asked at run time (disp_init), and
+ * drawing goes to the graphics accelerator when there is one: one bus
+ * command a shape instead of a store a pixel (docs/gac/). A pixel is still
+ * one store, through row_ptr, whichever it is. The software below is what a
+ * bare CPU (tests/test_libs.py) and a machine without video memory draw
+ * with, and what the accelerator was proved against, byte for byte
+ * (tests/test_gac.py).
  */
 #include <pigeon/display.h>
+#include <pigeon/gac.h>
 #include <pigeon/io.h>
 #include <pigeon/mem.h>
+#include <pigeon/vram.h>
 
 /* Commands on CH_DISPLAY. The DISP_ prefix is not decoration: units are
  * compiled together with no linker and the preprocessor's macro table is
@@ -21,28 +33,55 @@
  * input.c's -- the preprocessor does not warn on redefinition. */
 #define DISP_CMD_INFO      1
 #define DISP_CMD_SET_BASE  2
+#define DISP_CMD_GET_BASE  3
 #define DISP_CMD_FILL      4
 #define DISP_CMD_COPY      5
 
-#define DISP_BYTES (DISP_W * DISP_H * 4)
+/* An opaque fill smaller than this is cheaper as stores than as a bus
+ * command (docs/gac/plans/phase5_display_lib.md, Q3). Measured: a command
+ * costs ~84 us whatever its size -- ~240 guest instructions and the host's
+ * work -- and a stored pixel ~10 us, so they meet at 8 pixels. A colour
+ * that blends always goes to the accelerator, so it blends the same at
+ * every size. */
+#define DISP_GAC_MIN 8u
+#define DISP_BLENDS(c) (((c) >> 24) != 0xFFu)
+
+/* The screen, as the machine has it; see display.h. Until disp_init() has
+ * asked, the power-on screen -- which is right on every machine until
+ * something changes the mode. */
+unsigned disp_w = DISPLAY_W;
+unsigned disp_h = DISPLAY_H;
+unsigned disp_base = DISPLAY_START;
 
 /* Where drawing goes: the screen itself, or a back buffer once one has
  * been asked for. A global rather than a function so the per-pixel cost
  * is one load, not a call. */
-unsigned disp_target = DISP_BASE;
+unsigned disp_target = DISPLAY_START;
 
-/* The heap buffer, 0 until one is asked for.
+/* The back buffer, 0 until one is asked for.
  *
  * This exists because `disp_target != DISP_BASE` STOPPED meaning "I have
  * a back buffer" once presenting became a page flip: the two surfaces are
- * the hardware framebuffer and this buffer, so on alternate frames the
- * draw target legitimately IS DISP_BASE. Gating on that would make
- * present a no-op every other frame and halve the update rate while
- * showing stale content. */
+ * the screen and this buffer, so on alternate frames the draw target
+ * legitimately IS DISP_BASE. Gating on that would make present a no-op
+ * every other frame and halve the update rate while showing stale
+ * content. */
 static unsigned disp_back = 0u;
+static unsigned disp_back_vram = 0u;   /* its VRAM handle; 0 when it is heap */
 
-/* 0 = not probed, 1 = the device is there, 2 = software only. */
+/* 0 = not probed, 1 = CH_DISPLAY is there, 2 = software only. */
 static unsigned disp_hw = 0u;
+
+/* 0 until disp_init() has asked the machine. */
+static unsigned disp_ready = 0u;
+
+/* 1 when drawing goes to the accelerator, and the accelerator's handles for
+ * the screen, the back buffer, and whichever of them is being drawn on. */
+static unsigned disp_gac = 0u;
+static unsigned disp_base_h = 0u;
+static unsigned disp_back_h = 0u;
+static unsigned disp_target_h = 0u;
+
 
 static void disp_call(unsigned rw, unsigned command,
                       unsigned length, unsigned address) {
@@ -74,13 +113,12 @@ static unsigned disp_probe(void) {
     if (IO_RETLEN == 0xFFFFFFFFu) return 2u;
     if (IO_RETLEN < 12u) return 2u;
 
-    /* The device's screen must be the size this program was compiled
-     * for, or a hardware fill would write the machine's DISPLAY_SIZE
-     * bytes into a buffer we sized DISP_BYTES and corrupt the heap.
-     * These agree by construction now that the geometry is predefined
-     * from the memory map -- but a .bin built before a resolution change
-     * still runs, and nothing rebuilds it. */
-    if (IO_DATAW[2] != (unsigned)DISP_BYTES) return 2u;
+    /* The device's screen must be the size this program believes, or a
+     * hardware fill would write the machine's screen of bytes into a
+     * buffer we sized from ours and corrupt the heap. disp_init() took the
+     * size from the machine, so they agree -- unless the mode changed
+     * under a program that has not asked again. */
+    if (IO_DATAW[2] != disp_w * disp_h * 4u) return 2u;
 
     return 1u;
 }
@@ -90,20 +128,57 @@ static int disp_have_hw(void) {
     return disp_hw == 1u;
 }
 
+/* Every drawing call but a pixel's asks the machine the first time. A pixel
+ * does not need to: until disp_init() the globals are the power-on screen,
+ * which is where a pixel then goes. */
+#define DISP_READY() if (disp_ready == 0u) disp_init()
+
 /* Rows are contiguous, so walking a pointer along one beats recomputing
  * y*DISP_W + x per pixel -- that is a MUL plus address arithmetic every
  * time round. */
 static color_t *row_ptr(unsigned x, unsigned y) {
-    return ((color_t *)disp_target) + y * DISP_W + x;
+    return ((color_t *)disp_target) + y * disp_w + x;
+}
+
+/* The back buffer goes: its video memory, or its heap and its handle. */
+static void disp_drop_back(void) {
+    if (disp_back == 0u) return;
+    if (disp_back_vram != 0u) {
+        vram_free(disp_back_vram);
+    } else {
+        if (disp_gac) gac_ram_free(disp_back_h);
+        free((void *)disp_back);
+    }
+    disp_back = 0u;
+    disp_back_vram = 0u;
+    disp_target = disp_base;
+    disp_target_h = disp_base_h;
 }
 
 int disp_use_back_buffer(void) {
     void *buffer;
+    unsigned offset;
+    unsigned handle;
+    DISP_READY();
     if (disp_back != 0u) return 1;                 /* already have one */
-    buffer = malloc(DISP_BYTES);
-    if (buffer == NULL) return 0;
-    disp_back = (unsigned)buffer;
+    /* Video memory first: the screen's size by construction, out of the
+     * heap, and something the display flips to with a handle. */
+    handle = vram_alloc(disp_w, disp_h, &offset);
+    if (handle != 0u) {
+        disp_back = vram_aperture() + offset;
+        disp_back_vram = handle;
+        disp_back_h = handle;
+    } else {
+        buffer = malloc(disp_w * disp_h * 4u);
+        if (buffer == NULL) return 0;
+        disp_back = (unsigned)buffer;
+        if (disp_gac) {
+            disp_back_h = gac_ram_surface(disp_back, disp_w, disp_h);
+            if (disp_back_h == 0u) disp_gac = 0u;  /* it will not draw there: nor anywhere */
+        }
+    }
     disp_target = disp_back;
+    disp_target_h = disp_back_h;
     return 1;
 }
 
@@ -112,46 +187,64 @@ void disp_present(void) {
 
     if (disp_have_hw()) {
         /* Hand the display the buffer just drawn. One store each for the
-         * five header fields, instead of a copy of every pixel. */
+         * five header fields, instead of a copy of every pixel. CH_DISPLAY
+         * takes RAM and video memory alike. */
         disp_call(0u, DISP_CMD_SET_BASE, 4u, disp_target);
         if (IO_DATAW[0] != 0u) {
             /* Draw the next frame into whichever surface just left the
              * screen. It still holds the frame BEFORE the one now
              * showing -- see the note in display.h. */
-            disp_target = (disp_target == disp_back) ? DISP_BASE : disp_back;
+            if (disp_target == disp_back) {
+                disp_target = disp_base;
+                disp_target_h = disp_base_h;
+            } else {
+                disp_target = disp_back;
+                disp_target_h = disp_back_h;
+            }
             return;
         }
         disp_hw = 2u;                              /* refused: stop asking */
     }
 
     /* No device, or it would not take the base: copy, as before. The
-     * screen is DISP_BASE again, so drawing goes back to the heap. */
+     * screen is DISP_BASE again, so drawing goes back to the buffer. */
     {
         color_t *src = (color_t *)disp_target;
-        color_t *dst = (color_t *)DISP_BASE;
-        unsigned n = DISP_W * DISP_H;
-        if (disp_target == DISP_BASE) return;
+        color_t *dst = (color_t *)disp_base;
+        unsigned n = disp_w * disp_h;
+        if (disp_target == disp_base) return;
         while (n > 0u) { *dst = *src; dst++; src++; n--; }
         disp_target = disp_back;
+        disp_target_h = disp_back_h;
     }
 }
 
 void disp_set(unsigned x, unsigned y, color_t c) {
-    if (x >= DISP_W) return;
-    if (y >= DISP_H) return;
+    if (x >= disp_w) return;
+    if (y >= disp_h) return;
     *row_ptr(x, y) = c;
 }
 
 color_t disp_get(unsigned x, unsigned y) {
-    if (x >= DISP_W) return 0;
-    if (y >= DISP_H) return 0;
+    if (x >= disp_w) return 0;
+    if (y >= disp_h) return 0;
     return *row_ptr(x, y);
 }
 
+/* A fill of `pixels` pixels in colour c: the accelerator's, or stores? */
+static int disp_by_gac(unsigned pixels, color_t c) {
+    return disp_gac != 0u && (pixels >= DISP_GAC_MIN || DISP_BLENDS(c));
+}
+
 void disp_clear(color_t c) {
+    DISP_READY();
     /* disp_target, not DISP_BASE: with a back buffer in play this must
      * clear the buffer being drawn into, or the clear lands on screen
      * while every shape lands in the buffer. */
+    if (disp_gac) {
+        gac_fill(disp_target_h, 0, 0, (int)disp_w, (int)disp_h, c);
+        return;
+    }
     if (disp_have_hw()) {
         IO_DATAW[0] = c;                           /* the colour, in the window */
         /* 4 is the size of that payload, NOT the size of the fill. The
@@ -163,32 +256,47 @@ void disp_clear(color_t c) {
     }
     {
         color_t *p = (color_t *)disp_target;
-        unsigned n = DISP_W * DISP_H;
+        unsigned n = disp_w * disp_h;
         while (n > 0u) { *p = c; p++; n--; }
     }
 }
 
 void disp_hline(unsigned x, unsigned y, unsigned w, color_t c) {
     color_t *p;
-    if (y >= DISP_H || x >= DISP_W) return;
-    if (x + w > DISP_W) w = DISP_W - x;      /* clip, do not bail */
+    DISP_READY();
+    if (y >= disp_h || x >= disp_w) return;
+    if (x + w > disp_w) w = disp_w - x;      /* clip, do not bail */
+    if (disp_by_gac(w, c)) {
+        gac_fill(disp_target_h, (int)x, (int)y, (int)w, 1, c);
+        return;
+    }
     p = row_ptr(x, y);
     while (w > 0u) { *p = c; p++; w--; }
 }
 
 void disp_vline(unsigned x, unsigned y, unsigned h, color_t c) {
     color_t *p;
-    if (x >= DISP_W || y >= DISP_H) return;
-    if (y + h > DISP_H) h = DISP_H - y;
+    DISP_READY();
+    if (x >= disp_w || y >= disp_h) return;
+    if (y + h > disp_h) h = disp_h - y;
+    if (disp_by_gac(h, c)) {
+        gac_fill(disp_target_h, (int)x, (int)y, 1, (int)h, c);
+        return;
+    }
     p = row_ptr(x, y);
-    while (h > 0u) { *p = c; p = p + DISP_W; h--; }
+    while (h > 0u) { *p = c; p = p + disp_w; h--; }
 }
 
 void disp_rect(unsigned x, unsigned y, unsigned w, unsigned h, color_t c) {
     unsigned row = 0u;
-    if (x >= DISP_W || y >= DISP_H) return;
-    if (x + w > DISP_W) w = DISP_W - x;
-    if (y + h > DISP_H) h = DISP_H - y;
+    DISP_READY();
+    if (x >= disp_w || y >= disp_h) return;
+    if (x + w > disp_w) w = disp_w - x;
+    if (y + h > disp_h) h = disp_h - y;
+    if (disp_by_gac(w * h, c)) {
+        gac_fill(disp_target_h, (int)x, (int)y, (int)w, (int)h, c);
+        return;
+    }
     while (row < h) { disp_hline(x, y + row, w, c); row++; }
 }
 
@@ -205,16 +313,22 @@ static int disp_copy(unsigned to, unsigned from, unsigned bytes) {
 }
 
 void disp_scroll(unsigned y, unsigned h, int dy, color_t bg) {
-    unsigned row_bytes = DISP_W * 4u;
+    unsigned row_bytes;
     unsigned n;
     unsigned kept;
     unsigned gap;
     unsigned i;
-    if (y >= DISP_H || h == 0u || dy == 0) return;
-    if (y + h > DISP_H) h = DISP_H - y;
+    DISP_READY();
+    row_bytes = disp_w * 4u;
+    if (y >= disp_h || h == 0u || dy == 0) return;
+    if (y + h > disp_h) h = disp_h - y;
+    if (disp_gac) {
+        gac_scroll(disp_target_h, 0, (int)y, (int)disp_w, (int)h, dy, bg);
+        return;
+    }
     n = dy < 0 ? (unsigned)(0 - dy) : (unsigned)dy;
     if (n >= h) {
-        disp_rect(0u, y, DISP_W, h, bg);
+        disp_rect(0u, y, disp_w, h, bg);
         return;
     }
     kept = h - n;
@@ -229,15 +343,23 @@ void disp_scroll(unsigned y, unsigned h, int dy, color_t bg) {
     }
     /* The rows left behind: the first drawn, and copied down to the rest,
      * which is cheaper than drawing them when the device will. */
-    disp_hline(0u, gap, DISP_W, bg);
+    disp_hline(0u, gap, disp_w, bg);
     for (i = 1u; i < n; i++) {
         if (!disp_copy((gap + i) * row_bytes, gap * row_bytes, row_bytes))
-            disp_hline(0u, gap + i, DISP_W, bg);
+            disp_hline(0u, gap + i, disp_w, bg);
     }
 }
 
 void disp_frame(unsigned x, unsigned y, unsigned w, unsigned h, color_t c) {
+    DISP_READY();
     if (w == 0u || h == 0u) return;
+    /* The accelerator's frame is the same four lines -- where its signed
+     * numbers mean what these unsigned ones do: a corner on the screen and
+     * a size that is not a wrapped negative. */
+    if (disp_gac && x < disp_w && y < disp_h && w < 0x80000000u && h < 0x80000000u) {
+        gac_frame(disp_target_h, (int)x, (int)y, (int)w, (int)h, c);
+        return;
+    }
     disp_hline(x, y, w, c);
     disp_hline(x, y + h - 1u, w, c);
     disp_vline(x, y, h, c);
@@ -251,6 +373,8 @@ void disp_line(int x0, int y0, int x1, int y1, color_t c) {
     int sx = 1; int sy = 1;
     int err; int e2;
 
+    DISP_READY();
+    if (disp_gac) { gac_line(disp_target_h, x0, y0, x1, y1, c); return; }
     if (dx < 0) { dx = -dx; sx = -1; }
     if (dy < 0) { dy = -dy; sy = -1; }
     err = dx - dy;
@@ -267,7 +391,9 @@ void disp_line(int x0, int y0, int x1, int y1, color_t c) {
 /* Midpoint circle: eight-way symmetry, no division, no multiply. */
 void disp_circle(int cx, int cy, int r, color_t c) {
     int x = r; int y = 0; int err = 1 - r;
+    DISP_READY();
     if (r < 0) return;
+    if (disp_gac) { gac_circle(disp_target_h, cx, cy, r, c); return; }
     while (x >= y) {
         disp_set((unsigned)(cx + x), (unsigned)(cy + y), c);
         disp_set((unsigned)(cx + y), (unsigned)(cy + x), c);
@@ -295,10 +421,13 @@ static void disp_span(int x0, int x1, int y, color_t c) {
 /* A filled circle: disp_circle's algorithm with spans instead of points,
  * so the eight octant pixels become four rows between their two x's.
  * The rows overlap where the octants meet, which costs a few writes and
- * nothing else -- a pixel is stored, not blended. */
+ * nothing else here -- a pixel is stored, not blended. The accelerator
+ * draws each row once, which is what makes a translucent disc right. */
 void disp_disc(int cx, int cy, int r, color_t c) {
     int x = r; int y = 0; int err = 1 - r;
+    DISP_READY();
     if (r < 0) return;
+    if (disp_gac) { gac_disc(disp_target_h, cx, cy, r, c); return; }
     while (x >= y) {
         disp_span(cx - x, cx + x, cy + y, c);
         disp_span(cx - x, cx + x, cy - y, c);
@@ -308,6 +437,68 @@ void disp_disc(int cx, int cy, int r, color_t c) {
         if (err < 0) { err = err + 2 * y + 1; }
         else         { x--; err = err + 2 * (y - x) + 1; }
     }
+}
+
+/* An image onto the screen, clipped on all four sides: one BLIT from the
+ * pixels registered as a surface for the moment, or a row at a time with
+ * memcpy -- not a pixel at a time with disp_set, which for a screenful
+ * would be most of a second. */
+void disp_blit(unsigned *pixels, int x, int y, unsigned w, unsigned h) {
+    unsigned surface;
+    int row = 0;
+    int at;
+    int from;
+    int n;
+
+    DISP_READY();
+    if (w == 0u || h == 0u) return;
+    if (disp_gac) {
+        surface = gac_ram_surface((unsigned)pixels, w, h);
+        if (surface != 0u) {
+            gac_blit(surface, 0, 0, disp_target_h, x, y, (int)w, (int)h);
+            gac_ram_free(surface);
+            return;
+        }
+    }
+    while (row < (int)h) {
+        if (y + row >= 0 && y + row < (int)disp_h) {
+            at = x;
+            from = 0;
+            n = (int)w;
+            if (at < 0) { from = 0 - at; n = n + at; at = 0; }
+            if (at + n > (int)disp_w) n = (int)disp_w - at;
+            if (n > 0)
+                memcpy((void *)row_ptr((unsigned)at, (unsigned)(y + row)),
+                       pixels + row * (int)w + from, (unsigned)n * 4u);
+        }
+        row++;
+    }
+}
+
+int disp_setmode(unsigned w, unsigned h) {
+    DISP_READY();
+    if (!vram_set_mode(w, h)) return 0;
+    /* Everything sized for the old screen goes: the back buffer, and the
+     * accelerator's handle for the old screen if it was RAM. */
+    disp_drop_back();
+    if (disp_gac && disp_base_h != GAC_SCREEN) gac_ram_free(disp_base_h);
+    disp_init();
+    return 1;
+}
+
+int disp_modes(unsigned *ws, unsigned *hs, int max) {
+    unsigned count = vram_mode_count();
+    unsigned i;
+    if (count == 0u) {                             /* no video memory: the one there is */
+        if (max > 0) { ws[0] = DISPLAY_W; hs[0] = DISPLAY_H; }
+        return 1;
+    }
+    for (i = 0u; i < count && (int)i < max; i++) vram_mode_at(i, ws + i, hs + i);
+    return (int)count;
+}
+
+unsigned disp_generation(void) {
+    return vram_generation();
 }
 
 /* 5x7 font, printable ASCII 0x20..0x7E, in a 6x8 cell. One byte per
@@ -419,8 +610,15 @@ void disp_char(unsigned x, unsigned y, int ch, color_t fg) {
     unsigned row;
     unsigned col;
     unsigned bits;
+    char one;
 
+    DISP_READY();
     if (ch < 0x20 || ch > 0x7E) return;
+    if (disp_gac) {
+        one = (char)ch;
+        gac_text(disp_target_h, (int)x, (int)y, fg, 0u, &one, 1u);
+        return;
+    }
     index = ((unsigned)ch - 0x20u) * GLYPH_H;
     for (row = 0u; row < GLYPH_H; row++) {
         bits = ((unsigned)FONT[index + row]) & 0xF8u;
@@ -431,9 +629,76 @@ void disp_char(unsigned x, unsigned y, int ch, color_t fg) {
 }
 
 void disp_text(unsigned x, unsigned y, char *s, color_t fg) {
+    unsigned n = 0u;
+    DISP_READY();
+    if (disp_gac) {
+        /* The whole string in one command: the device steps a cell a
+         * character, GLYPH_W + 1, as the loop below does, and draws no
+         * background -- alpha 0 in bg. */
+        while (s[n]) n++;
+        gac_text(disp_target_h, (int)x, (int)y, fg, 0u, s, n);
+        return;
+    }
     while (*s) {
         disp_char(x, y, (int)*s, fg);
         x = x + GLYPH_W + 1u;
         s++;
     }
+}
+
+/* disp_init is here, after the font it hands the accelerator. */
+/* The accelerator's handle for a surface at `address`: the screen of the
+ * current mode, or a rectangle of RAM registered for it. 0 when it will
+ * not take it -- the power-on screen and the heap it will. */
+static unsigned disp_surface(unsigned address, unsigned screen) {
+    unsigned handle;
+    if (address == screen && address >= vram_aperture()) return GAC_SCREEN + 1u;
+    if (address >= vram_aperture()) return 0u;     /* video memory, but not the screen */
+    handle = gac_ram_surface(address, disp_w, disp_h);
+    return handle == 0u ? 0u : handle + 1u;
+}
+
+int disp_init(void) {
+    unsigned w;
+    unsigned h;
+    unsigned offset = 0u;
+    unsigned handle;
+
+    disp_ready = 1u;
+    disp_hw = 0u;
+    disp_gac = 0u;
+    if (vram_mode(&w, &h, &offset)) {
+        /* What is on the screen now: RAM at the power-on mode, the mode's
+         * surface in video memory otherwise. CH_DISPLAY says which, as an
+         * address the program can draw through either way. */
+        disp_w = w;
+        disp_h = h;
+        disp_call(0u, DISP_CMD_GET_BASE, 4u, 0u);
+        disp_base = IO_DATAW[0];
+    } else {
+        /* No video memory: CH_DISPLAY's size, or the power-on one on a
+         * bare CPU, where nothing answers. */
+        disp_call(0u, DISP_CMD_INFO, 12u, 0u);
+        if (IO_CH != 0u) {
+            IO_CH = 0u;
+        } else if (IO_RETLEN != 0xFFFFFFFFu && IO_RETLEN >= 12u) {
+            disp_w = IO_DATAW[0];
+            disp_h = IO_DATAW[1];
+        }
+        disp_base = DISPLAY_START;
+    }
+    disp_target = disp_base;
+
+    if (gac_present()) {
+        /* The accelerator draws on handles. disp_surface answers the
+         * handle plus 1, so that the screen's handle, 0, is not "none". */
+        handle = disp_surface(disp_base, vram_aperture() + offset);
+        if (handle != 0u && gac_set_font(FONT, GLYPH_W, GLYPH_H, GLYPH_W + 1u, GLYPH_H,
+                                         0x20u, 95u)) {
+            disp_base_h = handle - 1u;
+            disp_target_h = disp_base_h;
+            disp_gac = 1u;
+        }
+    }
+    return 1;
 }

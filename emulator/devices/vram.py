@@ -24,6 +24,8 @@ tells DisplayIO where to read the screen from.
   10   SCANOUT_RAM  RAM address  --                 1 / 0 -- the screen out of RAM
   11   UPLOAD       handle       ram, offset, n     n moved, or 0xFFFFFFFF
   12   DOWNLOAD     handle       ram, offset, n     n moved, or 0xFFFFFFFF
+  13   OWNER        n            --                 1 -- who owns what is allocated next
+  14   FREE_OWNED   n            --                 how many surfaces it freed
 
 Every reply word is little-endian. Arguments in the window are read with
 R/W 0, the way the HDD's DMA commands read theirs, so the reply comes back
@@ -49,6 +51,14 @@ change clears the new screen and points the scanout at it. At 192 x 108 the
 machine powers on scanning out of RAM at DISPLAY_START, exactly as it did
 before video memory existed; surface 0 exists all the same, ready to be
 flipped to.
+
+**Who owns a surface** (docs/gac/plans/phase5_display_lib.md §3). Every
+surface ALLOC hands out, and every RAM surface the GAC registers, is tagged
+with the current OWNER. FREE_OWNED n frees every one tagged n or more, in
+both devices. The kernel sets OWNER to a program's depth before running it
+and frees that depth when it ends -- however it ended, exit, fault or
+Ctrl+C -- the way it closes the files the program left open. The screen,
+surface 0, belongs to nobody and is never freed.
 
 Only ever called from the emulator thread, like every device callback,
 except `set_preferred`, which the display server calls (Phase 4) and which
@@ -76,6 +86,8 @@ CMD_SCANOUT = 9
 CMD_SCANOUT_RAM = 10
 CMD_UPLOAD = 11
 CMD_DOWNLOAD = 12
+CMD_OWNER = 13
+CMD_FREE_OWNED = 14
 
 #: "PGVR" in byte order, the convention of the CD drive's MEDIA_MAGIC.
 VRAM_MAGIC = 0x52564750
@@ -89,10 +101,11 @@ _OK, _NO = struct.pack("<I", 1), struct.pack("<I", 0)
 
 
 class Surface:
-    __slots__ = ("offset", "width", "height")
+    __slots__ = ("offset", "width", "height", "owner")
 
-    def __init__(self, offset: int, width: int, height: int):
+    def __init__(self, offset: int, width: int, height: int, owner: Optional[int] = None):
         self.offset, self.width, self.height = offset, width, height
+        self.owner = owner              # None: the screen, which nobody owns
 
     @property
     def size(self) -> int:
@@ -121,6 +134,8 @@ class VRAM:
         self._next_handle = 1
         self.generation = 0
         self.preferred = (0, 0, 0)            # w, h, serial
+        self.owner = 0                        # what ALLOC tags a surface with
+        self.gac = None                       # the GAC, which registers itself
         self.mode = tuple(mode)
         screen = self._place(*self.mode)
         if screen is None:
@@ -153,6 +168,7 @@ class VRAM:
         surface = self._place(width, height)
         if surface is None:
             return None
+        surface.owner = self.owner
         handle = self._next_handle
         # 0 is the screen and 0xFFFFFFFF means "system RAM" to the GAC
         # (design.md §5.3); neither is ever handed out.
@@ -169,6 +185,16 @@ class VRAM:
             # rather than on showing memory the next ALLOC will hand out.
             self.display.scan_vram(self.surfaces[0].offset)
         return True
+
+    def free_owned(self, owner: int) -> int:
+        """Free every surface tagged `owner` or more, here and in the GAC:
+        what the programs at that depth and below it left behind."""
+        gone = [h for h, s in self.surfaces.items() if s.owner is not None and s.owner >= owner]
+        for handle in gone:
+            self.free(handle)
+        if self.gac is not None:
+            gone += self.gac.free_owned(owner)
+        return len(gone)
 
     # --- the mode ------------------------------------------------------------
 
@@ -279,6 +305,11 @@ class VRAM:
             return _OK if self.scanout(address) else _NO
         if command == CMD_SCANOUT_RAM:
             return _OK if self.display.scan_ram(address) else _NO
+        if command == CMD_OWNER:
+            self.owner = address
+            return _OK
+        if command == CMD_FREE_OWNED:
+            return struct.pack("<I", self.free_owned(address))
         if command in (CMD_UPLOAD, CMD_DOWNLOAD):
             return struct.pack("<I", self._dma(command, address))
         log.warning("VRAM: unknown command %d", command)

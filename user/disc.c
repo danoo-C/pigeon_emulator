@@ -50,6 +50,10 @@
 #define FOOT_RULE (STATUS_Y - 2)
 #define ROWS      ((FOOT_RULE - 1 - LIST_Y) / ROW)
 #define BODY_ROWS (ROWS - 1)            /* row 0 says what the disc is */
+/* Arrays are sized for the widest screen there is, DISPLAY_MAX_W: COLS is
+ * the screen's own, worked out at run time now, and cannot size one. */
+#define MAX_COLS  (DISPLAY_MAX_W / CELL)
+#define MAX_ROWS  ((DISPLAY_MAX_H - GLYPH_H - 1 - 2 - 1 - LIST_Y) / ROW)   /* ROWS's, from the tallest */
 
 #define BG      0xFF0A0C10
 #define BAR     0xFF232936
@@ -78,7 +82,7 @@
 #define MAX_LINES 160
 #define COPY_DEPTH 4u                   /* dir handles + 2 stay under fs.c's 8 */
 
-typedef struct { char text[COLS + 1]; } line_t;
+typedef struct { char text[MAX_COLS + 1]; } line_t;
 
 static int       kind;
 static cd_info_t disc;
@@ -102,7 +106,7 @@ static int       copied_files;
 static int       hdd_ok;
 static int       hdd_err;
 
-static char      message[COLS + 1];
+static char      message[MAX_COLS + 1];
 static color_t   msg_ink;
 static int       running;
 static int       dirty;
@@ -265,7 +269,7 @@ static void add_line(char *text) {
  * Unsorted -- readdir's order, which is the order things were made in. */
 static void list_dir(char *path, unsigned depth) {
     fs_stat_t st;
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
     char size[16];
     char child[FS_PATH_MAX + 1];
     unsigned indent;
@@ -397,7 +401,7 @@ static void render(void);
 static void copy_disc(void) {
     char dst[FS_PATH_MAX + 1];
     char src[8];
-    char done[COLS + 1];
+    char done[MAX_COLS + 1];
     char num[STR_UTOA_MAX];
     int r;
 
@@ -463,7 +467,7 @@ static void eject_disc(void) {
 /* --- drawing --------------------------------------------------------------------------- */
 
 static void draw_header(void) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
 
     disp_rect(0, 0, DISP_W, HEAD_RULE, BAR);
     blank(row);
@@ -477,7 +481,7 @@ static void draw_header(void) {
 }
 
 static void draw_wrapped_line(int line, unsigned y) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
     unsigned j;
     unsigned c;
 
@@ -490,8 +494,8 @@ static void draw_wrapped_line(int line, unsigned y) {
 }
 
 static void draw_hex(void) {
-    unsigned char bytes[HEX_PER_ROW * ROWS];
-    char row[COLS + 1];
+    unsigned char bytes[HEX_PER_ROW * MAX_ROWS];
+    char row[MAX_COLS + 1];
     unsigned offset;
     unsigned i;
     unsigned j;
@@ -520,7 +524,7 @@ static void draw_hex(void) {
 }
 
 static void draw_body(void) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
     char num[STR_UTOA_MAX + 12];
     int r;
     int line;
@@ -573,7 +577,7 @@ static void draw_body(void) {
 }
 
 static void draw_status(void) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
     color_t ink = DIM;
 
     disp_hline(0, FOOT_RULE, DISP_W, DIM);
@@ -642,6 +646,7 @@ int main(void) {
     int code;
     int r;
 
+    disp_init();  /* the screen, as the machine has it (display.h) */
     disp_use_back_buffer();
     message[0] = 0;
     text_buf = NULL;

@@ -588,17 +588,27 @@ def test_a_translucent_fill_matches_the_formula_on_every_pixel(colour):
             assert pixel(fb, x, y) == want, (x, y)
 
 
-def test_alpha_zero_draws_nothing_and_says_so():
+def test_alpha_zero_is_stored_as_it_is_not_invisible():
+    """0 is what code has always cleared to, meaning black, and the screen
+    ignores alpha (phase 4): an alpha-0 colour is stored like an opaque one
+    (docs/gac/plans/phase5_display_lib.md, As built)."""
     rig = Rig()
     rig.font()
     noise(rig, DISPLAY_START, W * H, 7)
-    before = rig.fb()
-    s = rig.screen
     for command, args in ((CMD_FILL, (0, 0, W, H)), (CMD_FRAME, (5, 5, 50, 50)),
-                          (CMD_LINE, (0, 0, W, H)), (CMD_CIRCLE, (50, 50, 20)),
-                          (CMD_DISC, (50, 50, 20))):
-        assert rig.ok(command, s, *args, 0x00FFFFFF), command
-    assert rig.text(s, 0, 0, "invisible", 0x00FFFFFF, 0x00FFFFFF)
+                          (CMD_LINE, (0, 0, W, H)), (CMD_DISC, (50, 50, 20))):
+        assert rig.ok(command, rig.screen, *args, 0x00123456), command
+    assert pixel(rig.fb(), 0, 0) == 0x00123456 and pixel(rig.fb(), 50, 50) == 0x00123456
+    assert rig.ok(CMD_FILL, rig.screen, 0, 0, W, H, 0)
+    assert rig.fb() == bytes(DISPLAY_SIZE), "a clear to 0 did not zero the screen"
+
+
+def test_a_text_background_with_alpha_zero_is_still_no_background():
+    rig = Rig()
+    rig.font()
+    noise(rig, DISPLAY_START, W * H, 8)
+    before = rig.fb()
+    assert rig.text(rig.screen, 0, 0, " ", 0xFFFFFFFF, 0x00FFFFFF)
     assert rig.fb() == before
 
 

@@ -64,10 +64,15 @@ and `(dst & ~mask) | (fg & mask)`. Eight big-integer operations a line of
 text, not eight per glyph.
 
 **Blending.** Every command with a colour blends on its alpha byte:
-0xFF... is stored exactly as before, 0x00... draws nothing, and anything
-between lays the colour over what is there,
+0xFF... and 0x00... are stored exactly as before, and anything between
+lays the colour over what is there,
 `d' = (d * (255 - a) + s * a + 127) / 255` per channel, rounded to nearest
-so a colour over itself is itself. The destination keeps its own alpha
+so a colour over itself is itself. Alpha 0 is stored, not "invisible":
+the screen ignores alpha (docs/gac/plans/phase4_frontends.md), and code
+has always cleared to 0 meaning black -- bios2's disp_clear(0) did
+nothing at all while alpha 0 drew nothing (docs/gac/plans/
+phase5_display_lib.md). The one "nothing" is TEXT's background, where
+alpha 0 means no background. The destination keeps its own alpha
 byte -- the scanout ignores alpha, and three channels is a cheaper table
 than four. A blend has to read every byte it writes, so it cannot be a
 slice assignment; per channel it is a 256-entry `bytes.translate` table
@@ -83,6 +88,7 @@ aperture, damage unknown", and Phase 8 has the GAC report its own damage.
 """
 import logging
 import struct
+import weakref
 from typing import Dict, List, Optional, Tuple
 
 from ..memory_map import (
@@ -175,7 +181,7 @@ class Ink:
 
 
 class ClearInk:
-    """Alpha 0: nothing lands."""
+    """Nothing lands: TEXT's background when its alpha is 0."""
     __slots__ = ()
 
     def span(self, buf, offset: int, pixels: int) -> None:
@@ -228,13 +234,12 @@ _CLEAR = ClearInk()
 
 
 def ink(colour: int):
-    """The ink a colour needs. Opaque first, and untouched: every colour in
-    the tree today is 0xFF..., and none of them gets one step slower."""
+    """The ink a colour needs. Stored first, and untouched: every colour in
+    the tree is 0xFF... or a plain 0, and none of them gets one step
+    slower. Only an alpha from 1 to 254 blends."""
     alpha = (colour >> 24) & 0xFF
-    if alpha == 0xFF:
+    if alpha == 0xFF or alpha == 0:
         return Ink(colour)
-    if alpha == 0:
-        return _CLEAR
     return BlendInk(colour)
 
 
@@ -300,7 +305,12 @@ class GAC:
     def __init__(self, ram, vram):
         self.ram = ram
         self.vram = vram
-        self.ram_surfaces: Dict[int, Tuple[int, int, int]] = {}
+        # Weak, as DisplayIO's link to the VRAM device is: the two point at
+        # each other, and a cycle would keep the machine's RAM alive.
+        vram.gac = weakref.proxy(self)
+        # handle -> (address, w, h, owner): the owner as CH_VRAM's OWNER
+        # said when it was registered, so FREE_OWNED frees these too.
+        self.ram_surfaces: Dict[int, Tuple[int, int, int, int]] = {}
         self._next_ram = RAM_HANDLE + 1
         self.font: Optional[Font] = None
 
@@ -311,7 +321,7 @@ class GAC:
             found = self.ram_surfaces.get(handle)
             if found is None:
                 return None
-            address, w, h = found
+            address, w, h, _ = found
             return Target(self.ram.mem, address, w, h)
         surface = self.vram.surfaces.get(handle)
         if surface is None:
@@ -331,8 +341,15 @@ class GAC:
             return 0
         handle = self._next_ram
         self._next_ram = handle + 1 if handle + 1 < 0xFFFFFFFF else RAM_HANDLE + 1
-        self.ram_surfaces[handle] = (address, w, h)
+        self.ram_surfaces[handle] = (address, w, h, self.vram.owner)
         return handle
+
+    def free_owned(self, owner: int) -> List[int]:
+        """Forget every RAM surface registered by `owner` or deeper."""
+        gone = [h for h, s in self.ram_surfaces.items() if s[3] >= owner]
+        for handle in gone:
+            del self.ram_surfaces[handle]
+        return gone
 
     # --- shapes -------------------------------------------------------------
 
@@ -547,7 +564,10 @@ class GAC:
             return
         lo, hi = left * 4, right * 4
         width = hi - lo
-        fg_ink, bg_ink = ink(fg), ink(bg)
+        # A background with alpha 0 is no background (Q3 of phase 3): the
+        # one place alpha 0 means "nothing" rather than a colour to store.
+        fg_ink = ink(fg)
+        bg_ink = _CLEAR if (bg >> 24) & 0xFF == 0 else ink(bg)
         # An opaque colour's row is the same on every row: built once.
         fg_row = (int.from_bytes(fg_ink.over(bytes(width)), "little")
                   if isinstance(fg_ink, Ink) else None)

@@ -1294,6 +1294,7 @@ static int split_lines(void) {
 int main(int argc, char **argv) {
     int i;
 
+    disp_init();  /* the screen, as the machine has it (display.h) */
     if (argc < 2) {
         say("usage: pgs FILE [ARGS...]\n");
         return 1;

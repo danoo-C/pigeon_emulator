@@ -1,6 +1,6 @@
 # GAC and VRAM: a graphics accelerator, its own video memory, and a screen that resizes
 
-> **Status: Phases 1–4 built, 2026-09-18; Phase 5 is next. Every question is decided
+> **Status: Phases 1–5 built, 2026-09-18; Phase 6 is next. Every question is decided
 > ([decisions.md](decisions.md)).** You answered the design questions on
 > 2026-09-17 and the one follow-up (§11, whether `--ram` ships with this) on
 > 2026-09-18: it ships with Phase 1, defaulting to 128 MB.
@@ -36,8 +36,8 @@ graphics accelerator and separate video memory, running the existing
 | [2](phase2_vram.md) | **`CH_VRAM`.** Modes, surfaces, the scanout selector, upload/download | emulator | **built** 2026-09-18 |
 | [3](plans/phase3_gac.md) | **`CH_GAC`.** Every primitive, `BATCH`, text, then blending | emulator | **built** 2026-09-18 |
 | [4](plans/phase4_frontends.md) | **The front ends follow the mode.** Browser and pygame resize | emulator | **built** 2026-09-18 |
-| [5](phase5_display_lib.md) | **`<pigeon/display.h>` on runtime geometry** | guest | planned |
-| [6](phase6_programs_console.md) | **The five fixed-size programs, then the kernel console** | guest | planned |
+| [5](plans/phase5_display_lib.md) | **`<pigeon/display.h>` on runtime geometry** | guest | **built** 2026-09-18 |
+| [6](phase6_programs_console.md) | **The kernel console at any size, and the mode picker** (the fixed-size programs moved to 5) | guest | planned |
 | [7](phase7_setmode.md) | **`setmode`, and `# graphics` scripts that pick a mode** | guest | planned |
 | [8](phase8_damage.md) | **Damage rectangles and bandwidth** | both | planned |
 
