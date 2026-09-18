@@ -18,6 +18,7 @@ from .instruction_set import INSTR_SIZE
 from .devices.cd import CD
 from .devices.debug_port import DebugPort
 from .devices.display_io import DisplayIO
+from .devices.gac import GAC
 from .devices.hdd import HDD
 from .devices.hid import HID
 from .devices.timer import Timer
@@ -25,7 +26,7 @@ from .devices.vram import VRAM
 from .io_controller import IOChannel, IOController
 from .memory_map import (
     BIOS2_MAX, CH_BIOS2, CH_CD, CH_DEBUG, CH_DISPLAY, CH_HDD, CH_HID, CH_TIMER, CH_USERPROG,
-    CH_VRAM, DISPLAY_H, DISPLAY_MODES, DISPLAY_W, RAM_SIZE, REGISTER_COUNT, VEC_BREAK,
+    CH_GAC, CH_VRAM, DISPLAY_H, DISPLAY_MODES, DISPLAY_W, RAM_SIZE, REGISTER_COUNT, VEC_BREAK,
     VEC_TIMER, VRAM_SIZE,
 )
 from .ram import RAM
@@ -94,11 +95,17 @@ class Machine:
         # what the screen shows (docs/gac/phase2_vram.md). Only with video
         # memory; without it the channel is empty, VRAM's INFO answers
         # 0xFFFFFFFF instead of its magic, and the screen stays 192 x 108.
+        # Channel 10: the accelerator, which draws on VRAM's surfaces, so it
+        # comes and goes with them (docs/gac/plans/phase3_gac.md, Q5).
         self.vram: Optional[VRAM] = None
+        self.gac: Optional[GAC] = None
         if self.ram.vram_size:
             self.vram = VRAM(self.ram, self.display_io, display_modes, display_mode)
+            self.gac = GAC(self.ram, self.vram)
             self.io_controller.register_channel(
                 CH_VRAM, IOChannel(self.vram.callback, name="VRAM"))
+            self.io_controller.register_channel(
+                CH_GAC, IOChannel(self.gac.callback, name="GAC"))
         elif tuple(display_mode) != (DISPLAY_W, DISPLAY_H):
             raise ValueError(f"a {display_mode[0]}x{display_mode[1]} screen needs video "
                              f"memory; without it the screen is {DISPLAY_W}x{DISPLAY_H}")

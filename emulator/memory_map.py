@@ -177,6 +177,7 @@ CH_CD       = 6   # removable read-only disc, swapped from the host
 CH_BIOS2    = 7   # read-only firmware: the second-stage BIOS (docs/os_cd.md)
 CH_DEBUG    = 8   # write-only debug port, shown as "Serial" (docs/phase5_plan.md)
 CH_VRAM     = 9   # video memory: modes, surfaces, what is on screen (docs/gac/)
+CH_GAC      = 10  # the graphics accelerator: drawing done by the host (docs/gac/)
 # <pigeon/cd.h> takes a channel, so a second drive is a one-line change
 # here and nowhere else.
 

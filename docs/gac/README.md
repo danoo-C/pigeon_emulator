@@ -34,7 +34,7 @@ graphics accelerator and separate video memory, running the existing
 |---|---|---|---|
 | [1](phase1_aperture.md) | **The aperture and `--ram`.** VRAM mapped above RAM, nothing behind it yet | emulator | **built** 2026-09-18 |
 | [2](phase2_vram.md) | **`CH_VRAM`.** Modes, surfaces, the scanout selector, upload/download | emulator | **built** 2026-09-18 |
-| [3](plans/phase3_gac.md) | **`CH_GAC`.** Every primitive, `BATCH`, text, then blending | emulator | **planned in detail**, questions open |
+| [3](plans/phase3_gac.md) | **`CH_GAC`.** Every primitive, `BATCH`, text, then blending | emulator | **being built** |
 | [4](phase4_frontends.md) | **The front ends follow the mode.** Browser and pygame resize | emulator | planned |
 | [5](phase5_display_lib.md) | **`<pigeon/display.h>` on runtime geometry** | guest | planned |
 | [6](phase6_programs_console.md) | **The five fixed-size programs, then the kernel console** | guest | planned |

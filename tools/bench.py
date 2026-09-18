@@ -60,6 +60,47 @@ def bench_memory():
     return results
 
 
+def bench_gac():
+    """The accelerator at its biggest mode, through its callback as the
+    bus calls it: a full-screen FILL, and a full console of TEXT -- the
+    redraw that costs about 34 s in guest code (docs/gac/design.md §4.3)."""
+    import random
+    import re
+    import struct
+    from emulator.devices.display_io import DisplayIO
+    from emulator.devices.gac import CMD_FILL, CMD_SET_FONT, CMD_TEXT, GAC
+    from emulator.devices.vram import VRAM
+    from emulator.memory_map import DISPLAY_MODES, IO_START, IOHeader
+
+    window = IO_START + IOHeader.USABLE_AFTER
+    ram = RAM(1 << 24, 1 << 23)
+    vram = VRAM(ram, DisplayIO(ram), DISPLAY_MODES, (1280, 720))
+    gac = GAC(ram, vram)
+    source = (REPO_ROOT / "lib" / "pigeon" / "display.c").read_text()
+    table = source[source.index("FONT[] = {"):source.index("};", source.index("FONT[] = {"))]
+    font = bytes(int(h, 16) for h in re.findall(r"0x([0-9A-Fa-f]{2})", table))
+    ram.mem[HEAP_START:HEAP_START + len(font)] = font
+
+    def call(command, fmt, *args, tail=b""):
+        data = struct.pack(fmt, *args) + tail
+        ram.mem[window:window + len(data)] = data
+        gac.callback(0, command, 4, 0, bytearray(4))
+
+    call(CMD_SET_FONT, "<7I", HEAP_START, 5, 8, 6, 9, 0x20, 95)
+    start = time.perf_counter()
+    for _ in range(20):
+        call(CMD_FILL, "<IiiiiI", 0, 0, 0, 1280, 720, 0xFF101018)
+    fill = (time.perf_counter() - start) / 20 * 1000
+
+    rng = random.Random(1)
+    lines = [bytes(rng.randrange(0x21, 0x7F) for _ in range(1280 // 6)) for _ in range(720 // 9)]
+    start = time.perf_counter()
+    for row, text in enumerate(lines):
+        call(CMD_TEXT, "<IiiIII", 0, 0, row * 9, 0xFFC0C0C0, 0xFF101018, len(text), tail=text)
+    console = (time.perf_counter() - start) * 1000
+    return fill, console
+
+
 def bench_display():
     display = DisplayIO(RAM(RAM_SIZE))
     data = bytes(range(256)) * (DISPLAY_SIZE // 256)
@@ -130,6 +171,9 @@ if __name__ == "__main__":
     heap, aperture = bench_memory()
     print(f"Word write, heap  {heap:>12.1f} ns")
     print(f"Word write, VRAM  {aperture:>12.1f} ns      (through the aperture: one pixel)")
+    fill, console = bench_gac()
+    print(f"GAC fill, 720p    {fill:>12.3f} ms      a whole 1280x720 screen, one command")
+    print(f"GAC text, 720p    {console:>12.1f} ms      a whole 213x80 console, 80 commands")
     ms = bench_display()
     print(f"Frame conversion  {ms:>12.3f} ms      (was 2.22 ms; "
           f"{1000 / ms:,.0f} FPS ceiling)")

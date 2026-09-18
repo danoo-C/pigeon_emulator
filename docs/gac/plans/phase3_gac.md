@@ -1,7 +1,7 @@
 # Phase 3: `CH_GAC`, the accelerator
 
-> Part of [the GAC plan](../README.md). **Status: planned in detail,
-> 2026-09-18. Waiting for your answers in [§7](#7-questions).** Needs Phase 2
+> Part of [the GAC plan](../README.md). **Status: planned, every question
+> decided ([§7](#7-decisions)), 2026-09-18; being built.** Needs Phase 2
 > (built). Design: [design.md §5.3](../design.md#53-ch_gac--10--the-accelerator)
 > and [§5.3.1](../design.md#531-alpha-blending-in-v1-q9); the numbers are §4.3
 > and §4.5. Decisions: Q8, Q9, Q10, Q11, Q13 in
@@ -240,12 +240,13 @@ passes.
 
 ---
 
-## 7. Questions
+## 7. Decisions
 
-My recommendation is first in each. Answer under any of them, or say
-"recommendations" and I will take them all.
+Answered 2026-09-18: *"lets do all recommendation"*, written into this
+section's title as `Questions - ALL RECOMMENDATION`. Every recommendation
+stands, and the body above already says what each one means.
 
-1. **Coordinates: signed, with real clipping?** `display.c` takes rect
+1. ~~**Coordinates: signed, with real clipping?**~~ `display.c` takes rect
    coordinates unsigned, so a rect at x = −5 wraps to a huge x and draws
    **nothing** *(checked)*. `graphics.c` works around that by clipping
    before it calls *(checked: `graphics.c:126`)*. **Recommendation:** the GAC
@@ -255,55 +256,57 @@ My recommendation is first in each. Answer under any of them, or say
    relies on the old behaviour (`graphics.c` clips first). The equality test
    keeps to on-screen rects for that one case.
 
-   *Answer:*
+   **Decided (you), 2026-09-18:** the recommendation.
 
-2. **RAM surfaces as registered handles, instead of `0xFFFFFFFF` plus the
-   geometry in every command?** §5.3 had every command carry a RAM surface's
+2. ~~**RAM surfaces as registered handles, instead of `0xFFFFFFFF` plus the
+   geometry in every command?**~~ §5.3 had every command carry a RAM surface's
    address and size inline. **Recommendation:** register once with
    `RAM_SURFACE` and get a handle. Every command then has a fixed shape, the
    range is checked once instead of on every call, and `BATCH` records stay
    short.
 
-   *Answer:*
+   **Decided (you), 2026-09-18:** the recommendation.
 
-3. **`TEXT`'s background: alpha 0 means "none"?** `disp_text` draws ink
+3. ~~**`TEXT`'s background: alpha 0 means "none"?**~~ `disp_text` draws ink
    only, and the kernel draws a rect first when it wants a background
    *(checked)*. **Recommendation:** `TEXT` takes `bg` anyway, and `bg` with
    alpha 0 means "leave what is there". That is exactly what blending would
    do with it, so it is not a special case. A console line can then be
    redrawn with its background in one call instead of a rect plus a text.
 
-   *Answer:*
+   **Decided (you), 2026-09-18:** the recommendation.
 
-4. **`BATCH` checks everything before drawing anything?**
+4. ~~**`BATCH` checks everything before drawing anything?**~~
    **Recommendation:** yes for its *shape* (unknown command, overrun,
    nested batch); no for run-time refusals (a bad handle is skipped and
    counted). The first is a bug in the program that built the batch. The
    second can happen legitimately, for example a surface freed between
    building and sending.
 
-   *Answer:*
+   **Decided (you), 2026-09-18:** the recommendation.
 
-5. **`CH_GAC` only on machines with video memory?** **Recommendation:**
+5. ~~**`CH_GAC` only on machines with video memory?**~~ **Recommendation:**
    yes, like `CH_VRAM`. With `--vram 0` there are no VRAM surfaces, so the
    GAC could still draw into RAM surfaces, but a machine without video memory
    is "the machine from before this plan" and should stay exactly that.
 
-   *Answer:*
+   **Decided (you), 2026-09-18:** the recommendation.
 
-6. **One font, or several?** The OS has one font, and `display.c` and the
+6. ~~**One font, or several?**~~ The OS has one font, and `display.c` and the
    kernel share it *(checked)*. **Recommendation:** one font slot now. A
    `font` argument can be added to `SET_FONT` and `TEXT` later without
    renumbering anything, since a new command is cheaper than a slot nobody
    uses.
 
-   *Answer:*
+   **Decided (you), 2026-09-18:** the recommendation.
 
-7. **Commits.** Phases 1 and 2 are still uncommitted, and so are the
+7. ~~**Commits.**~~ Phases 1 and 2 are still uncommitted, and so are the
    `gui.pgs` demo and its disc entry, which is why two installer tests
    expect 32 files and find 33. **Recommendation:** before starting, commit
    Phases 1 and 2 on `graphics` as one commit. Commit your `gui.pgs` work
    separately, with the two tests' count bumped to 33. Then commit 3a and 3b
    each on their own. Or tell me to leave all committing to you.
 
-   *Answer:*
+   **Decided (you), 2026-09-18:** the recommendation, and done: `1730bdd`
+   (`gui.pgs`, with the tests at 33), `eade0f2` (the `ADD` experiment, as you
+   left it), `c9a17ef` (Phases 1 and 2), `b7ef940` (this plan).
