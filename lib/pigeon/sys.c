@@ -13,6 +13,7 @@
 typedef int  (*sys_int_ptr_n)(int, void *, unsigned);
 typedef int  (*sys_path_flags)(char *, unsigned);
 typedef int  (*sys_int)(int);
+typedef int  (*sys_two_sizes)(unsigned *, unsigned *);
 typedef int  (*sys_path)(char *);
 typedef int  (*sys_int_stat)(int, sys_stat_t *);
 typedef int  (*sys_path_stat)(char *, sys_stat_t *);
@@ -97,6 +98,10 @@ int setbreak(int on) { return ((sys_int)SYS_SLOT(SYS_SETBREAK))(on); }
 int paging(int on) { return ((sys_int)SYS_SLOT(SYS_PAGING))(on); }
 
 int keepscreen(int on) { return ((sys_int)SYS_SLOT(SYS_KEEPSCREEN))(on); }
+
+int consize(unsigned *cols, unsigned *rows) {
+    return ((sys_two_sizes)SYS_SLOT(SYS_CONSIZE))(cols, rows);
+}
 
 void print(char *s) {
     unsigned n = 0u;

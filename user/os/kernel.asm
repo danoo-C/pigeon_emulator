@@ -284,6 +284,16 @@ w_keepscreen:
     EI
     RET
 
+w_consize:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_consize
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
 w_exit:
     DI
     MOV C, #__g_in_kernel

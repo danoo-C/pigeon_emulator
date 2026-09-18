@@ -63,12 +63,18 @@
 #define K_KEY_LCTRL         0x8Bu
 #define K_KEY_RCTRL         0x8Cu
 
-/* The console: 32 columns by 12 rows, DISP_W / (GLYPH_W + 1) by
- * DISP_H / (GLYPH_H + 1) -- a column and a row of space between cells. */
-#define CON_COLS   32u
-#define CON_ROWS   12u
+/* The console: DISP_W / (GLYPH_W + 1) by DISP_H / (GLYPH_H + 1) cells, a
+ * column and a row of space between them -- 32 x 12 at 192 x 108, 213 x 80
+ * at 1280 x 720 -- in con_cols and con_rows, which follow the mode
+ * (docs/gac/plans/phase6_console.md). The grids are sized for the biggest
+ * screen, and a row keeps its place in them whatever the mode: an index is
+ * row * CON_MAX_COLS + col, a constant, and a mode change moves no memory. */
 #define CON_CELL_W 6u
 #define CON_CELL_H 9u
+/* Rounded up to a multiple of 4, so every row starts on a word and memcpy
+ * moves it a word at a time rather than a byte: 216, for 213 cells. */
+#define CON_MAX_COLS (((DISPLAY_MAX_W / CON_CELL_W) + 3u) & ~3u)
+#define CON_MAX_ROWS (DISPLAY_MAX_H / CON_CELL_H)
 #define CON_INK    0xFFD8D8D8u
 #define CON_BG     BLACK
 #define CON_DEFAULT  8u             /* con_palette's own ink                    */
@@ -87,7 +93,7 @@
 #define COMPLETE_TEXT 64u           /* setcomplete's directory and built-ins, each */
 #define MATCHES      64u            /* names Tab considers, of up to 31 bytes      */
 #define SCROLLBACK   100u           /* rows kept after they scroll off the top     */
-#define PAGE_ROWS    11u            /* PgUp and PgDn: a screen, less a row to keep */
+#define PAGE_ROWS    (con_rows - 1u)  /* PgUp and PgDn: a screen, less a row to keep */
 #define WHEEL_ROWS   3u             /* a wheel notch                               */
 
 typedef int  (*call4_fn)(unsigned, int, char **, unsigned *);
@@ -123,6 +129,7 @@ extern int w_setcomplete;
 extern int w_setbreak;
 extern int w_paging;
 extern int w_keepscreen;
+extern int w_consize;
 extern int kswallow;
 extern int fault_div;
 extern int fault_opcode;
@@ -155,10 +162,12 @@ unsigned fault_frames[256];     /* the frame stack k_fault runs on           */
 int handle_depth[HANDLES];      /* the program an fs handle is open for; 0 none */
 unsigned handle_dir[HANDLES];   /* 1 if that handle is a directory's         */
 
-char con_grid[384];             /* CON_ROWS * CON_COLS characters            */
-char con_look[384];             /* each cell's ink, and CON_INVERSE          */
+char con_grid[CON_MAX_ROWS * CON_MAX_COLS];   /* characters, a row every CON_MAX_COLS */
+char con_look[CON_MAX_ROWS * CON_MAX_COLS];             /* each cell's ink, and CON_INVERSE          */
+unsigned con_cols = 32u;        /* the console's size in cells, from the mode */
+unsigned con_rows = 12u;
 unsigned con_row;
-unsigned con_col;               /* CON_COLS: the row is full, wrap before the next */
+unsigned con_col;               /* con_cols: the row is full, wrap before the next */
 unsigned con_top;               /* the rows that scroll, ESC [ t ; b r: all 12 */
 unsigned con_bottom;            /* unless a program such as edit sets fewer   */
 unsigned con_attr;              /* the look new characters get               */
@@ -184,8 +193,8 @@ unsigned match_count;
 unsigned list_row;              /* Tab's list under the line: its first row   */
 unsigned list_rows;             /* and how many; 0 when none is showing       */
 
-char back_grid[3200];           /* SCROLLBACK x CON_COLS: the rows that scrolled off, */
-char back_look[3200];           /* a ring with back_next where the next one goes      */
+char back_grid[SCROLLBACK * CON_MAX_COLS];  /* the rows that scrolled off,            */
+char back_look[SCROLLBACK * CON_MAX_COLS];           /* a ring with back_next where the next one goes      */
 unsigned back_count;
 unsigned back_next;
 unsigned view_back;             /* rows the view is scrolled back; 0 is the screen    */
@@ -253,7 +262,7 @@ static void con_paint(unsigned row, unsigned col, int ch, unsigned look) {
 
 /* A cell of the screen, on a background already cleared. */
 static void con_draw(unsigned row, unsigned col) {
-    con_paint(row, col, (int)con_grid[row * CON_COLS + col], (unsigned)con_look[row * CON_COLS + col]);
+    con_paint(row, col, (int)con_grid[row * CON_MAX_COLS + col], (unsigned)con_look[row * CON_MAX_COLS + col]);
 }
 
 static void con_cell(unsigned row, unsigned col) {
@@ -261,16 +270,67 @@ static void con_cell(unsigned row, unsigned col) {
     con_draw(row, col);
 }
 
+/* A run of n cells of one look, from row, col: one command for the lot,
+ * where con_paint is one a cell. An inverse run is its ink as a fill and
+ * the characters cut out of it, as an inverse cell is. */
+static void con_run(unsigned row, unsigned col, unsigned n, unsigned look) {
+    unsigned x = col * CON_CELL_W;
+    unsigned y = row * CON_CELL_H;
+    color_t ink = con_palette[look & 15u];
+    char *text = con_grid + row * CON_MAX_COLS + col;
+    if ((look & CON_INVERSE) != 0u) {
+        disp_rect(x, y, n * CON_CELL_W, CON_CELL_H, ink);
+        disp_textn(x, y, text, n, CON_BG);
+    } else {
+        disp_textn(x, y, text, n, ink);
+    }
+}
+
+/* The whole console again, a row at a time: each run of cells of one look
+ * is one command, blank cells and all -- they draw nothing -- so an
+ * ordinary row of text is one. At 213 x 80 a cell at a time was 17,040
+ * commands and seconds of work (docs/gac/plans/phase6_console.md §2.3).
+ * A run ends where the look changes; blank cells at its end are left off,
+ * and blank cells of the plain look between runs cost nothing. */
 static void con_redraw(void) {
     unsigned row;
     unsigned col;
-    unsigned i;
+    unsigned start;
+    unsigned end;
+    unsigned look;
+    char *grid;
+    char *looks;
     disp_clear(CON_BG);
-    for (row = 0u; row < CON_ROWS; row++) {
-        for (col = 0u; col < CON_COLS; col++) {
-            i = row * CON_COLS + col;
-            if (con_grid[i] != ' ' || ((unsigned)con_look[i] & CON_INVERSE) != 0u)
-                con_draw(row, col);
+    for (row = 0u; row < con_rows; row++) {
+        grid = con_grid + row * CON_MAX_COLS;
+        looks = con_look + row * CON_MAX_COLS;
+        col = 0u;
+        while (col < con_cols) {
+            /* Four blank cells at once: a word of spaces, and no inverse
+             * bit among their looks. A cell at a time was ~50 instructions,
+             * and a 213 x 80 screen is mostly blank cells. */
+            if (col + 4u <= con_cols && *(unsigned *)(grid + col) == 0x20202020u
+                    && (*(unsigned *)(looks + col) & 0x10101010u) == 0u) {
+                col = col + 4u;
+                continue;
+            }
+            look = (unsigned)looks[col];
+            if (grid[col] == ' ' && (look & CON_INVERSE) == 0u) {
+                col++;
+                continue;
+            }
+            start = col;
+            end = col;
+            while (col < con_cols && (unsigned)looks[col] == look) {
+                /* Four plain blank cells end a run, and the skip above takes
+                 * the rest of them: a run otherwise went a cell at a time to
+                 * the end of the row, through all the blank it had. */
+                if ((look & CON_INVERSE) == 0u && col + 4u <= con_cols
+                        && *(unsigned *)(grid + col) == 0x20202020u) break;
+                if (grid[col] != ' ' || (look & CON_INVERSE) != 0u) end = col + 1u;
+                col++;
+            }
+            con_run(row, start, end - start, look);
         }
     }
 }
@@ -278,10 +338,11 @@ static void con_redraw(void) {
 /* Every cell a space in the console's own ink, and the cursor home. The
  * look new characters get stays as it was. */
 static void con_clear(void) {
-    unsigned i;
-    for (i = 0u; i < CON_ROWS * CON_COLS; i++) {
-        con_grid[i] = ' ';
-        con_look[i] = (char)CON_DEFAULT;
+    unsigned r;
+    /* The visible cells: the rest are blank already (con_copy_row says why). */
+    for (r = 0u; r < con_rows; r++) {
+        memset((void *)(con_grid + r * CON_MAX_COLS), ' ', con_cols);
+        memset((void *)(con_look + r * CON_MAX_COLS), (int)CON_DEFAULT, con_cols);
     }
     con_row = 0u;
     con_col = 0u;
@@ -289,13 +350,32 @@ static void con_clear(void) {
     con_redraw();
 }
 
+/* Rows are moved and blanked con_cols cells at a time, never a whole
+ * CON_MAX_COLS: at 32 columns that is a seventh of the bytes, and a scroll
+ * stays the few thousand instructions it was. It is right because a cell
+ * past con_cols is always blank, on the screen and in the scrollback:
+ * nothing writes there, and con_resize blanks it when the console gets
+ * narrower (docs/gac/plans/phase6_console.md §2.2). */
+static void con_copy_row(unsigned to, unsigned from) {
+    memcpy((void *)(con_grid + to * CON_MAX_COLS), (void *)(con_grid + from * CON_MAX_COLS), con_cols);
+    memcpy((void *)(con_look + to * CON_MAX_COLS), (void *)(con_look + from * CON_MAX_COLS), con_cols);
+}
+
+static void con_blank_rows(unsigned first, unsigned n) {
+    unsigned r;
+    for (r = first; r < first + n; r++) {
+        memset((void *)(con_grid + r * CON_MAX_COLS), ' ', con_cols);
+        memset((void *)(con_look + r * CON_MAX_COLS), (int)CON_DEFAULT, con_cols);
+    }
+}
+
 /* The top n rows, about to scroll off the whole screen, kept in the
  * scrollback: the last SCROLLBACK of them (docs/phase4b_plan.md step 4). */
 static void back_keep(unsigned n) {
     unsigned r;
     for (r = 0u; r < n; r++) {
-        memcpy((void *)(back_grid + back_next * CON_COLS), (void *)(con_grid + r * CON_COLS), CON_COLS);
-        memcpy((void *)(back_look + back_next * CON_COLS), (void *)(con_look + r * CON_COLS), CON_COLS);
+        memcpy((void *)(back_grid + back_next * CON_MAX_COLS), (void *)(con_grid + r * CON_MAX_COLS), con_cols);
+        memcpy((void *)(back_look + back_next * CON_MAX_COLS), (void *)(con_look + r * CON_MAX_COLS), con_cols);
         back_next = (back_next + 1u) % SCROLLBACK;
         if (back_count < SCROLLBACK) back_count++;
     }
@@ -309,23 +389,21 @@ static void con_scroll(unsigned top, unsigned bottom, unsigned n, unsigned up) {
     unsigned rows = bottom + 1u - top;
     unsigned kept;
     unsigned blank;
+    unsigned r;
     int dy;
     if (n > rows) n = rows;
     kept = rows - n;
-    if (up != 0u && top == 0u && bottom == CON_ROWS - 1u) back_keep(n);
+    if (up != 0u && top == 0u && bottom == con_rows - 1u) back_keep(n);
     if (up != 0u) {
-        memmove((void *)(con_grid + top * CON_COLS), (void *)(con_grid + (top + n) * CON_COLS), kept * CON_COLS);
-        memmove((void *)(con_look + top * CON_COLS), (void *)(con_look + (top + n) * CON_COLS), kept * CON_COLS);
+        for (r = 0u; r < kept; r++) con_copy_row(top + r, top + n + r);
         blank = top + kept;
         dy = 0 - (int)(n * CON_CELL_H);
     } else {
-        memmove((void *)(con_grid + (top + n) * CON_COLS), (void *)(con_grid + top * CON_COLS), kept * CON_COLS);
-        memmove((void *)(con_look + (top + n) * CON_COLS), (void *)(con_look + top * CON_COLS), kept * CON_COLS);
+        for (r = kept; r > 0u; r--) con_copy_row(top + n + r - 1u, top + r - 1u);
         blank = top;
         dy = (int)(n * CON_CELL_H);
     }
-    memset((void *)(con_grid + blank * CON_COLS), ' ', n * CON_COLS);
-    memset((void *)(con_look + blank * CON_COLS), (int)CON_DEFAULT, n * CON_COLS);
+    con_blank_rows(blank, n);
     disp_scroll(top * CON_CELL_H, rows * CON_CELL_H, dy, CON_BG);
 
     /* What points at rows moves with them: the line being typed, and the
@@ -348,7 +426,7 @@ static void con_newline(void) {
         con_scroll(con_top, con_bottom, 1u, 1u);
         return;
     }
-    if (con_row + 1u < CON_ROWS) con_row++;
+    if (con_row + 1u < con_rows) con_row++;
 }
 
 /* One character of an escape sequence, after the ESC: '[', then numbers
@@ -437,22 +515,22 @@ static void con_escape(int c) {
     } else if (c == 'H') {
         n = (con_args > 0u && con_arg[0] > 0u) ? con_arg[0] : 1u;
         i = (con_args > 1u && con_arg[1] > 0u) ? con_arg[1] : 1u;
-        if (n > CON_ROWS) n = CON_ROWS;
-        if (i > CON_COLS) i = CON_COLS;
+        if (n > con_rows) n = con_rows;
+        if (i > con_cols) i = con_cols;
         con_row = n - 1u;
         con_col = i - 1u;
     } else if (c == 'K') {
-        for (i = con_col; i < CON_COLS; i++) {
-            con_grid[con_row * CON_COLS + i] = ' ';
-            con_look[con_row * CON_COLS + i] = (char)con_attr;
+        for (i = con_col; i < con_cols; i++) {
+            con_grid[con_row * CON_MAX_COLS + i] = ' ';
+            con_look[con_row * CON_MAX_COLS + i] = (char)con_attr;
             con_cell(con_row, i);
         }
     } else if (c == 'r') {
         /* ESC [ t ; b r: rows t to b scroll, counting from 1; ESC [ r, all
          * of them. The cursor goes home, as on a VT100. */
         n = (con_args > 0u && con_arg[0] > 0u) ? con_arg[0] : 1u;
-        i = (con_args > 1u && con_arg[1] > 0u) ? con_arg[1] : CON_ROWS;
-        if (i > CON_ROWS) i = CON_ROWS;
+        i = (con_args > 1u && con_arg[1] > 0u) ? con_arg[1] : con_rows;
+        if (i > con_rows) i = con_rows;
         if (n < i) {
             con_top = n - 1u;
             con_bottom = i - 1u;
@@ -481,13 +559,13 @@ static void con_put(int c) {
     if (c == '\r') return;
     if (c == '\t') {
         con_put(' ');
-        while (con_col % 4u != 0u && con_col < CON_COLS) con_put(' ');
+        while (con_col % 4u != 0u && con_col < con_cols) con_put(' ');
         return;
     }
     if (c < 32 || c > 126) c = '?';
-    if (con_col == CON_COLS) con_newline();
-    con_grid[con_row * CON_COLS + con_col] = (char)c;
-    con_look[con_row * CON_COLS + con_col] = (char)con_attr;
+    if (con_col == con_cols) con_newline();
+    con_grid[con_row * CON_MAX_COLS + con_col] = (char)c;
+    con_look[con_row * CON_MAX_COLS + con_col] = (char)con_attr;
     con_cell(con_row, con_col);
     con_col++;
 }
@@ -508,26 +586,26 @@ static void con_number(unsigned v, unsigned base) {
 /* --- typing a line ------------------------------------------------------ */
 
 /* The console's position for character i of the line being typed, which
- * starts at line_row, line_col and wraps at CON_COLS. A position below the
+ * starts at line_row, line_col and wraps at con_cols. A position below the
  * scrolling rows scrolls them first, and line_row moves up with them. */
 static void line_place(unsigned i) {
     unsigned cell = line_col + i;
-    unsigned row = line_row + cell / CON_COLS;
+    unsigned row = line_row + cell / con_cols;
     if (row > con_bottom) {
         con_scroll(con_top, con_bottom, row - con_bottom, 1u);
-        row = line_row + cell / CON_COLS;
+        row = line_row + cell / con_cols;
     }
-    if (row >= CON_ROWS) row = CON_ROWS - 1u;
+    if (row >= con_rows) row = con_rows - 1u;
     con_row = row;
-    con_col = cell % CON_COLS;
+    con_col = cell % con_cols;
 }
 
 /* Just past the line's last character, as con_put leaves a row it filled:
- * CON_COLS, so a newline after it doesn't leave a blank row. */
+ * con_cols, so a newline after it doesn't leave a blank row. */
 static void line_end(unsigned n) {
-    if (n > 0u && (line_col + n) % CON_COLS == 0u) {
+    if (n > 0u && (line_col + n) % con_cols == 0u) {
         line_place(n - 1u);
-        con_col = CON_COLS;
+        con_col = con_cols;
         return;
     }
     line_place(n);
@@ -547,8 +625,8 @@ static void line_draw(char *buf, unsigned from, unsigned n, unsigned old) {
     unsigned i;
     for (i = from; i < n || i < old; i++) {
         line_place(i);
-        con_grid[con_row * CON_COLS + con_col] = i < n ? buf[i] : ' ';
-        con_look[con_row * CON_COLS + con_col] = (char)con_attr;
+        con_grid[con_row * CON_MAX_COLS + con_col] = i < n ? buf[i] : ' ';
+        con_look[con_row * CON_MAX_COLS + con_col] = (char)con_attr;
         con_cell(con_row, con_col);
     }
 }
@@ -582,9 +660,9 @@ static void history_add(char *line, unsigned n) {
 
 static unsigned con_blank_row(unsigned row) {
     unsigned i;
-    for (i = 0u; i < CON_COLS; i++) {
-        if (con_grid[row * CON_COLS + i] != ' '
-                || ((unsigned)con_look[row * CON_COLS + i] & CON_INVERSE) != 0u) return 0u;
+    for (i = 0u; i < con_cols; i++) {
+        if (con_grid[row * CON_MAX_COLS + i] != ' '
+                || ((unsigned)con_look[row * CON_MAX_COLS + i] & CON_INVERSE) != 0u) return 0u;
     }
     return 1u;
 }
@@ -781,10 +859,10 @@ static void line_list(unsigned n) {
         if (c > width) width = c;
     }
     width = width + 2u;
-    if (width > CON_COLS) width = CON_COLS;
-    cols = CON_COLS / width;
+    if (width > con_cols) width = con_cols;
+    cols = con_cols / width;
     rows = (match_count + cols - 1u) / cols;
-    extra = (line_col + n) / CON_COLS;
+    extra = (line_col + n) / con_cols;
     if (con_bottom - con_top <= extra) return;
     room = con_bottom - con_top - extra;
     list_rows = rows > room ? room : rows;
@@ -814,8 +892,7 @@ static void line_list(unsigned n) {
 static void line_unlist(void) {
     unsigned r;
     for (r = 0u; r < list_rows; r++) {
-        memset((void *)(con_grid + (list_row + r) * CON_COLS), ' ', CON_COLS);
-        memset((void *)(con_look + (list_row + r) * CON_COLS), (int)CON_DEFAULT, CON_COLS);
+        con_blank_rows(list_row + r, 1u);
         disp_rect(0u, (list_row + r) * CON_CELL_H, DISP_W, CON_CELL_H, CON_BG);
     }
     list_rows = 0u;
@@ -827,14 +904,14 @@ static void line_unlist(void) {
  * rows, oldest first, run on into the screen's. */
 static char *view_grid(unsigned back, unsigned v) {
     unsigned i = back_count - back + v;
-    if (i < back_count) return back_grid + ((back_next + SCROLLBACK - back_count + i) % SCROLLBACK) * CON_COLS;
-    return con_grid + (i - back_count) * CON_COLS;
+    if (i < back_count) return back_grid + ((back_next + SCROLLBACK - back_count + i) % SCROLLBACK) * CON_MAX_COLS;
+    return con_grid + (i - back_count) * CON_MAX_COLS;
 }
 
 static char *view_look(unsigned back, unsigned v) {
     unsigned i = back_count - back + v;
-    if (i < back_count) return back_look + ((back_next + SCROLLBACK - back_count + i) % SCROLLBACK) * CON_COLS;
-    return con_look + (i - back_count) * CON_COLS;
+    if (i < back_count) return back_look + ((back_next + SCROLLBACK - back_count + i) % SCROLLBACK) * CON_MAX_COLS;
+    return con_look + (i - back_count) * CON_MAX_COLS;
 }
 
 /* Row v of the view drawn, from column `from` to the end. */
@@ -842,8 +919,8 @@ static void view_row(unsigned back, unsigned v, unsigned from) {
     char *grid = view_grid(back, v);
     char *look = view_look(back, v);
     unsigned col;
-    disp_rect(from * CON_CELL_W, v * CON_CELL_H, (CON_COLS - from) * CON_CELL_W, CON_CELL_H, CON_BG);
-    for (col = from; col < CON_COLS; col++) {
+    disp_rect(from * CON_CELL_W, v * CON_CELL_H, (con_cols - from) * CON_CELL_W, CON_CELL_H, CON_BG);
+    for (col = from; col < con_cols; col++) {
         if (grid[col] != ' ' || ((unsigned)look[col] & CON_INVERSE) != 0u)
             con_paint(v, col, (int)grid[col], (unsigned)look[col]);
     }
@@ -861,23 +938,23 @@ static void view_move(unsigned back) {
     if (back > back_count) back = back_count;
     if (back == view_back) return;
     d = back > view_back ? back - view_back : view_back - back;
-    if (d >= CON_ROWS) {
-        for (v = 0u; v < CON_ROWS; v++) view_row(back, v, 0u);
+    if (d >= con_rows) {
+        for (v = 0u; v < con_rows; v++) view_row(back, v, 0u);
     } else if (back > view_back) {          /* further back: the rows move down */
-        disp_scroll(0u, CON_ROWS * CON_CELL_H, (int)(d * CON_CELL_H), CON_BG);
+        disp_scroll(0u, con_rows * CON_CELL_H, (int)(d * CON_CELL_H), CON_BG);
         for (v = 0u; v < d; v++) view_row(back, v, 0u);
-        view_row(back, d, CON_COLS - 4u);   /* where the old marker went */
+        view_row(back, d, con_cols - 4u);   /* where the old marker went */
     } else {
-        disp_scroll(0u, CON_ROWS * CON_CELL_H, 0 - (int)(d * CON_CELL_H), CON_BG);
-        for (v = CON_ROWS - d; v < CON_ROWS; v++) view_row(back, v, 0u);
-        view_row(back, 0u, CON_COLS - 4u);
+        disp_scroll(0u, con_rows * CON_CELL_H, 0 - (int)(d * CON_CELL_H), CON_BG);
+        for (v = con_rows - d; v < con_rows; v++) view_row(back, v, 0u);
+        view_row(back, 0u, con_cols - 4u);
     }
     view_back = back;
     if (back > 0u) {
         mark[0] = '-';
         utoa(back, mark + 1, 10u);
         len = strlen(mark);
-        for (i = 0u; i < len; i++) con_paint(0u, CON_COLS - len + i, (int)mark[i], CON_DEFAULT | CON_INVERSE);
+        for (i = 0u; i < len; i++) con_paint(0u, con_cols - len + i, (int)mark[i], CON_DEFAULT | CON_INVERSE);
     }
 }
 
@@ -902,8 +979,8 @@ static void page_mark(unsigned on) {
     char *text = "-- more --";
     unsigned i;
     for (i = 0u; i < 10u; i++) {
-        con_grid[con_row * CON_COLS + i] = on != 0u ? text[i] : ' ';
-        con_look[con_row * CON_COLS + i] = (char)(on != 0u ? CON_DEFAULT | CON_INVERSE : CON_DEFAULT);
+        con_grid[con_row * CON_MAX_COLS + i] = on != 0u ? text[i] : ' ';
+        con_look[con_row * CON_MAX_COLS + i] = (char)(on != 0u ? CON_DEFAULT | CON_INVERSE : CON_DEFAULT);
         con_cell(con_row, i);
     }
 }
@@ -997,6 +1074,85 @@ static unsigned page_wait(void) {
  * Ctrl held while C went down is known even when both were typed long
  * before this looks; the character queue holds the same presses, and is
  * emptied at the end so the next program doesn't get them. */
+/* The console, for a screen of w x h pixels (docs/gac/plans/phase6_console.md
+ * §2.2). Every row keeps its place in the grids, so nothing moves unless it
+ * must: narrower, the cells past the new edge are blanked, on the screen
+ * and in the scrollback, which keeps "past con_cols is blank" true; fewer
+ * rows, the top ones go to the scrollback as a scroll would put them, so
+ * the cursor's row is the last one; bigger, the new cells are blank
+ * already. The screen is not drawn here: con_redraw does that. */
+static void con_resize(unsigned w, unsigned h) {
+    unsigned cols = w / CON_CELL_W;
+    unsigned rows = h / CON_CELL_H;
+    unsigned was_rows = con_rows;
+    unsigned gone = 0u;
+    unsigned r;
+    if (cols > CON_MAX_COLS) cols = CON_MAX_COLS;
+    if (rows > CON_MAX_ROWS) rows = CON_MAX_ROWS;
+    if (cols < con_cols) {
+        for (r = 0u; r < CON_MAX_ROWS; r++) {
+            memset((void *)(con_grid + r * CON_MAX_COLS + cols), ' ', con_cols - cols);
+            memset((void *)(con_look + r * CON_MAX_COLS + cols), (int)CON_DEFAULT, con_cols - cols);
+        }
+        for (r = 0u; r < SCROLLBACK; r++) {
+            memset((void *)(back_grid + r * CON_MAX_COLS + cols), ' ', con_cols - cols);
+            memset((void *)(back_look + r * CON_MAX_COLS + cols), (int)CON_DEFAULT, con_cols - cols);
+        }
+    }
+    con_cols = cols;
+    if (con_row >= rows) gone = con_row + 1u - rows;
+    if (gone > 0u) {
+        back_keep(gone);
+        for (r = 0u; r + gone < was_rows; r++) con_copy_row(r, r + gone);
+        con_blank_rows(was_rows - gone, gone);      /* the rows the text moved out of */
+    }
+    /* Rows past con_rows are always blank: those the screen no longer has. */
+    if (rows < was_rows - gone) con_blank_rows(rows, was_rows - gone - rows);
+    con_rows = rows;
+    con_row = con_row - gone;
+    line_row = line_row >= gone ? line_row - gone : 0u;
+    if (con_marked != 0u) {
+        if (con_mark_row >= gone) con_mark_row = con_mark_row - gone;
+        else con_marked = 0u;
+    }
+    if (con_col > con_cols) con_col = con_cols;
+    if (line_col >= con_cols) line_col = con_cols - 1u;
+    con_top = 0u;
+    con_bottom = con_rows - 1u;
+    view_back = 0u;
+}
+
+/* The request count of the last mode the window asked for that the kernel
+ * has looked at: a new one is taken at the shell's prompt. */
+static unsigned asked = 0u;
+
+/* At the prompt, the mode the window asked for (docs/gac/plans/
+ * phase6_console.md §2.4). Only for the startup program's own line, and not
+ * while the view is scrolled back: a program reading a line -- a # graphics
+ * script's read, say -- must not have the screen change under it
+ * (docs/gac/decisions.md Q6). The line being typed is taken off at the old
+ * width and drawn again at the new one. */
+static void k_adopt(char *buf, unsigned n, unsigned cur) {
+    unsigned w;
+    unsigned h;
+    unsigned count;
+    if (depth > 1 || view_back != 0u) return;
+    count = vram_preferred(&w, &h);
+    if (count == asked) return;
+    asked = count;
+    if (w == 0u || (w == disp_w && h == disp_h)) return;
+    if (list_rows != 0u) line_unlist();
+    line_draw(buf, 0u, 0u, n);
+    if (disp_setmode(w, h)) {
+        con_resize(disp_w, disp_h);
+        con_redraw();
+        dbg_printf("[kernel] mode %ux%u: the console is %u x %u\n", disp_w, disp_h,
+                   con_cols, con_rows);
+    }
+    line_draw(buf, 0u, n, 0u);
+    line_cursor(cur, 1u);
+}
+
 static int con_read_line(char *buf, unsigned size) {
     unsigned n = 0u;                /* characters typed */
     unsigned cur = 0u;              /* the cursor, before character cur */
@@ -1015,7 +1171,7 @@ static int con_read_line(char *buf, unsigned size) {
     if (max > LINE_MAX) max = LINE_MAX;
     k_break(0u);
     page_rows = 0u;                         /* reading a line starts the count again */
-    if (con_col == CON_COLS) con_newline();
+    if (con_col == con_cols) con_newline();
     line_row = con_row;
     line_col = con_col;
     line_cursor(0u, 1u);
@@ -1026,7 +1182,10 @@ static int con_read_line(char *buf, unsigned size) {
             if (ME_BUTTON(wheel) == ME_WHEEL_DOWN) view_by(0 - (int)WHEEL_ROWS, cur);
         }
         event = key_event();
-        if (event == 0u) continue;
+        if (event == 0u) {
+            k_adopt(buf, n, cur);           /* nothing typed: a mode the window asked for? */
+            continue;
+        }
         code = KE_CODE(event);
         if (code == K_KEY_LCTRL || code == K_KEY_RCTRL) {
             ctrl = KE_PRESSED(event) != 0u;
@@ -1301,6 +1460,15 @@ int k_keepscreen(int on) {
     return was;
 }
 
+/* consize: the console's size in cells, which follows the mode -- for a
+ * program that lays out the whole console, as edit does
+ * (docs/gac/plans/phase6_console.md §2.5). */
+int k_consize(unsigned *cols, unsigned *rows) {
+    *cols = con_cols;
+    *rows = con_rows;
+    return 0;
+}
+
 /* --- running programs ------------------------------------------------------ */
 
 /* Put back what a program may have left behind: files open, timers
@@ -1354,7 +1522,7 @@ static void k_tidy(void) {
     con_esc = CON_ESC_NONE;
     con_marked = 0u;
     con_top = 0u;                           /* nor a scroll region */
-    con_bottom = CON_ROWS - 1u;
+    con_bottom = con_rows - 1u;
     /* Not while a program is keeping the screen: its children end without
      * the console landing on top of the picture. k_run has cleared the
      * owner by the time the owner's own tidy runs, so the console always
@@ -1625,6 +1793,7 @@ static void k_tables(void) {
     table[SYS_EXEC_OUT] = (unsigned)&w_exec_out;
     table[SYS_EXEC_IO] = (unsigned)&w_exec_io;
     table[SYS_KEEPSCREEN] = (unsigned)&w_keepscreen;
+    table[SYS_CONSIZE] = (unsigned)&w_consize;
     vectors[VEC_DIV_ZERO] = (unsigned)&fault_div;
     vectors[VEC_BAD_OPCODE] = (unsigned)&fault_opcode;
     vectors[VEC_BAD_FETCH] = (unsigned)&fault_fetch;
@@ -1839,8 +2008,10 @@ int main(void) {
     in_kernel = 1u;
     k_tables();
     disp_init();  /* the screen, as the machine has it (display.h) */
+    con_cols = DISP_W / CON_CELL_W;         /* and the console, as big as it */
+    con_rows = DISP_H / CON_CELL_H;
     con_attr = CON_DEFAULT;
-    con_bottom = CON_ROWS - 1u;
+    con_bottom = con_rows - 1u;
     con_clear();
 
     /* The disk it booted from (Q8): bios2 leaves the channel. */

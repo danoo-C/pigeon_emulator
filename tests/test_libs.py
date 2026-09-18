@@ -1009,9 +1009,10 @@ def test_demo_screen_is_stable_when_idle():
 CUBE = REPO_ROOT / "build" / "cube.bin"
 
 
-def run_cube(setup, budget=25_000_000):
+def run_cube(setup, budget=25_000_000, mode=None):
     machine = Machine(bios_path=str(REPO_ROOT / "build" / "bios.bin"),
-                      program_path=str(CUBE))
+                      program_path=str(CUBE),
+                      **({} if mode is None else {"display_mode": mode}))
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             while machine.cpu.pc < PROGRAM_LOAD_ADDR:
@@ -1045,18 +1046,21 @@ def test_cube_draws_a_wireframe():
     assert edge > 150, f"only {edge} cube-coloured pixels -- is it drawing?"
 
 
-def test_cube_rotates_when_dragged():
+@cases(None, (640, 360))
+def test_cube_rotates_when_dragged(mode):
     """The whole point: hold the left button and move, and the cube turns.
 
     Auto-spin is switched off first, so any change is the drag and not the
-    clock.
+    clock. At 640 x 360 too: its gain was 256 / DISP_W, a whole number, so on
+    any screen wider than 256 a drag turned it by nothing
+    (docs/gac/plans/phase6_console.md, As built).
     """
     def drag(m):
         m.hid.push_key(ord(' '))            # stop the auto-spin
         m.hid.push_mouse_event(0, True)     # button down
         m.hid.set_mouse_pos(40, 50)
 
-    machine = run_cube(drag, budget=14_000_000)
+    machine = run_cube(drag, budget=14_000_000, mode=mode)
     before = screen_of(machine)
     with contextlib.redirect_stdout(io.StringIO()):
         machine.hid.set_mouse_pos(64, 50)   # drag right -> yaw

@@ -35,8 +35,12 @@
  * it from DISPLAY_MAX_W / DISPLAY_MAX_H, the largest mode there is, and use
  * DISP_W for how much of it this screen needs. DISP_BASE is where the
  * screen is: RAM at the power-on mode, video memory otherwise. */
-extern unsigned disp_w;
-extern unsigned disp_h;
+/* int, as the DISPLAY_W and DISPLAY_H literals they replaced are: a program
+ * that does signed arithmetic with the screen's size -- graph.c's plot area,
+ * a row above the top compared with the bottom -- must not have it turn
+ * unsigned under it (docs/gac/plans/phase6_console.md, As built). */
+extern int disp_w;
+extern int disp_h;
 extern unsigned disp_base;
 #define DISP_W    disp_w
 #define DISP_H    disp_h
@@ -138,6 +142,9 @@ void disp_scroll(unsigned y, unsigned h, int dy, color_t bg);
 #define GLYPH_H 8
 void disp_char(unsigned x, unsigned y, int ch, color_t fg);
 void disp_text(unsigned x, unsigned y, char *s, color_t fg);
+/* n characters of s, which need not end in a 0 -- a row of a grid, say. One
+ * accelerator command for all of them, as disp_text is. */
+void disp_textn(unsigned x, unsigned y, char *s, unsigned n, color_t fg);
 
 /* --- images -------------------------------------------------------------
  *

@@ -285,6 +285,43 @@ def test_the_pygame_client_follows_the_mode_on_the_frame_that_brings_it():
     assert "self._fitting_pixel_size()" in resize
 
 
+# --- the mode picker (docs/gac/plans/phase6_console.md §3) ---------------------------------------
+
+def test_the_pickers_offer_every_mode_with_the_current_one_chosen():
+    modes = [list(m) for m in DISPLAY_MODES]
+    got = node("console.log(JSON.stringify(modeOptions(%s, 640, 360)));" % json.dumps(modes))
+    assert [o["value"] for o in got] == [f"{w}x{h}" for w, h in DISPLAY_MODES]
+    assert [o["selected"] for o in got] == [m == (640, 360) for m in DISPLAY_MODES]
+    assert got[2]["label"] == "640 x 360"
+    items = SM.mode_items(modes, 640, 360)
+    assert [(i["w"], i["h"]) for i in items] == list(DISPLAY_MODES)
+    assert [i["current"] for i in items] == [o["selected"] for o in got]
+    assert items[2]["name"].startswith(SM.mode_label(640, 360)) == (got[2]["label"] == "640 x 360")
+
+
+def test_a_machine_without_modes_offers_the_one_it_has():
+    got = node("console.log(JSON.stringify(modeOptions(null, 192, 108)));")
+    assert got == [{"value": "192x108", "label": "192 x 108", "selected": True}]
+    assert [(i["w"], i["h"], i["current"]) for i in SM.mode_items(None, 192, 108)] == [
+        (192, 108, True)]
+
+
+def test_the_pickers_only_ask_and_follow_the_mode():
+    """Choosing posts /preferred and nothing else; the picker shows the
+    mode whoever changed it."""
+    source = page()
+    assert '<select id="mode"' in source
+    wiring = between(source, "function wireMode(){", "// The room the canvas has")
+    assert "fetch('/preferred', {method: 'POST'" in wiring
+    assert "switches at the prompt" in wiring
+    set_mode = between(source, "function setMode(w, h){", "scaleInput.addEventListener")
+    assert "showModes()" in set_mode and "modeNote.hidden = true" in set_mode
+    client = CLIENT.read_text()
+    assert 'add("Mode", self._choose_mode)' in client
+    ask = between(client, "def _ask_for_mode(self, item):", "def _open_picker(")
+    assert 'f"{self.base_url}/preferred"' in ask
+
+
 # --- end to end ---------------------------------------------------------------------------------
 
 def test_a_mode_change_on_the_bus_changes_what_the_page_draws():

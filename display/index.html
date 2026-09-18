@@ -37,6 +37,10 @@
   <div id="controls">
     <button id="clear">Clear</button>
     <label>Scale: <input id="scale" type="number" value="4" min="1" max="16" /></label>
+    <!-- The window asks; the machine decides (docs/gac/plans/phase6_console.md
+         §3): a mode chosen here is taken at the shell's next prompt. -->
+    <label>Mode: <select id="mode" title="The screen's size, taken at the next prompt"></select></label>
+    <span id="mode-note" hidden>switches at the prompt</span>
     <label><input id="running" type="checkbox" checked/> Live</label>
     <button id="serial-button" title="What the machine writes to its debug port">Serial</button>
   </div>
@@ -177,6 +181,16 @@
     function fitScale(w, h, roomW, roomH, wanted){
       const fits = Math.min(Math.floor(roomW / w), Math.floor(roomH / h));
       return Math.max(1, Math.min(Math.floor(wanted) || 1, fits));
+    }
+    // The picker's names for the modes, and its list: /info's modes, the
+    // current one chosen.
+    function modeLabel(w, h){
+      return `${w} x ${h}`;
+    }
+
+    function modeOptions(modes, w, h){
+      return (modes || [[w, h]]).map(([mw, mh]) => ({
+        value: `${mw}x${mh}`, label: modeLabel(mw, mh), selected: mw === w && mh === h}));
     }
     // ---- end of the screen's logic ---------------------------------------------
 
@@ -424,6 +438,7 @@
       try{
         const info = await fetch('/info').then(r=>r.json());
         W = info.w; H = info.h;
+        modes = info.modes;
         if (info.hid_url) HID = info.hid_url;
         if (info.cd_url) CD = info.cd_url;
       }catch(e){
@@ -434,8 +449,40 @@
       wireInput();
       wireCD();
       wireSerial();
+      wireMode();
       setMode(W, H);
       loop();
+    }
+
+    // The mode picker: what it offers is /info's modes. Choosing one only
+    // asks -- POST /preferred -- and the note says so until the screen is
+    // that size; the kernel switches at the shell's next prompt.
+    const modeSelect = document.getElementById('mode');
+    const modeNote = document.getElementById('mode-note');
+    let modes = null;
+
+    function showModes(){
+      modeSelect.replaceChildren(...modeOptions(modes, W, H).map(o => {
+        const option = document.createElement('option');
+        option.value = o.value;
+        option.textContent = o.label;
+        option.selected = o.selected;
+        return option;
+      }));
+    }
+
+    function wireMode(){
+      showModes();
+      modeSelect.addEventListener('change', async () => {
+        const [w, h] = modeSelect.value.split('x').map(Number);
+        if (w === W && h === H) { modeNote.hidden = true; return; }
+        const reply = await fetch('/preferred', {method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({w, h})}).catch(() => null);
+        modeNote.textContent = reply && reply.ok ? 'switches at the prompt'
+                                                 : 'this machine cannot change its mode';
+        modeNote.hidden = false;
+      });
     }
 
     // The room the canvas has: the window, less the page's padding, the
@@ -463,6 +510,8 @@
       W = w; H = h;
       off.width = W; off.height = H;
       sizeCanvas();
+      if (modes) showModes();             // the picker shows the mode, whoever chose it
+      modeNote.hidden = true;
     }
 
     scaleInput.addEventListener('change', sizeCanvas);

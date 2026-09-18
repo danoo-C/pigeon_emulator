@@ -36,7 +36,7 @@ from emulator.devices.keycodes import (                                 # noqa: 
     KEY_PGUP, KEY_RIGHT, KEY_TAB, KEY_UP)
 from emulator.machine import Machine                                    # noqa: E402
 from emulator.memory_map import (                                       # noqa: E402
-    BOOT_CHANNEL, CH_CD, CH_DEBUG, CH_DISPLAY, CH_HDD, CH_TIMER, CH_USERPROG, DISPLAY_H, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
+    BOOT_CHANNEL, CH_CD, CH_DEBUG, CH_DISPLAY, CH_GAC, CH_HDD, CH_TIMER, CH_USERPROG, DISPLAY_H, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
     BOOT_LOAD_ADDR, BOOT_RECORD, BOOT_SIGNATURE, VEC_BREAK)
 from emulator.programs import Program                                   # noqa: E402
 from pfs import PgfsImage                                               # noqa: E402
@@ -313,14 +313,21 @@ def make_disk(path, extra=(), shell=True, label="TEST"):
 
 # --- driving it -------------------------------------------------------------------
 
+class Rows(list):
+    """A screen's rows, knowing how wide the console was: 32 columns at the
+    power-on screen, more in a bigger mode (docs/gac/plans/phase6_console.md)."""
+    cols = COLS
+
+
 def lines(rows):
-    """The console's lines, with those it wrapped at COLS joined up again.
-    A line of exactly COLS characters looks like a wrapped one; the tests
-    print none."""
+    """The console's lines, with those it wrapped at its width joined up
+    again. A line of exactly that many characters looks like a wrapped one;
+    the tests print none."""
+    cols = getattr(rows, "cols", COLS)
     out, current = [], ""
     for row in rows:
         current += row
-        if len(row) < COLS:
+        if len(row) < cols:
             out.append(current)
             current = ""
     if current:
@@ -337,8 +344,9 @@ def last_row(rows):
 class Console:
     """The kernel on a Machine, its disk on channel 2: keys in, rows out."""
 
-    def __init__(self, disk, boot_channel=None, disc=None):
-        self.machine = Machine(bios_path=str(BIOS), disk_path=str(disk))
+    def __init__(self, disk, boot_channel=None, disc=None, display_mode=None):
+        mode = {} if display_mode is None else {"display_mode": display_mode}
+        self.machine = Machine(bios_path=str(BIOS), disk_path=str(disk), **mode)
         if disc is not None:
             self.machine.cd.root = None
             self.machine.cd.insert(disc)
@@ -359,8 +367,23 @@ class Console:
         self.machine.close()
 
     def rows(self):
-        fb = self.machine.display_io.snapshot()
-        return [text_at(fb, r * ROW_H) for r in range(ROWS)]
+        """The console's rows, at whatever size the screen is now
+        (docs/gac/plans/phase6_console.md)."""
+        display = self.machine.display_io
+        fb = display.snapshot()
+        w, h = display.width, display.height
+        rows = Rows()
+        rows.cols = w // 6
+        for r in range(h // ROW_H):
+            band = fb[r * ROW_H * w * 4:(r + 1) * ROW_H * w * 4]
+            # A band with no red, green or blue in it anywhere is a blank row:
+            # what text_at would say, without reading it a cell at a time --
+            # which at 1280 x 720 is most of a second a look.
+            if not (any(band[0::4]) or any(band[1::4]) or any(band[2::4])):
+                rows.append("")
+            else:
+                rows.append(text_at(fb, r * ROW_H, w, h))
+        return rows
 
     def run_until(self, wanted, seconds=90):
         give_up = time.time() + seconds
@@ -2508,6 +2531,227 @@ def test_a_reboot_puts_the_power_on_screen_back():
         assert vram.mode == (DISPLAY_W, DISPLAY_H), vram.mode
         assert display.scanout_vram is None and display.scanout_base == DISPLAY_START
         assert set(vram.surfaces) == {0} and not c.machine.gac.ram_surfaces
+
+
+
+# --- the console at any size (docs/gac/plans/phase6_console.md) ----------------------
+
+STANDINS["lines"] = r"""#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    int i;
+    int n = argc > 1 ? atoi(argv[1]) : 60;
+    for (i = 1; i <= n; i++) printf("line %d\n", i);
+    return 0;
+}
+"""
+
+STANDINS["consize"] = r"""#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+int main(void) {
+    unsigned cols;
+    unsigned rows;
+    consize(&cols, &rows);
+    printf("%ux%u\n", cols, rows);
+    return 0;
+}
+"""
+
+# Past column 32, so only a console wider than the power-on one shows it:
+# "red" in red, then "inv" inverse.
+STANDINS["colours"] = r"""#include <pigeon/sys.h>
+int main(void) {
+    print("                                        \x1b[31mred\x1b[0m \x1b[7minv\x1b[0m\n");
+    return 0;
+}
+"""
+
+STANDINS["reader"] = r"""#include <pigeon/sys.h>
+int main(void) {
+    char line[64];
+    print("reading\n");
+    read(STDIN, line, 64u);
+    return 0;
+}
+"""
+
+
+def colours_at(machine, row, col):
+    """A cell's colours, as (r, g, b), on a screen of any size."""
+    display = machine.display_io
+    fb, w = display.snapshot(), display.width
+    found = set()
+    for dy in range(ROW_H):
+        for dx in range(6):
+            i = ((row * ROW_H + dy) * w + col * 6 + dx) * 4
+            found.add((fb[i + 2], fb[i + 1], fb[i]))
+    return found
+
+
+def ask_for(machine, w, h):
+    """What the window's picker does: POST /preferred, through its function."""
+    from emulator.devices.display_io import preferred_reply
+    assert preferred_reply(machine.display_io, {"w": w, "h": h})[0] == 200
+
+
+def settled_at(c, w, seconds=90):
+    """The console at a screen w wide, with the prompt on its last row of
+    text. The row itself, not lines(): after a narrowing, a row cut at the
+    edge is exactly as wide as the console and looks wrapped."""
+    def last(rows):
+        shown = [row for row in rows if row.strip()]
+        return shown[-1] if shown else ""
+    # The same screen on two looks in a row, as test_bios2.py's run_until
+    # asks: one look can land in the middle of the redraw after a switch.
+    looked = []
+
+    def settled(rows):
+        steady = bool(looked) and looked[-1] == rows
+        looked.append(rows)
+        return steady and c.machine.display_io.width == w and PROMPT.match(last(rows))
+    return c.run_until(settled, seconds)
+
+
+def test_the_console_fills_a_bigger_screen():
+    with booted(display_mode=(640, 360),
+                extra=[("/bin/consize.bin", standin("consize"))]) as c:
+        assert c.ready(), c.rows()
+        assert len(c.rows()) == 40
+        assert c.command("consize") == ["106x40"]
+        wide = "x" * 80                                 # 32 columns would wrap it
+        assert c.command("echo " + wide) == [wide]
+
+
+def test_consize_is_the_power_on_console_at_the_power_on_screen():
+    with booted(extra=[("/bin/consize.bin", standin("consize"))]) as c:
+        assert c.ready(), c.rows()
+        assert c.command("consize") == ["32x12"]
+
+
+def test_a_big_console_scrolls_and_keeps_what_scrolled_off():
+    """Scrolling moves only the visible part of each row: the rows past the
+    old width are blank and must stay so, which the scrollback shows."""
+    with booted(display_mode=(640, 360), extra=[("/bin/lines.bin", standin("lines"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("lines 60\n")                    # scrolls its own command off the top
+        assert c.run_until(lambda rows: "line 60" in rows and PROMPT.match(last_row(rows))), c.rows()
+        shown = lambda: {int(r[5:]) for r in c.rows() if r.startswith("line ")}
+        before = shown()
+        c.press(KEY_PGUP)
+        assert c.run_until(lambda rows: shown() and min(shown()) < min(before)), c.rows()
+        assert 1 in shown(), "Page Up did not reach the first line"
+        c.press(KEY_PGDN)
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+
+
+def test_a_big_console_draws_colours_and_inverse_past_column_32():
+    with booted(display_mode=(640, 360), extra=[("/bin/colours.bin", standin("colours"))]) as c:
+        assert c.ready(), c.rows()
+        c.command("colours")
+        # The inverse cells read as '?': their ink is the background.
+        row = next(r for r, text in enumerate(c.rows()) if text.strip().startswith("red "))
+        assert any(r > 150 and g < 100 for r, g, b in colours_at(c.machine, row, 40)), "not red"
+        # A cell's top-left pixel is outside every glyph: the background for
+        # "r", the ink's fill for the inverse "i".
+        fb, w = c.machine.display_io.snapshot(), c.machine.display_io.width
+        corner = lambda col: tuple(fb[((row * ROW_H) * w + col * 6) * 4 + k] for k in (2, 1, 0))
+        assert corner(40) == (0, 0, 0)
+        assert corner(44) != (0, 0, 0), "the inverse cell has no fill"
+
+
+def test_a_mode_asked_for_is_taken_at_the_prompt_and_the_text_survives():
+    with booted() as c:
+        assert c.ready(), c.rows()
+        c.command("echo before")
+        ask_for(c.machine, 640, 360)
+        assert settled_at(c, 640), c.rows()
+        rows = c.rows()
+        assert len(rows) == 40 and "before" in rows, rows
+        wide = "y" * 70
+        assert c.command("echo " + wide) == [wide]
+        ask_for(c.machine, 192, 108)
+        assert settled_at(c, 192), c.rows()
+        rows = c.rows()
+        assert len(rows) == 12 and "before" in rows, rows
+        assert "y" * 32 in rows and all(len(row) <= 32 for row in rows), "text past the edge"
+        display = c.machine.display_io
+        assert display.scanout_vram is None and display.scanout_base == DISPLAY_START,             "192 x 108 is not shown out of RAM, as at power-on"
+
+
+def test_fewer_rows_send_the_top_ones_to_the_scrollback():
+    with booted(display_mode=(640, 360), extra=[("/bin/lines.bin", standin("lines"))]) as c:
+        assert c.ready(), c.rows()
+        c.command("lines 30")
+        ask_for(c.machine, 192, 108)
+        assert settled_at(c, 192), c.rows()
+        assert "line 30" in c.rows(), c.rows()
+        c.press(KEY_PGUP)
+        assert c.run_until(lambda rows: "line 20" in rows), c.rows()
+
+
+def test_a_mode_is_not_taken_while_a_program_reads_a_line():
+    """Only at the shell's own prompt: a program reading a line -- a # graphics
+    script's read, say -- must not have the screen change under it."""
+    with booted(extra=[("/bin/reader.bin", standin("reader"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("reader\n")
+        assert c.run_until(lambda rows: "reading" in rows), c.rows()
+        ask_for(c.machine, 640, 360)
+        c.run_until(lambda rows: False, seconds=2)
+        assert c.machine.display_io.width == 192, "switched under a running program"
+        c.type("x\n")
+        assert settled_at(c, 640), c.rows()
+
+
+def test_edit_uses_the_whole_of_a_big_console():
+    with booted(display_mode=(640, 360), extra=[("/bin/edit.bin", shell_program("edit"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("edit /docs/new.txt\n")
+        # The keys on the console's last row, not on row 11: ^O and ^X are
+        # inverse, and read as '?'.
+        assert c.run_until(lambda rows: "Save" in rows[39] and "Exit" in rows[39]), c.rows()
+        c.press(KEY_LCTRL, ord("x"))
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+
+
+def test_a_full_720p_console_redraws_in_a_few_hundred_commands():
+    """A row at a time, a command a run of one look: a full 213 x 80 screen
+    was 17,040 commands a cell at a time (docs/gac/plans/phase6_console.md
+    §2.3). Counted from con_redraw's first instruction to its return, after a
+    program ends and the kernel draws the console back."""
+    entry = kernel_symbols()["con_redraw"]
+    with booted(display_mode=(1280, 720), extra=[("/bin/lines.bin", standin("lines"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("lines 90\n")
+        assert c.run_until(lambda rows: "line 90" in rows and PROMPT.match(last_row(rows))), \
+            "never finished"
+        cpu = c.machine.cpu
+        calls = []
+        real = c.machine.gac.callback
+
+        def counted(*args):
+            calls.append(args[1])
+            return real(*args)
+
+        c.machine.io_controller.channels[CH_GAC].callback = counted
+        c.type("echo x\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(20_000_000):
+                if cpu.pc == entry:
+                    break
+                c.machine.step()
+            assert cpu.pc == entry, "the console was never drawn back"
+            calls.clear()
+            sp, steps = cpu.sp, 0
+            start = time.perf_counter()
+            while cpu.sp <= sp and steps < 50_000_000:
+                c.machine.step()
+                steps += 1
+            took = time.perf_counter() - start
+        assert len(calls) < 400, f"{len(calls)} commands for one redraw"
+        assert steps < 500_000, f"{steps:,} instructions for one redraw"
+        print(f"720p con_redraw: {steps:,} instructions, {len(calls)} commands, "
+              f"{took * 1000:.0f} ms stepped")
 
 
 if __name__ == "__main__":

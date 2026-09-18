@@ -29,9 +29,10 @@
 /* A full turn is 256 steps, so a drag across the whole screen should be
  * about one revolution. The screen is no longer square, so the two axes
  * do NOT share a gain -- with one, a horizontal drag out-rotates a
- * vertical one by the aspect ratio. */
-#define YAW_GAIN   (256 / DISP_W)
-#define PITCH_GAIN (256 / DISP_H)
+ * vertical one by the aspect ratio. The gain is 256 / DISP_W steps a
+ * pixel, worked with the remainder kept (drag_x, drag_y): as a whole
+ * number it was 0 on any screen wider than 256, and the cube would not
+ * turn at all (docs/gac/plans/phase6_console.md, As built). */
 
 /* Auto-spin rates, in Q8 angle steps per millisecond -- the same Q8 as
  * <pigeon/math.h>, so 256 of these is one whole step and a turn is 256
@@ -133,6 +134,8 @@ unsigned spin_x_acc;      /* Q8 fractions of a step, waiting to carry */
 unsigned spin_y_acc;
 int spinning;
 int dragging;
+int drag_x;                     /* what a drag turned, times the screen's size */
+int drag_y;
 int last_mx;
 int last_my;
 int running;
@@ -150,6 +153,10 @@ static void project(void) {
         v3_rotate_y(&v, &v, angle_y);          /* yaw, then pitch -- the */
         v3_rotate_x(&v, &v, angle_x);          /* library tolerates out == in */
         v3_project(&v, DIST, CX, CY, &PX[i], &PY[i]);
+        /* As big on any screen as on the power-on one: its size scales
+         * with the screen's height, exactly 1 at DISPLAY_H. */
+        PX[i] = CX + idiv((PX[i] - CX) * DISP_H, DISPLAY_H);
+        PY[i] = CY + idiv((PY[i] - CY) * DISP_H, DISPLAY_H);
     }
 }
 
@@ -195,8 +202,12 @@ static void handle_mouse(void) {
 
     if (buttons & MB_LEFT) {
         if (dragging) {
-            angle_y = angle_y + (mx - last_mx) * YAW_GAIN;
-            angle_x = angle_x + (my - last_my) * PITCH_GAIN;
+            drag_x = drag_x + (mx - last_mx) * 256;
+            drag_y = drag_y + (my - last_my) * 256;
+            angle_y = angle_y + idiv(drag_x, DISP_W);
+            angle_x = angle_x + idiv(drag_y, DISP_H);
+            drag_x = drag_x - idiv(drag_x, DISP_W) * DISP_W;
+            drag_y = drag_y - idiv(drag_y, DISP_H) * DISP_H;
         }
         dragging = 1;
         last_mx = mx;

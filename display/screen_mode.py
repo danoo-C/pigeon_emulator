@@ -39,3 +39,17 @@ def room_for_screen(desktop_w: int, desktop_h: int, beside: int, above: int) -> 
     """The room the guest's screen has on the desktop, with `beside` pixels
     taken by the Serial panel and `above` by the toolbar."""
     return (desktop_w - DESKTOP_MARGIN_W - beside, desktop_h - DESKTOP_MARGIN_H - above)
+
+
+def mode_label(w: int, h: int) -> str:
+    """A mode as the picker names it -- the page's modeLabel, the same."""
+    return f"{w} x {h}"
+
+
+def mode_items(modes, w: int, h: int):
+    """The Mode picker's list (docs/gac/plans/phase6_console.md §3): /info's
+    modes, the current one marked, as the page's modeOptions has them."""
+    return [{"name": mode_label(mw, mh) + ("   (now)" if (mw, mh) == (w, h) else ""),
+             "w": mw, "h": mh, "current": (mw, mh) == (w, h)}
+            for mw, mh in (modes or [[w, h]])]
+

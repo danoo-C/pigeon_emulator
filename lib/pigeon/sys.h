@@ -74,6 +74,10 @@ int  setbreak(int on);                      /* Ctrl+C as the break for this
 int  paging(int on);                        /* -- more -- after each screen of
                                                this program's output and its
                                                children's, until it ends     */
+int  consize(unsigned *cols, unsigned *rows);  /* the console's size in
+                                               cells: 32 x 12 at the power-on
+                                               screen, more in bigger modes
+                                               (docs/gac/plans/phase6_console.md) */
 int  keepscreen(int on);                    /* the console is not painted back
                                                over the screen between the
                                                programs this one runs, so a

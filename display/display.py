@@ -524,6 +524,7 @@ class DisplayClient:
         self._px_x = x + 4
         x = self._px_x + self.font.size("px: 16")[0] + 16
         self._serial_button = add("Serial", self._toggle_serial)
+        add("Mode", self._choose_mode)
 
         load_server = add("Load from server", self._load_from_server)
         load_pc = add("Load from PC", self._load_from_pc)
@@ -809,7 +810,37 @@ class DisplayClient:
 
     # --- the "Load from server" picker ------------------------------------------
 
-    def _open_picker(self, discs, folder=None):
+    def _choose_mode(self):
+        """The Mode picker: the machine's modes, from /info. Choosing one
+        only asks -- POST /preferred -- and the kernel switches at the
+        shell's next prompt (docs/gac/plans/phase6_console.md §3)."""
+        try:
+            info = self.session.get(f"{self.base_url}/info", timeout=REQUEST_TIMEOUT).json()
+        except Exception as e:
+            self._set_status(f"Mode: {e}", frames=180)
+            return
+        items = SM.mode_items(info.get("modes"), self.disp_w, self.disp_h)
+        self._open_picker(items, title="Mode: taken at the next prompt   arrows / click, Enter, Esc",
+                          choose=self._ask_for_mode)
+        self._picker["index"] = next((i for i, item in enumerate(items) if item["current"]), 0)
+
+    def _ask_for_mode(self, item):
+        if item["current"]:
+            return
+        try:
+            reply = self.session.post(f"{self.base_url}/preferred",
+                                      json={"w": item["w"], "h": item["h"]},
+                                      timeout=REQUEST_TIMEOUT)
+        except Exception as e:
+            self._set_status(f"Mode: {e}", frames=180)
+            return
+        if reply.ok:
+            self._set_status(f"{SM.mode_label(item['w'], item['h'])}: switches at the prompt",
+                             frames=300)
+        else:
+            self._set_status("Mode: this machine cannot change its mode", frames=180)
+
+    def _open_picker(self, discs, folder=None, title=None, choose=None):
         # Anything held down in the guest is released first. The picker
         # swallows every key while it is open, so a key pressed before it
         # opened would never see its release and would stay stuck down in
@@ -818,7 +849,8 @@ class DisplayClient:
             self._send_key(code, False)
         self._key_sent.clear()
         self._picker = {"items": discs, "folder": folder, "index": 0, "top": 0,
-                        "rows": 1, "rects": [], "panel": None}
+                        "rows": 1, "rects": [], "panel": None,
+                        "title": title, "choose": choose}
 
     def _close_picker(self):
         self._picker = None
@@ -827,8 +859,11 @@ class DisplayClient:
         items = self._picker["items"]
         if 0 <= index < len(items):
             item = items[index]
+            choose = self._picker.get("choose")
             self._close_picker()
-            if item.get("folder"):
+            if choose is not None:               # a list that is not discs: the Mode picker
+                choose(item)
+            elif item.get("folder"):
                 self._load_from_server(item["path"])   # ".." to the top is None
             else:
                 self._insert_path(item["path"])
@@ -892,8 +927,8 @@ class DisplayClient:
         pygame.draw.rect(self.screen, PICKER_BORDER, panel, 1)
 
         where = "" if p["folder"] is None else f": {Path(p['folder']).name}/"
-        title = self.font.render(f"Load from server{where}   arrows / click, Enter, Esc",
-                                 True, DIM_TEXT_COLOR)
+        text = p.get("title") or f"Load from server{where}   arrows / click, Enter, Esc"
+        title = self.font.render(text, True, DIM_TEXT_COLOR)
         self.screen.blit(title, (panel.x + 10, panel.y + 8))
 
         list_top = panel.y + 32
@@ -922,7 +957,7 @@ class DisplayClient:
             label = item["name"] + ("/" if folder and item["name"] != ".." else "")
             name = self.font.render(label, True, BUTTON_TEXT_COLOR)
             self.screen.blit(name, (rect.x + 8, rect.y + 3))
-            if not folder:
+            if not folder and "size" in item:
                 size = self.font.render(_fmt_size(item["size"]), True, DIM_TEXT_COLOR)
                 self.screen.blit(size, (rect.right - size.get_width() - 8, rect.y + 3))
 

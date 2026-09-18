@@ -49,8 +49,8 @@
 /* The screen, as the machine has it; see display.h. Until disp_init() has
  * asked, the power-on screen -- which is right on every machine until
  * something changes the mode. */
-unsigned disp_w = DISPLAY_W;
-unsigned disp_h = DISPLAY_H;
+int disp_w = DISPLAY_W;
+int disp_h = DISPLAY_H;
 unsigned disp_base = DISPLAY_START;
 
 /* Where drawing goes: the screen itself, or a back buffer once one has
@@ -482,6 +482,11 @@ int disp_setmode(unsigned w, unsigned h) {
      * accelerator's handle for the old screen if it was RAM. */
     disp_drop_back();
     if (disp_gac && disp_base_h != GAC_SCREEN) gac_ram_free(disp_base_h);
+    /* The power-on mode is shown out of RAM at DISPLAY_START, as it is at
+     * power-on and after a reboot: what the BIOS, bios2 and k_tidy expect
+     * of it. Black, as every new mode is. */
+    if (w == DISPLAY_W && h == DISPLAY_H && vram_scanout_ram(DISPLAY_START))
+        memset((void *)DISPLAY_START, 0, DISPLAY_W * DISPLAY_H * 4u);
     disp_init();
     return 1;
 }
@@ -625,6 +630,19 @@ void disp_char(unsigned x, unsigned y, int ch, color_t fg) {
         for (col = 0u; col < GLYPH_W; col++) {
             if (bits & (0x80u >> col)) disp_set(x + col, y + row, fg);
         }
+    }
+}
+
+void disp_textn(unsigned x, unsigned y, char *s, unsigned n, color_t fg) {
+    unsigned i;
+    DISP_READY();
+    if (disp_gac) {
+        gac_text(disp_target_h, (int)x, (int)y, fg, 0u, s, n);
+        return;
+    }
+    for (i = 0u; i < n; i++) {
+        disp_char(x, y, (int)s[i], fg);
+        x = x + GLYPH_W + 1u;
     }
 }
 

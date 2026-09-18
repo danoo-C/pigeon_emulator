@@ -982,7 +982,7 @@ def test_the_bar_lays_out_without_overlap_at_every_pixel_size():
         c._build_buttons()
 
         assert [b.label for b in c.buttons] == [
-            "Clear", "-", "+", "Serial", "Load from server", "Load from PC", "Eject"]
+            "Clear", "-", "+", "Serial", "Mode", "Load from server", "Load from PC", "Eject"]
         for left, right in zip(c.buttons, c.buttons[1:]):
             assert right.rect.left > left.rect.right, f"{left.label} overlaps {right.label}"
         assert c._px_x > c.buttons[2].rect.right, "the px label sits on the + button"
