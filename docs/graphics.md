@@ -31,9 +31,9 @@ arguments, as many to a call as a line holds:
 | `-f FILE X Y W H MODE` | a BMP, at that place and size |
 | `-wait` | hold the screen until a key, and print its code |
 
-**A colour is `0xAARRGGBB`**, alpha included: the display hands alpha to the
-canvas without blending, so `0x00...` is invisible and `0xFF...` is what you
-want. **Numbers are decimal or `0x...`,** and may be negative where a shape
+**A colour is `0xAARRGGBB`**: write `0xFF...`. The screen shows every pixel
+opaque whatever its alpha, so `0x00...` is not invisible, and nothing here
+blends yet. **Numbers are decimal or `0x...`,** and may be negative where a shape
 starts off the screen. **`MODE`** is `STRETCH`, `CROP` or `CROP_TOP_LEFT`
 (`<pigeon/bmp.h>`): `STRETCH` scales the whole image into `W x H`, `CROP`
 takes the middle `W x H` of it at its own size, and `CROP_TOP_LEFT` that

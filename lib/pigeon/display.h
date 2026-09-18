@@ -5,9 +5,11 @@
  * changed -- the emulator snapshots the region at 30 FPS, so a store is
  * visible within a frame.
  *
- * Colour words are 0xAARRGGBB. Alpha is NOT blended: the emulator hands
- * it straight to the canvas, so anything with AA = 0x00 is invisible.
- * Always set 0xFF unless you mean it.
+ * Colour words are 0xAARRGGBB. The screen ignores alpha: every pixel is
+ * shown opaque, so a colour is the colour you see whatever its AA, and
+ * memory nothing has drawn on is black (docs/gac/plans/phase4_frontends.md).
+ * These functions store AA as given and do not blend; set 0xFF, which is
+ * what every colour below does.
  */
 #ifndef PIGEON_DISPLAY_H
 #define PIGEON_DISPLAY_H

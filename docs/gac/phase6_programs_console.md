@@ -56,6 +56,11 @@ when that program ends, the way it already restores the scanout base
 Between programs, the kernel reads `VRAM_PREFERRED` and switches if the
 window asked (Q1).
 
+**And the mode picker in both front ends' toolbars**, which posts
+`/preferred` (built in Phase 4). It was left out of Phase 4 on purpose
+([phase 4 plan](plans/phase4_frontends.md), decision 4), so that no button
+ships that does nothing until this step makes the kernel listen.
+
 ### 6b.6 Reflow on a mode change
 
 The console keeps its grid and re-wraps it. **Clearing is the acceptable

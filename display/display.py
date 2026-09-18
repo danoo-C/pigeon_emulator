@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Pygame front-end for the pigeon emulator's DisplayIO FastAPI server.
 
-Polls GET /frame for the current RGBA framebuffer and renders it scaled
-by an adjustable pixel size. Includes buttons to clear the display, to
+Polls GET /frame for the screen -- its bytes as they are in the machine's
+memory, B,G,R,A, with the mode they were drawn in as an X-Pigeon-Mode header
+-- and renders it scaled by an adjustable pixel size. When the mode changes,
+the window follows it, at the largest pixel size up to yours that fits the
+desktop (docs/gac/plans/phase4_frontends.md). Includes buttons to clear the display, to
 increase/decrease the pixel size, and to work the CD drive
 (docs/cd-drive.md): load a disc from the emulator's own folders, load one
 from anywhere with a native file dialog, and eject. A Serial panel beside the
@@ -51,6 +54,7 @@ except ImportError as exc:
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from emulator.devices import keycodes as K          # noqa: E402
 import serial_panel as SP                             # noqa: E402  (beside this file)
+import screen_mode as SM                              # noqa: E402  (beside this file)
 
 PYGAME_TO_PIGEON = {
     pygame.K_LEFT: K.KEY_LEFT,       pygame.K_RIGHT: K.KEY_RIGHT,
@@ -208,6 +212,9 @@ class DisplayClient:
         self.hid_url = f"http://{hid_host}:{hid_port}"
         self.fps = fps
         self.pixel_size = pixel_size
+        # The size you asked for, with - and +. pixel_size is the most of it
+        # the desktop has room for at the current mode.
+        self.wanted_pixel_size = pixel_size
 
         # Persistent sessions for both display and HID servers
         self.session = requests.Session()
@@ -217,6 +224,7 @@ class DisplayClient:
         self.disp_w = info["w"]
         self.disp_h = info["h"]
         self.frame_size = info["size"]
+        self._mode = (self.disp_w, self.disp_h, info.get("generation", 0))
 
         # The CD server's address comes from /info, the same way the
         # browser page learns it, so a --cd-port on the emulator needs no
@@ -246,6 +254,10 @@ class DisplayClient:
         self.font = pygame.font.SysFont(None, 22)
         self.mono = pygame.font.SysFont("monospace", 13)
         self.clock = pygame.time.Clock()
+        # The desktop, measured before the first window exists: afterwards
+        # pygame reports the window instead.
+        desktop = pygame.display.Info()
+        self._desktop = (desktop.current_w, desktop.current_h)
 
         # The Serial panel as it was last left, and what the machine has
         # written, which a thread of its own fetches.
@@ -269,7 +281,7 @@ class DisplayClient:
         self._key_sent = {}
 
         # Background frame fetcher
-        self._latest_frame = b"\x00" * self.frame_size
+        self._latest_frame = (bytes(self.frame_size), self._mode)
         self._frame_lock = threading.Lock()
         self._display_connected = True
         self._display_connected_lock = threading.Lock()
@@ -336,9 +348,11 @@ class DisplayClient:
             try:
                 resp = self.session.get(f"{self.base_url}/frame", timeout=REQUEST_TIMEOUT)
                 resp.raise_for_status()
-                data = resp.content
+                # The bytes and the mode they were drawn in, kept together:
+                # the render loop resizes the window from the mode it draws.
+                frame = (resp.content, SM.parse_mode(resp.headers.get("X-Pigeon-Mode")))
                 with self._frame_lock:
-                    self._latest_frame = data
+                    self._latest_frame = frame
                 self._set_display_connected(True)
             except Exception:
                 self._set_display_connected(False)
@@ -462,11 +476,28 @@ class DisplayClient:
         self.status_ttl = frames
 
     def _change_pixel_size(self, delta):
-        new_size = max(MIN_PIXEL_SIZE, min(MAX_PIXEL_SIZE, self.pixel_size + delta))
-        if new_size != self.pixel_size:
-            self.pixel_size = new_size
+        wanted = max(MIN_PIXEL_SIZE, min(MAX_PIXEL_SIZE, self.pixel_size + delta))
+        if wanted != self.wanted_pixel_size:
+            self.wanted_pixel_size = wanted
             self._resize_window()
-        self._set_status(f"Pixel size: {self.pixel_size}")
+        fits = "" if self.pixel_size == wanted else " (the most that fits)"
+        self._set_status(f"Pixel size: {self.pixel_size}{fits}")
+
+    def _fitting_pixel_size(self):
+        """The pixel size you asked for, or the most of it the desktop has
+        room for at this mode."""
+        beside = self.serial_width if self.serial_open else 0
+        room_w, room_h = SM.room_for_screen(*self._desktop, beside, BUTTON_BAR_HEIGHT)
+        return SM.fit_pixel_size(self.disp_w, self.disp_h, room_w, room_h,
+                                 self.wanted_pixel_size)
+
+    def _set_mode(self, mode):
+        """The machine's screen changed size: follow it."""
+        self._mode = mode
+        self.disp_w, self.disp_h = mode[0], mode[1]
+        self.frame_size = self.disp_w * self.disp_h * 4
+        self._resize_window()
+        self._set_status(f"Mode: {self.disp_w}x{self.disp_h}")
 
     def _build_buttons(self):
         """Lay the bar out from the font's own metrics.
@@ -512,6 +543,10 @@ class DisplayClient:
                                + 12)
 
     def _resize_window(self):
+        # Every change of layout comes through here -- a mode, the pixel
+        # size, the Serial panel opening or being dragged wider -- so the
+        # pixel size is fitted to the room here, once, for all of them.
+        self.pixel_size = self._fitting_pixel_size()
         screen_w = self.disp_w * self.pixel_size
         self.serial_width = SP.clamp_width(self.serial_width, screen_w)
         spot = SP.layout(self.serial_open, self.serial_width, screen_w,
@@ -942,7 +977,11 @@ class DisplayClient:
                     if code is not None:
                         self._send_key(code, False)
 
-            frame = self._get_latest_frame()
+            frame, mode = self._get_latest_frame()
+            # Only this thread may call set_mode, so the window follows a
+            # mode change here, on the frame that brought it.
+            if mode is not None and mode[:2] != (self.disp_w, self.disp_h):
+                self._set_mode(mode)
             self._render(frame, mouse_pos)
             self.clock.tick(self.fps)
 
@@ -954,7 +993,11 @@ class DisplayClient:
 
         # Draw the framebuffer
         try:
-            surface = pygame.image.frombuffer(frame_bytes, (self.disp_w, self.disp_h), "RGBA")
+            # As the machine's memory has it, B,G,R,A; convert() then drops
+            # the alpha, because the screen ignores it -- memory nothing has
+            # drawn on is black, not the window behind it.
+            surface = pygame.image.frombuffer(frame_bytes, (self.disp_w, self.disp_h),
+                                              "BGRA").convert()
             if self.pixel_size != 1:
                 surface = pygame.transform.scale(
                     surface, (self.disp_w * self.pixel_size, self.disp_h * self.pixel_size)

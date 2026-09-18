@@ -202,17 +202,6 @@ def test_opcodes_0_to_24_are_unchanged():
     assert [table[op].name for op in range(25)] == expected
 
 
-def test_display_conversion_swaps_r_and_b():
-    from emulator.devices.display_io import DisplayIO
-    from emulator.memory_map import DISPLAY_SIZE
-    display = DisplayIO(RAM(RAM_SIZE))
-    data = bytes(range(256)) * (DISPLAY_SIZE // 256)
-    reference = bytearray(len(data))
-    for i in range(0, len(data), 4):
-        reference[i:i + 4] = (data[i + 2], data[i + 1], data[i], data[i + 3])
-    assert display._convert_to_rgba(data) == bytes(reference)
-
-
 def test_run_and_step_execute_identically():
     """Machine.run() inlines step() for speed, so the two are separate
     code paths that must not drift. They must execute the same

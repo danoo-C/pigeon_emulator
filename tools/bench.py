@@ -14,7 +14,7 @@ from emulator.cpu import CPU
 from emulator.devices.display_io import DisplayIO
 from emulator.instruction_set import NONE_REG, encode
 from emulator.io_controller import IOController
-from emulator.memory_map import DISPLAY_SIZE, HEAP_START, RAM_SIZE, VRAM_SIZE
+from emulator.memory_map import HEAP_START, RAM_SIZE, VRAM_SIZE
 from emulator.ram import RAM
 
 ITERATIONS = 2_000_000
@@ -114,12 +114,23 @@ def bench_gac():
 
 
 def bench_display():
-    display = DisplayIO(RAM(RAM_SIZE))
-    data = bytes(range(256)) * (DISPLAY_SIZE // 256)
-    start = time.perf_counter()
-    for _ in range(200):
-        display._convert_to_rgba(data)
-    return (time.perf_counter() - start) / 200 * 1000
+    """What serving a frame costs the emulator's own thread, 30 times a
+    second: the snapshot, at the power-on mode and the biggest. The clients
+    swizzle now (docs/gac/plans/phase4_frontends.md); the server's swizzle
+    took 6.4 ms of this thread at 1280 x 720."""
+    from emulator.devices.vram import VRAM
+    from emulator.memory_map import DISPLAY_MODES
+    ram = RAM(1 << 24, 1 << 23)
+    display = DisplayIO(ram)
+    vram = VRAM(ram, display, DISPLAY_MODES)
+    times = []
+    for mode in ((192, 108), (1280, 720)):
+        vram.set_mode(*mode)
+        start = time.perf_counter()
+        for _ in range(100):
+            display.update()
+        times.append((time.perf_counter() - start) / 100 * 1000)
+    return times
 
 
 def bench_real_program():
@@ -188,6 +199,6 @@ if __name__ == "__main__":
     print(f"  blended         {blended:>12.3f} ms      the same at alpha 0x80 (§4.5: 3.65)")
     print(f"  BLIT_ALPHA      {blit_alpha:>12.1f} ms      a whole screen over another (§4.5: 18.5)")
     print(f"GAC text, 720p    {console:>12.1f} ms      a whole 213x80 console, 80 commands")
-    ms = bench_display()
-    print(f"Frame conversion  {ms:>12.3f} ms      (was 2.22 ms; "
-          f"{1000 / ms:,.0f} FPS ceiling)")
+    small, big = bench_display()
+    print(f"Frame snapshot    {small:>12.3f} ms      192x108; the clients swizzle")
+    print(f"  at 720p         {big:>12.3f} ms      1280x720 (the server's swizzle was 6.4)")

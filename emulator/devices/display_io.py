@@ -4,8 +4,12 @@ This module keeps the emulator RAM display region in an in-memory frame
 buffer and serves it to external clients via a background FastAPI server.
 
 The emulator should call `DisplayIO.update()` periodically. The update
-function creates a snapshot from RAM and stores it in memory as the
-current frame (converted to RGBA byte order for web clients).
+function snapshots the screen and stores it, as it is in memory -- B, G,
+R, A -- together with the mode it was drawn in. /frame serves those bytes
+with the mode in an X-Pigeon-Mode header, and the clients swizzle
+(docs/gac/plans/phase4_frontends.md): 1.3 ms in JavaScript at 1280 x 720,
+nothing at all in pygame, where the server's version took 6.4 ms of the
+emulator's own thread.
 
 It is also a device on the IO bus (channel CH_DISPLAY), which is what
 makes a page flip and a screen clear cost a handful of instructions
@@ -258,44 +262,35 @@ class DisplayIO:
         mem[base + to:base + to + count] = mem[base + source:base + source + count]
         return b"\x01\x00\x00\x00"
 
-    def update(self) -> bool:
-        """Snapshot the current display region from RAM into the in-memory frame buffer.
+    @property
+    def generation(self) -> int:
+        """How many times the mode has changed: the VRAM device's count, or
+        0 on a machine without video memory, whose mode never does."""
+        return self.vram.generation if self.vram is not None else 0
 
-        Returns True if a new frame was captured.
-        """
-        data = self.snapshot()
-        try:
-            rgba = self._convert_to_rgba(data)
-        except Exception:
-            # Keep updates tolerant: don't crash the emulator if conversion fails
-            return False
+    def update(self) -> bool:
+        """Snapshot the screen into the frame /frame serves, with the mode
+        it was drawn in. The two are stored together, under one lock, so a
+        frame can never be labelled with a mode it was not drawn in -- the
+        guest may switch while a request is being served."""
+        frame = (self.snapshot(), self.width, self.height, self.generation)
         with self._frame_lock:
-            self._frame = rgba
+            self._frame = frame
         return True
 
-    def _convert_to_rgba(self, data: bytes) -> bytes:
-        # Incoming memory layout is B,G,R,A per pixel; convert to R,G,B,A
-        if not data:
-            return b"\x00" * self.display_size
-        # Swap the R and B channels with strided slice assignment. The
-        # equivalent per-byte Python loop cost 2.2 ms/frame at 100x100 --
-        # a 450 FPS ceiling that would drop under 15 FPS at 640x480.
-        out = bytearray(data)
-        out[0::4] = data[2::4]   # R <- B
-        out[2::4] = data[0::4]   # B <- R
-        return bytes(out)
-
-    def get_frame(self) -> bytes:
-        """Return the latest frame in RGBA byte order. If no frame exists, return zeros."""
+    def get_frame(self):
+        """The latest frame: (bytes as in memory, width, height,
+        generation). Black at the current mode until the first update."""
         with self._frame_lock:
             if self._frame is None:
-                return b"\x00" * self.display_size
+                return bytes(self.display_size), self.width, self.height, self.generation
             return self._frame
 
     def clear(self) -> None:
-        """Clear the in-memory frame."""
+        """Blank the frame being served, until the next update."""
         with self._frame_lock:
-            self._frame = b"\x00" * self.display_size
+            self._frame = (bytes(self.display_size), self.width, self.height,
+                           self.generation)
 
     def start_fastapi(self, host: str = "127.0.0.1", port: int = 8000, serve_frontend: bool = True):
         """Start a background FastAPI server that exposes the current frame and control endpoints.
@@ -310,8 +305,8 @@ class DisplayIO:
         # the daemon thread below is swallowed, leaving the emulator running
         # with no display and no explanation.
         try:
-            from fastapi import FastAPI, Query, Response
-            from fastapi.responses import HTMLResponse
+            from fastapi import Body, FastAPI, Query, Response
+            from fastapi.responses import HTMLResponse, JSONResponse
             from fastapi.middleware.cors import CORSMiddleware
             import uvicorn
         except ImportError as e:
@@ -329,8 +324,9 @@ class DisplayIO:
 
             @app.get("/frame")
             async def frame():
-                data = self.get_frame()
-                return Response(content=data, media_type="application/octet-stream")
+                data, headers = frame_reply(self)
+                return Response(content=data, media_type="application/octet-stream",
+                                headers=headers)
 
             @app.post("/clear")
             async def clear_endpoint():
@@ -339,9 +335,12 @@ class DisplayIO:
 
             @app.get("/info")
             async def info():
-                return {"w": self.width, "h": self.height, "size": self.display_size,
-                        "scanout": self.scanout_base, "hid_url": self.hid_url,
-                        "cd_url": self.cd_url}
+                return info_reply(self)
+
+            @app.post("/preferred")
+            async def preferred(body: dict = Body(...)):
+                status, reply = preferred_reply(self, body)
+                return JSONResponse(reply, status_code=status)
 
             @app.get("/serial")
             async def serial(offset: int = Query(0, alias="from")):
@@ -361,3 +360,55 @@ class DisplayIO:
 
         self._server_thread = Thread(target=_run, daemon=True)
         self._server_thread.start()
+
+
+# --- the replies, as plain functions -----------------------------------------
+#
+# The routes above only wrap these, so the tests can call them without a
+# server, as tests/test_serial.py does with serial_reply.
+
+#: The byte order /frame's body is in, so a client expecting another can say
+#: so instead of showing red and blue swapped.
+FRAME_FORMAT = "bgra"
+
+
+def frame_reply(display: "DisplayIO"):
+    """/frame: the bytes, and the mode they were drawn in as a header,
+    X-Pigeon-Mode: w,h,generation."""
+    data, w, h, generation = display.get_frame()
+    return data, {"X-Pigeon-Mode": f"{w},{h},{generation}"}
+
+
+def info_reply(display: "DisplayIO") -> dict:
+    """/info: the live geometry, and what the front ends need to follow it."""
+    vram = display.vram
+    return {
+        "w": display.width, "h": display.height, "size": display.display_size,
+        "scanout": display.scanout_base, "hid_url": display.hid_url,
+        "cd_url": display.cd_url,
+        "generation": display.generation,
+        "format": FRAME_FORMAT,
+        "modes": [list(m) for m in vram.modes] if vram is not None
+                 else [[display.width, display.height]],
+        "preferred": list(vram.preferred[:2]) if vram is not None else [0, 0],
+    }
+
+
+def preferred_reply(display: "DisplayIO", body) -> tuple:
+    """/preferred {w, h}: what the host window would like. Stored, never
+    acted on here -- only the guest switches (docs/gac/decisions.md Q1).
+    (status, reply): 404 without video memory, 400 for anything but an
+    offered mode."""
+    vram = display.vram
+    if vram is None:
+        return 404, {"error": "this machine has no video memory, so its mode never changes"}
+    try:
+        mode = (int(body["w"]), int(body["h"]))
+    except (KeyError, TypeError, ValueError):
+        return 400, {"error": "expected {\"w\": width, \"h\": height}"}
+    if mode not in vram.modes:
+        return 400, {"error": f"{mode[0]}x{mode[1]} is not an offered mode",
+                     "modes": [list(m) for m in vram.modes]}
+    vram.set_preferred(*mode)
+    return 200, {"preferred": list(mode)}
+

@@ -295,6 +295,9 @@ def pygame_client():
     import display as client
     c = object.__new__(client.DisplayClient)
     c.disp_w, c.disp_h, c.pixel_size = 192, 108, 4
+    # What __init__ measures and keeps for fitting the pixel size to the
+    # desktop (docs/gac/plans/phase4_frontends.md): room enough for 4.
+    c.wanted_pixel_size, c._desktop = 4, (3840, 2160)
     c.serial_open, c.serial_width, c.serial_times = True, 320, True
     c._screen_x = 320
     c.buttons = []
@@ -420,7 +423,8 @@ def test_the_window_draws_the_panel_left_of_the_screen_and_the_button_toggles_it
     c._cd_lock, c._cd_status = threading.Lock(), None
     c._display_connected, c._display_connected_lock = True, threading.Lock()
     c._hid_connected, c._hid_connected_lock = True, threading.Lock()
-    red = bytes((255, 0, 0, 255)) * (192 * 108)
+    # A frame as /frame sends it: the machine's memory, B, G, R, A.
+    red = bytes((0, 0, 255, 255)) * (192 * 108)
     saved_path = client.PREFS_PATH
     with tempfile.TemporaryDirectory() as d:
         client.PREFS_PATH = Path(d) / "display.json"
