@@ -75,6 +75,9 @@ static unsigned disp_hw = 0u;
 /* 0 until disp_init() has asked the machine. */
 static unsigned disp_ready = 0u;
 
+/* 1 while the screen is not in this program's mode: see display.h. */
+int disp_hidden = 0;
+
 /* 1 when drawing goes to the accelerator, and the accelerator's handles for
  * the screen, the back buffer, and whichever of them is being drawn on. */
 static unsigned disp_gac = 0u;
@@ -132,6 +135,9 @@ static int disp_have_hw(void) {
  * does not need to: until disp_init() the globals are the power-on screen,
  * which is where a pixel then goes. */
 #define DISP_READY() if (disp_ready == 0u) disp_init()
+
+/* And a drawing call, which also does nothing while the screen is hidden. */
+#define DISP_DRAW() if (disp_hidden != 0) return; DISP_READY()
 
 /* Rows are contiguous, so walking a pointer along one beats recomputing
  * y*DISP_W + x per pixel -- that is a MUL plus address arithmetic every
@@ -220,6 +226,7 @@ void disp_present(void) {
 }
 
 void disp_set(unsigned x, unsigned y, color_t c) {
+    if (disp_hidden != 0) return;
     if (x >= disp_w) return;
     if (y >= disp_h) return;
     *row_ptr(x, y) = c;
@@ -237,7 +244,7 @@ static int disp_by_gac(unsigned pixels, color_t c) {
 }
 
 void disp_clear(color_t c) {
-    DISP_READY();
+    DISP_DRAW();
     /* disp_target, not DISP_BASE: with a back buffer in play this must
      * clear the buffer being drawn into, or the clear lands on screen
      * while every shape lands in the buffer. */
@@ -263,7 +270,7 @@ void disp_clear(color_t c) {
 
 void disp_hline(unsigned x, unsigned y, unsigned w, color_t c) {
     color_t *p;
-    DISP_READY();
+    DISP_DRAW();
     if (y >= disp_h || x >= disp_w) return;
     if (x + w > disp_w) w = disp_w - x;      /* clip, do not bail */
     if (disp_by_gac(w, c)) {
@@ -276,7 +283,7 @@ void disp_hline(unsigned x, unsigned y, unsigned w, color_t c) {
 
 void disp_vline(unsigned x, unsigned y, unsigned h, color_t c) {
     color_t *p;
-    DISP_READY();
+    DISP_DRAW();
     if (x >= disp_w || y >= disp_h) return;
     if (y + h > disp_h) h = disp_h - y;
     if (disp_by_gac(h, c)) {
@@ -289,7 +296,7 @@ void disp_vline(unsigned x, unsigned y, unsigned h, color_t c) {
 
 void disp_rect(unsigned x, unsigned y, unsigned w, unsigned h, color_t c) {
     unsigned row = 0u;
-    DISP_READY();
+    DISP_DRAW();
     if (x >= disp_w || y >= disp_h) return;
     if (x + w > disp_w) w = disp_w - x;
     if (y + h > disp_h) h = disp_h - y;
@@ -318,7 +325,7 @@ void disp_scroll(unsigned y, unsigned h, int dy, color_t bg) {
     unsigned kept;
     unsigned gap;
     unsigned i;
-    DISP_READY();
+    DISP_DRAW();
     row_bytes = disp_w * 4u;
     if (y >= disp_h || h == 0u || dy == 0) return;
     if (y + h > disp_h) h = disp_h - y;
@@ -351,7 +358,7 @@ void disp_scroll(unsigned y, unsigned h, int dy, color_t bg) {
 }
 
 void disp_frame(unsigned x, unsigned y, unsigned w, unsigned h, color_t c) {
-    DISP_READY();
+    DISP_DRAW();
     if (w == 0u || h == 0u) return;
     /* The accelerator's frame is the same four lines -- where its signed
      * numbers mean what these unsigned ones do: a corner on the screen and
@@ -373,7 +380,7 @@ void disp_line(int x0, int y0, int x1, int y1, color_t c) {
     int sx = 1; int sy = 1;
     int err; int e2;
 
-    DISP_READY();
+    DISP_DRAW();
     if (disp_gac) { gac_line(disp_target_h, x0, y0, x1, y1, c); return; }
     if (dx < 0) { dx = -dx; sx = -1; }
     if (dy < 0) { dy = -dy; sy = -1; }
@@ -391,7 +398,7 @@ void disp_line(int x0, int y0, int x1, int y1, color_t c) {
 /* Midpoint circle: eight-way symmetry, no division, no multiply. */
 void disp_circle(int cx, int cy, int r, color_t c) {
     int x = r; int y = 0; int err = 1 - r;
-    DISP_READY();
+    DISP_DRAW();
     if (r < 0) return;
     if (disp_gac) { gac_circle(disp_target_h, cx, cy, r, c); return; }
     while (x >= y) {
@@ -425,7 +432,7 @@ static void disp_span(int x0, int x1, int y, color_t c) {
  * draws each row once, which is what makes a translucent disc right. */
 void disp_disc(int cx, int cy, int r, color_t c) {
     int x = r; int y = 0; int err = 1 - r;
-    DISP_READY();
+    DISP_DRAW();
     if (r < 0) return;
     if (disp_gac) { gac_disc(disp_target_h, cx, cy, r, c); return; }
     while (x >= y) {
@@ -450,7 +457,7 @@ void disp_blit(unsigned *pixels, int x, int y, unsigned w, unsigned h) {
     int from;
     int n;
 
-    DISP_READY();
+    DISP_DRAW();
     if (w == 0u || h == 0u) return;
     if (disp_gac) {
         surface = gac_ram_surface((unsigned)pixels, w, h);
@@ -617,7 +624,7 @@ void disp_char(unsigned x, unsigned y, int ch, color_t fg) {
     unsigned bits;
     char one;
 
-    DISP_READY();
+    DISP_DRAW();
     if (ch < 0x20 || ch > 0x7E) return;
     if (disp_gac) {
         one = (char)ch;
@@ -635,7 +642,7 @@ void disp_char(unsigned x, unsigned y, int ch, color_t fg) {
 
 void disp_textn(unsigned x, unsigned y, char *s, unsigned n, color_t fg) {
     unsigned i;
-    DISP_READY();
+    DISP_DRAW();
     if (disp_gac) {
         gac_text(disp_target_h, (int)x, (int)y, fg, 0u, s, n);
         return;
@@ -648,7 +655,7 @@ void disp_textn(unsigned x, unsigned y, char *s, unsigned n, color_t fg) {
 
 void disp_text(unsigned x, unsigned y, char *s, color_t fg) {
     unsigned n = 0u;
-    DISP_READY();
+    DISP_DRAW();
     if (disp_gac) {
         /* The whole string in one command: the device steps a cell a
          * character, GLYPH_W + 1, as the loop below does, and draws no
@@ -720,3 +727,25 @@ int disp_init(void) {
     }
     return 1;
 }
+
+/* See display.h. The kernel calls this where a program may have changed the
+ * mode under it: before it writes to the console, and after a program ends. */
+int disp_follow(void) {
+    unsigned w;
+    unsigned h;
+    unsigned offset;
+    if (!vram_mode(&w, &h, &offset)) {
+        disp_hidden = 0;                   /* no video memory: the mode never changes */
+        return 1;
+    }
+    disp_hidden = (w != (unsigned)disp_w || h != (unsigned)disp_h) ? 1 : 0;
+    /* Back in our mode, the mode's surface may be somewhere else in video
+     * memory: a program that changed the mode and changed it back had it
+     * placed again. RAM at DISPLAY_START never moves. */
+    if (disp_hidden == 0 && disp_back == 0u && disp_base >= vram_aperture()) {
+        disp_base = vram_aperture() + offset;
+        disp_target = disp_base;
+    }
+    return disp_hidden == 0;
+}
+

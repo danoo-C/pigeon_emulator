@@ -1,4 +1,5 @@
-/* <pigeon/display.h> -- drawing on the screen.
+/* <pigeon/display.h> -- drawing on the screen. The machine's side of it is
+ * docs/gac.md (the accelerator) and docs/vram.md (modes, video memory).
  *
  * The screen is memory, so a pixel is one store: disp_set is pointer
  * arithmetic, no IO channel, no driver. Nothing needs telling that the
@@ -47,6 +48,15 @@ extern unsigned disp_base;
 #define DISP_BASE disp_base
 
 int disp_init(void);        /* asks the machine; returns 1. Safe to call again. */
+
+/* While disp_hidden is set every drawing call does nothing. It is for a
+ * program whose picture is not on the screen because another has put the
+ * screen in a mode of its own -- the kernel's console, while a program runs
+ * in a mode it chose (docs/gac/plans/phase7_setmode.md). disp_follow()
+ * looks: it sets disp_hidden when the machine's mode is not this program's,
+ * and, when it is, finds where this mode's screen now is. 1 if it is shown. */
+extern int disp_hidden;
+int disp_follow(void);
 
 typedef unsigned int color_t;
 

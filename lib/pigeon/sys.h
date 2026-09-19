@@ -74,6 +74,11 @@ int  setbreak(int on);                      /* Ctrl+C as the break for this
 int  paging(int on);                        /* -- more -- after each screen of
                                                this program's output and its
                                                children's, until it ends     */
+int  setmode(unsigned w, unsigned h);      /* the console's screen, at once and
+                                               until the next setmode: 0, or
+                                               E_NOMODE for a mode the machine
+                                               does not offer
+                                               (docs/gac/plans/phase7_setmode.md) */
 int  consize(unsigned *cols, unsigned *rows);  /* the console's size in
                                                cells: 32 x 12 at the power-on
                                                screen, more in bigger modes

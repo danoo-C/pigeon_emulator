@@ -87,6 +87,8 @@ static int last_status;             /* $?                                  */
 static int started;                 /* a command has been run: no more settings */
 static int stop_on_error;           /* # stop-on-error                     */
 static int graphics_mode;           /* # graphics                          */
+static unsigned graphics_w;         /* # graphics 640x360: the mode it asks */
+static unsigned graphics_h;         /* for; 0 for the screen as it is      */
 static int screen_kept;             /* and the screen is ours already      */
 static char gfx_bin[64];            /* where a command's output goes then  */
 
@@ -151,7 +153,51 @@ static void graphics_start(void) {
     if (graphics_mode == 0 || screen_kept != 0) return;
     screen_kept = 1;
     keepscreen(1);
+    /* A mode of the script's own: its graphics lines each start and end in
+     * it, and the kernel puts back the screen pgs started with when the
+     * script ends, however it ends (docs/gac/plans/phase7_setmode.md). */
+    if (graphics_w != 0u) disp_setmode(graphics_w, graphics_h);
     disp_clear(BLACK);
+}
+
+/* "640x360" as a mode the machine offers, into graphics_w and graphics_h:
+ * 1, or 0 with the reason said. Checked at the header, before the screen is
+ * touched, so a mistake leaves it as it was. */
+static int graphics_size(char *text) {
+    unsigned ws[16];
+    unsigned hs[16];
+    unsigned w = 0u;
+    unsigned h = 0u;
+    char *p = text;
+    char offered[160];
+    int n;
+    int i;
+    while (*p >= '0' && *p <= '9') { w = w * 10u + (unsigned)(*p - '0'); p++; }
+    if (*p == 'x' || *p == 'X') {
+        p++;
+        while (*p >= '0' && *p <= '9') { h = h * 10u + (unsigned)(*p - '0'); p++; }
+    }
+    if (w == 0u || h == 0u || *p != 0) {
+        fail("a mode is WIDTHxHEIGHT, like 640x360: ", text);
+        return 0;
+    }
+    n = disp_modes(ws, hs, 16);
+    offered[0] = 0;
+    for (i = 0; i < n && i < 16; i++) {
+        if (ws[i] == w && hs[i] == h) {
+            graphics_w = w;
+            graphics_h = h;
+            return 1;
+        }
+        snprintf(offered + strlen(offered), sizeof(offered) - strlen(offered), " %ux%u",
+                 ws[i], hs[i]);
+    }
+    snprintf(offered + strlen(offered), sizeof(offered) - strlen(offered), ")");
+    fail("not a mode this machine offers: ", text);
+    say("  (it offers");
+    say(offered);
+    say("\n");
+    return 0;
 }
 
 /* And off again, for a message that has to be read. The console comes back
@@ -770,6 +816,10 @@ static void directive(char *line) {
     }
     if (strcmp(word, "graphics") == 0) {
         graphics_mode = 1;
+        return;
+    }
+    if (strncmp(word, "graphics ", 9) == 0) {
+        if (graphics_size(trim(word + 9))) graphics_mode = 1;
         return;
     }
     fail("no such setting: ", word);

@@ -14,6 +14,7 @@ typedef int  (*sys_int_ptr_n)(int, void *, unsigned);
 typedef int  (*sys_path_flags)(char *, unsigned);
 typedef int  (*sys_int)(int);
 typedef int  (*sys_two_sizes)(unsigned *, unsigned *);
+typedef int  (*sys_two_words)(unsigned, unsigned);
 typedef int  (*sys_path)(char *);
 typedef int  (*sys_int_stat)(int, sys_stat_t *);
 typedef int  (*sys_path_stat)(char *, sys_stat_t *);
@@ -99,6 +100,10 @@ int paging(int on) { return ((sys_int)SYS_SLOT(SYS_PAGING))(on); }
 
 int keepscreen(int on) { return ((sys_int)SYS_SLOT(SYS_KEEPSCREEN))(on); }
 
+int setmode(unsigned w, unsigned h) {
+    return ((sys_two_words)SYS_SLOT(SYS_SETMODE))(w, h);
+}
+
 int consize(unsigned *cols, unsigned *rows) {
     return ((sys_two_sizes)SYS_SLOT(SYS_CONSIZE))(cols, rows);
 }
@@ -125,6 +130,7 @@ char *sys_strerror(int status) {
     if (status == E_NOTPROG) return "not a program";
     if (status == E_NOMEM) return "no room to run it";
     if (status == E_DEPTH) return "too many programs running";
+    if (status == E_NOMODE) return "not a mode this machine offers";
     if (status == ENDED_DIV_ZERO) return "divided by zero";
     if (status == ENDED_BAD_OPCODE) return "ran a bad instruction";
     if (status == ENDED_BAD_FETCH) return "ran off the end of memory";

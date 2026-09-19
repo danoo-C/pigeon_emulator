@@ -307,3 +307,37 @@ nano, for the 32×12 screen:
 - **There are no pipes.** The kernel runs one program at a time
   ([kernel_exec.md](kernel_exec.md)), so `a | b` has nowhere to put `a` while
   `b` runs.
+
+---
+
+## 9. The screen's size: `setmode`
+
+```sh
+2:/> setmode
+192 x 108
+2:/> setmode -list
+192 x 108 (now)
+320 x 180
+640 x 360
+854 x 480
+1280 x 720
+2:/> setmode 640 360
+2:/>
+```
+
+`setmode 640 360`, or `setmode 640x360`, switches the screen at once, and says
+nothing when it works. The console fills the new screen, 106 × 40 at
+640 × 360, and **keeps its text**: a narrower screen cuts rows at its edge, and
+a shorter one sends the top rows into the scrollback (PgUp). The mode stays
+until the next `setmode`, a reboot, or the **Mode** list in the window's
+toolbar, which is taken the next time the prompt is waiting.
+
+A program can have a mode of its own too, such as a game or a
+`# graphics 640x360` script ([graphics.md](graphics.md) §4). The kernel puts
+back the mode it started with when it ends, so nothing a program does to the
+screen outlasts it. `setmode` is the exception because it asks the kernel,
+not the screen: it is the console's mode it changes ([vram.md](vram.md) §1).
+
+`edit` and anything else that lays out the whole console asks its size with
+`consize()`.
+

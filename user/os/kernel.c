@@ -59,6 +59,7 @@
 
 #define K_TIMER_STOP        2u
 #define K_DISPLAY_SET_BASE  2u
+#define K_DISPLAY_GET_BASE  3u
 #define K_HID_SET_BREAK     8u
 #define K_KEY_LCTRL         0x8Bu
 #define K_KEY_RCTRL         0x8Cu
@@ -130,6 +131,7 @@ extern int w_setbreak;
 extern int w_paging;
 extern int w_keepscreen;
 extern int w_consize;
+extern int w_setmode;
 extern int kswallow;
 extern int fault_div;
 extern int fault_opcode;
@@ -145,6 +147,9 @@ struct proc {
     unsigned breaks;        /* 1: Ctrl+C is its break; setbreak turns it off */
     unsigned how;           /* K_HOW_*: how it ended, set where it did      */
     unsigned fault_pc;      /* the instruction it faulted on                */
+    unsigned mode_w;        /* the screen it started with, which k_tidy puts */
+    unsigned mode_h;        /* back (docs/gac/plans/phase7_setmode.md §2.1)  */
+    unsigned screen;        /* and where it was: RAM, or the aperture         */
     char path[256];         /* FS_PATH_MAX + 1: as exec was given it        */
 };
 
@@ -244,6 +249,9 @@ static void k_break(unsigned on) {
 }
 
 /* --- the console ------------------------------------------------------- */
+
+static void k_started_in(int d);
+static int k_console_mode(unsigned w, unsigned h);
 
 /* A character in a look, at a cell on a background already cleared: in its
  * ink, or, inverse, the ink as the background and the character cut out of
@@ -1122,6 +1130,23 @@ static void con_resize(unsigned w, unsigned h) {
     view_back = 0u;
 }
 
+/* The console's screen in mode w x h, its text kept and drawn again: 1, or
+ * 0 when the machine does not offer that mode. The picker's request at the
+ * prompt and the setmode call both come here. The programs running below
+ * the one that asked are told it is the mode they started in, so no k_tidy
+ * on the way back to the prompt undoes it (docs/gac/plans/phase7_setmode.md
+ * §2.2). */
+static int k_console_mode(unsigned w, unsigned h) {
+    int d;
+    if (!disp_setmode(w, h)) return 0;
+    con_resize(disp_w, disp_h);
+    con_redraw();
+    for (d = 1; d <= depth; d++) k_started_in(d);
+    dbg_printf("[kernel] mode %ux%u: the console is %u x %u\n", disp_w, disp_h,
+               con_cols, con_rows);
+    return 1;
+}
+
 /* The request count of the last mode the window asked for that the kernel
  * has looked at: a new one is taken at the shell's prompt. */
 static unsigned asked = 0u;
@@ -1143,14 +1168,28 @@ static void k_adopt(char *buf, unsigned n, unsigned cur) {
     if (w == 0u || (w == disp_w && h == disp_h)) return;
     if (list_rows != 0u) line_unlist();
     line_draw(buf, 0u, 0u, n);
-    if (disp_setmode(w, h)) {
-        con_resize(disp_w, disp_h);
-        con_redraw();
-        dbg_printf("[kernel] mode %ux%u: the console is %u x %u\n", disp_w, disp_h,
-                   con_cols, con_rows);
-    }
+    k_console_mode(w, h);
     line_draw(buf, 0u, n, 0u);
     line_cursor(cur, 1u);
+}
+
+/* The screen as a program at depth d starts it: the mode, and where the
+ * screen is -- what k_tidy puts back when it ends. */
+static void k_started_in(int d) {
+    unsigned offset;
+    procs[d].mode_w = disp_w;
+    procs[d].mode_h = disp_h;
+    vram_mode(&procs[d].mode_w, &procs[d].mode_h, &offset);
+    k_io(CH_DISPLAY, K_DISPLAY_GET_BASE, 4u, 0u);
+    procs[d].screen = IO_DATAW[0];
+}
+
+/* setmode: the console's screen, at once (docs/gac/plans/phase7_setmode.md
+ * §2.2). Not only at the prompt, as the picker is: it was typed at one. */
+int k_setmode(unsigned w, unsigned h) {
+    if (!vram_present()) return E_NOMODE;
+    if (w == (unsigned)disp_w && h == (unsigned)disp_h) return 0;
+    return k_console_mode(w, h) ? 0 : E_NOMODE;
 }
 
 static int con_read_line(char *buf, unsigned size) {
@@ -1167,6 +1206,7 @@ static int con_read_line(char *buf, unsigned size) {
     unsigned was_tab;
     unsigned wheel;
     if (size < 2u) return FS_EINVAL;
+    disp_follow();                          /* on screen only in the console's mode */
     max = size - 2u;
     if (max > LINE_MAX) max = LINE_MAX;
     k_break(0u);
@@ -1326,6 +1366,7 @@ int k_write(int fd, char *buf, unsigned n) {
         }
     }
     if (fd == STDOUT || fd == STDERR) {
+        disp_follow();                      /* on screen only in the console's mode */
         page_counting = page_owner != 0u ? 1u : 0u;
         for (i = 0u; i < n; i++) {
             if (page_counting != 0u && page_rows >= PAGE_ROWS && con_esc == CON_ESC_NONE) {
@@ -1513,10 +1554,17 @@ static void k_tidy(void) {
      * before the mode and the base below. */
     vram_free_owned((unsigned)depth);
     vram_owner((unsigned)depth - 1u);
-    /* The mode, if it changed it: only the program that asked has it, and
-     * the kernel's own is back when it ends (docs/gac/decisions.md Q6). */
-    if (vram_mode(&w, &ht, &offset) && (w != disp_w || ht != disp_h)) vram_set_mode(disp_w, disp_h);
-    k_io(CH_DISPLAY, K_DISPLAY_SET_BASE, 4u, disp_base);
+    /* The screen it started with: the mode, if it changed it, and where
+     * the screen was. Only the program that asked has a mode of its own
+     * (docs/gac/decisions.md Q6), and when it ends its parent's is back --
+     * the shell's, or a script's that asked for one: a # graphics 640x360
+     * script's graphics lines each end in its mode, and keep it
+     * (docs/gac/plans/phase7_setmode.md §2.1). */
+    if (vram_mode(&w, &ht, &offset) && (w != procs[depth].mode_w || ht != procs[depth].mode_h))
+        vram_set_mode(procs[depth].mode_w, procs[depth].mode_h);
+    if (vram_aperture() != 0u && procs[depth].screen >= vram_aperture()) vram_scanout(0u);
+    else k_io(CH_DISPLAY, K_DISPLAY_SET_BASE, 4u, procs[depth].screen);
+    disp_follow();                          /* the console drawn only if that is its mode */
     k_remount();
     con_attr = CON_DEFAULT;                 /* no color left on for the shell */
     con_esc = CON_ESC_NONE;
@@ -1592,6 +1640,7 @@ static int k_run(char *path, int argc, char **argv, unsigned *ran) {
 
     depth++;
     vram_owner((unsigned)depth);            /* what it allocates is its, for k_tidy */
+    k_started_in(depth);                    /* and the screen it starts with, too */
     complete_dir[(unsigned)depth * COMPLETE_TEXT] = 0;         /* no commands for Tab yet */
     complete_builtins[(unsigned)depth * COMPLETE_TEXT] = 0;
     procs[depth].base = base;
@@ -1794,6 +1843,7 @@ static void k_tables(void) {
     table[SYS_EXEC_IO] = (unsigned)&w_exec_io;
     table[SYS_KEEPSCREEN] = (unsigned)&w_keepscreen;
     table[SYS_CONSIZE] = (unsigned)&w_consize;
+    table[SYS_SETMODE] = (unsigned)&w_setmode;
     vectors[VEC_DIV_ZERO] = (unsigned)&fault_div;
     vectors[VEC_BAD_OPCODE] = (unsigned)&fault_opcode;
     vectors[VEC_BAD_FETCH] = (unsigned)&fault_fetch;

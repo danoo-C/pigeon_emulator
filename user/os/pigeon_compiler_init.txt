@@ -34,6 +34,7 @@ system    = kernel.c            # what the installed hard disk boots: the kernel
 /bin/explorer.bin = bin/explorer.c   # the file explorer /etc/explorer.conf drives
 /bin/pgs.bin     = bin/pgs.c      # .pgs scripts (docs/pgs.md)
 /bin/graphics.bin = bin/graphics.c   # shapes, text and images (docs/graphics.md)
+/bin/setmode.bin = bin/setmode.c    # the screen's mode, from the prompt (docs/vram.md)
 
 /bin/graph.bin   = ../graph.c   # the graphing calculator; Esc goes back to the shell
 /bin/cube.bin    = ../cube.c

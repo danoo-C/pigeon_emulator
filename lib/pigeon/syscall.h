@@ -34,7 +34,8 @@
 #define SYS_EXEC_IO  21
 #define SYS_KEEPSCREEN 22
 #define SYS_CONSIZE  23
-#define SYS_COUNT    24
+#define SYS_SETMODE  24
+#define SYS_COUNT    25
 
 /* --- exec_io(): what happens to the file it writes into ----------------- */
 #define R_TRUNC  0          /* >  : written beside it, and put in place at the end */
@@ -66,6 +67,7 @@ typedef struct { char name[32]; unsigned type; unsigned size; } sys_stat_t;
 #define E_NOMEM   (-21)     /* no room above the programs running   */
 #define E_DEPTH   (-22)     /* programs running programs too deep   */
 #define E_QUIT    (-23)     /* write: q at -- more -- (paging)      */
+#define E_NOMODE  (-24)     /* setmode: not a mode this machine offers */
 
 /* --- how exec() says a program did not return -------------------------- */
 #define ENDED_DIV_ZERO   (-100)     /* it divided by zero        */

@@ -105,6 +105,13 @@ dialog needs tkinter, which is a system package rather than a pip one
 (`sudo apt install python3-tk`); without it that one button says so and
 everything else works.
 
+Both have a **Mode** list too: the screen's size, from 192 × 108 up to
+1280 × 720. The machine takes a mode chosen there the next time the prompt is
+waiting, and the console fills the new screen with its text kept.
+`setmode 640 360` does the same from the prompt, at once
+([docs/vram.md](docs/vram.md)). Each front end follows the screen's size by
+itself, at the largest whole scale that fits the window.
+
 Both have a **Serial panel** too, left of the screen: what the machine writes
 to its debug port, IO channel 8, each line with the time since power-on
 ([docs/phase5c_plan.md](docs/phase5c_plan.md)). The *Serial* button opens and
@@ -206,6 +213,10 @@ partial or missing file is fine.
 | `cd` | a disc to put in the drive before the machine starts, so bios2 can boot it: a path, or `null` for an empty drive. `--cd PATH` is the same for one run ([docs/os_cd.md](docs/os_cd.md)) |
 | `serial` | print what the machine writes to its debug port, IO channel 8, in the launcher's terminal, each line with the time since power-on. `--serial` is the same for one run ([docs/phase5_plan.md](docs/phase5_plan.md)) |
 | `serial_log` | a file to write those lines to as well, started fresh each run with its date and time as the first line: a path, or `null` for none. `--serial-log PATH` is the same for one run |
+| `ram` | how much RAM: a power of two from `"128M"` to `"2G"`. More than 128 MB is there and addressable, but the OS still lays itself out in 128 MB. `--ram SIZE` is the same for one run |
+| `vram` | video memory, mapped just above RAM: `"16M"`, or `null` / `0` for none, which fixes the screen at 192 × 108 with no accelerator. `--vram SIZE` is the same for one run ([docs/vram.md](docs/vram.md)) |
+| `display_mode` | the screen at power-on, `[192, 108]`; `--mode WxH` is the same for one run |
+| `display_modes` | the modes a program, `setmode` or the Mode list may switch to, up to 1280 × 720 |
 
 Relative paths are resolved against the repo root, so the file means the same
 thing whichever directory you run from. A malformed value is reported with the
@@ -318,6 +329,13 @@ silently overlapping.
 Heap and stack share one uninterrupted block and grow toward each other, so
 neither reserves a guess up front.
 
+**Video memory sits above all of that,** mapped from wherever RAM ends:
+`0x08000000` on the 128 MB machine, 16 MB of it by default. The screen is in
+RAM at `0x00001418` only at the power-on size, 192 × 108; every bigger mode's
+screen is in video memory. A program never writes that address down, because it
+moves with the RAM's size: it asks `vram_aperture()`, or uses `display.h`'s
+`DISP_BASE` ([docs/vram.md](docs/vram.md)).
+
 Assembly sources never retype these — the assembler predefines every constant
 in `memory_map.py` as a symbol. See [assembler/README.md](assembler/README.md).
 
@@ -403,6 +421,8 @@ that fires the command.
 | 6 `CH_CD` | removable disc | `0`-`5` as HDD, but **read-only**: WRITE and TRUNCATE are refused · `8` MEDIA → `(magic, present, generation, size, name[32])` · `9` EJECT → `(ejected, generation)` |
 | 7 `CH_BIOS2` | firmware | the second-stage BIOS ([docs/os_cd.md](docs/os_cd.md)). As HDD, but **read-only**: WRITE, TRUNCATE and anything sent with R/W 1 get 0 bytes, WRITE_DMA gets `0xFFFFFFFF`. Registered only when there is a bios2; `fs.c` and `cd.c` never send it anything |
 | 8 `CH_DEBUG` | debug port | **write-only**, and never on the screen: `0` NOP → 4 zero bytes · `1` WRITE, R/W 1: the text in the window, up to 4 KB, and RETURN_DATA is the bytes taken · `2` WRITE_DMA, R/W 0: `[address, count]` in the window, anywhere in RAM, up to 64 KB, and the count or `0xFFFFFFFF` comes back. The host keeps the last 64 KB, with the time each line started, for `--serial`, `--serial-log` and `GET /serial` ([docs/phase5_plan.md](docs/phase5_plan.md)) |
+| 9 `CH_VRAM` | video memory | the screen's mode, surfaces in video memory, the page flip, upload and download; the memory itself is mapped above RAM, so a pixel is one store ([docs/vram.md](docs/vram.md)) |
+| 10 `CH_GAC` | graphics accelerator | fills, frames, lines, circles, discs, text, scrolls, blits, scaled and blended, each one command, clipped, on video memory or RAM ([docs/gac.md](docs/gac.md)) |
 
 Input comes in **two buffers**, because guest code asks two different questions.
 The FIFOs answer *"what happened, in order"* — a key pressed and released

@@ -294,6 +294,16 @@ w_consize:
     EI
     RET
 
+w_setmode:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_setmode
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
 w_exit:
     DI
     MOV C, #__g_in_kernel

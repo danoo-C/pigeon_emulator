@@ -1,6 +1,6 @@
 # GAC and VRAM: a graphics accelerator, its own video memory, and a screen that resizes
 
-> **Status: Phases 1–6 built, 2026-09-19; Phase 7 is next. Every question is decided
+> **Status: Phases 1–7 built, 2026-09-19; the manuals are [vram.md](../vram.md) and [gac.md](../gac.md). Phase 8, bandwidth, is the one left, and optional. Every question is decided
 > ([decisions.md](decisions.md)).** You answered the design questions on
 > 2026-09-17 and the one follow-up (§11, whether `--ram` ships with this) on
 > 2026-09-18: it ships with Phase 1, defaulting to 128 MB.
@@ -38,7 +38,7 @@ graphics accelerator and separate video memory, running the existing
 | [4](plans/phase4_frontends.md) | **The front ends follow the mode.** Browser and pygame resize | emulator | **built** 2026-09-18 |
 | [5](plans/phase5_display_lib.md) | **`<pigeon/display.h>` on runtime geometry** | guest | **built** 2026-09-18 |
 | [6](plans/phase6_console.md) | **The kernel console at any size, and the mode picker** | guest | **built** 2026-09-19 |
-| [7](phase7_setmode.md) | **`setmode`, and `# graphics` scripts that pick a mode** | guest | planned |
+| [7](plans/phase7_setmode.md) | **`setmode`, and `# graphics` scripts that pick a mode** | guest | **built** 2026-09-19 |
 | [8](phase8_damage.md) | **Damage rectangles and bandwidth** | both | planned |
 
 ---

@@ -344,9 +344,10 @@ def last_row(rows):
 class Console:
     """The kernel on a Machine, its disk on channel 2: keys in, rows out."""
 
-    def __init__(self, disk, boot_channel=None, disc=None, display_mode=None):
-        mode = {} if display_mode is None else {"display_mode": display_mode}
-        self.machine = Machine(bios_path=str(BIOS), disk_path=str(disk), **mode)
+    def __init__(self, disk, boot_channel=None, disc=None, display_mode=None, **machine):
+        if display_mode is not None:
+            machine["display_mode"] = display_mode
+        self.machine = Machine(bios_path=str(BIOS), disk_path=str(disk), **machine)
         if disc is not None:
             self.machine.cd.root = None
             self.machine.cd.insert(disc)
@@ -2752,6 +2753,178 @@ def test_a_full_720p_console_redraws_in_a_few_hundred_commands():
         assert steps < 500_000, f"{steps:,} instructions for one redraw"
         print(f"720p con_redraw: {steps:,} instructions, {len(calls)} commands, "
               f"{took * 1000:.0f} ms stepped")
+
+
+
+# --- setmode, and scripts that pick a mode (docs/gac/plans/phase7_setmode.md) ----------
+
+# Switches to 640 x 360, runs a child -- one that ends, or one that crashes
+# -- and says what the screen is afterwards: its own mode, if the kernel put
+# back the one the child started in and not the kernel's.
+STANDINS["parentmode"] = r"""#include <pigeon/display.h>
+#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+#include <pigeon/vram.h>
+int main(int argc, char **argv) {
+    char *child[2];
+    unsigned w;
+    unsigned h;
+    unsigned offset;
+    disp_init();
+    disp_setmode(640u, 360u);
+    child[0] = argc > 1 ? argv[1] : "echo";
+    child[1] = 0;
+    exec(argc > 1 ? "/bin/div0.bin" : "/bin/echo.bin", 1, child);
+    vram_mode(&w, &h, &offset);
+    printf("after the child: %ux%u\n", w, h);
+    return 0;
+}
+"""
+
+# A program with the screen in a mode of its own, painting it red, that then
+# prints and spins until Ctrl+C: the console must not be drawn over it.
+STANDINS["overprint"] = r"""#include <pigeon/display.h>
+#include <pigeon/sys.h>
+int main(void) {
+    disp_init();
+    disp_setmode(1280u, 720u);
+    disp_clear(RED);
+    print("hello over the picture\n");
+    while (1) { }
+    return 0;
+}
+"""
+
+BIG_SCRIPT = b"""# graphics 640x360
+graphics -clear 0xFF102030
+graphics -disc 320 180 40 0xFFFF0000
+graphics -rect 600 340 20 10 0xFF00FF00 -wait
+"""
+
+
+def pixel_at(machine, x, y):
+    """A pixel on the screen as it is now, as 0xRRGGBB."""
+    display = machine.display_io
+    fb, w = display.snapshot(), display.width
+    i = (y * w + x) * 4
+    return (fb[i + 2] << 16) | (fb[i + 1] << 8) | fb[i]
+
+
+def with_setmode(extra=(), **kw):
+    extra = [("/bin/setmode.bin", shell_program("setmode")),
+             ("/bin/consize.bin", standin("consize"))] + list(extra)
+    return booted(extra=extra, **kw)
+
+
+def test_setmode_says_what_the_screen_is_and_what_it_could_be():
+    with with_setmode() as c:
+        assert c.ready(), c.rows()
+        assert c.command("setmode") == ["192 x 108"]
+        assert c.command("setmode -list") == ["192 x 108 (now)", "320 x 180", "640 x 360",
+                                              "854 x 480", "1280 x 720"]
+
+
+@cases("640 360", "640x360")
+def test_setmode_switches_the_console_and_it_stays(spelling):
+    with with_setmode() as c:
+        assert c.ready(), c.rows()
+        c.type(f"setmode {spelling}\n")
+        assert settled_at(c, 640), c.rows()
+        assert c.command("consize") == ["106x40"]
+        assert c.command("setmode") == ["640 x 360"]
+        assert c.machine.display_io.width == 640, "a later command undid it"
+
+
+def test_setmode_refuses_a_mode_not_offered():
+    with with_setmode() as c:
+        assert c.ready(), c.rows()
+        out = c.command("setmode 641 360")
+        assert out[0] == "setmode: 641 x 360: not a mode this machine offers", out
+        assert "640 x 360" in out
+        assert c.machine.display_io.width == 192
+
+
+def test_setmode_on_a_machine_without_video_memory():
+    with with_setmode(vram_size=0) as c:
+        assert c.ready(), c.rows()
+        assert c.command("setmode 640 360")[0] == \
+            "setmode: 640 x 360: not a mode this machine offers"
+        assert c.command("setmode") == ["192 x 108"]
+
+
+def test_the_demo():
+    """The one the whole plan was written towards (docs/gac/README.md §3)."""
+    with with_setmode(extra=[("/bin/graphics.bin", shell_program("graphics"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("setmode 640 360\n")
+        assert settled_at(c, 640), c.rows()
+        c.type("graphics -clear 0xFF101018 -disc 320 180 60 0xFFFF0000 -wait\n")
+        assert c.run_until(lambda rows: pixel_at(c.machine, 320, 180) == 0xFF0000
+                           and pixel_at(c.machine, 320 + 59, 180) == 0xFF0000
+                           and pixel_at(c.machine, 0, 0) == 0x101018), "no disc"
+        c.press(ord("x"))
+        assert settled_at(c, 640), c.rows()
+
+
+def test_a_script_that_asks_for_a_mode_draws_in_it_and_gives_it_back():
+    """Three graphics lines, each a program of its own: each starts and ends
+    in the script's mode, since the kernel puts back the mode a program
+    started in, not its own (docs/gac/plans/phase7_setmode.md §2.1)."""
+    with booted(extra=[("/bin/pgs.bin", shell_program("pgs")),
+                       ("/bin/graphics.bin", shell_program("graphics")),
+                       ("/docs/big.pgs", BIG_SCRIPT)]) as c:
+        assert c.ready(), c.rows()
+        c.type("pgs /docs/big.pgs\n")
+        assert c.run_until(lambda rows: c.machine.display_io.width == 640
+                           and pixel_at(c.machine, 610, 345) == 0x00FF00), "never drawn"
+        assert pixel_at(c.machine, 320, 180) == 0xFF0000, "the disc went with a mode change"
+        assert pixel_at(c.machine, 5, 5) == 0x102030, "the clear went with a mode change"
+        c.press(ord("x"))
+        assert settled_at(c, 192), c.rows()
+        assert c.machine.vram.mode == (192, 108)
+
+
+def test_a_script_asking_for_a_mode_not_offered_is_stopped_at_the_header():
+    script = b"# graphics 641x360\ngraphics -clear 0xFFFF0000\n"
+    with booted(extra=[("/bin/pgs.bin", shell_program("pgs")),
+                       ("/bin/graphics.bin", shell_program("graphics")),
+                       ("/docs/bad.pgs", script)]) as c:
+        assert c.ready(), c.rows()
+        out = c.command("pgs /docs/bad.pgs")
+        assert "not a mode this machine offers: 641x360" in out[0], out
+        assert "640x360" in out[1], out
+        assert c.machine.display_io.width == 192 and pixel_at(c.machine, 100, 100) != 0xFF0000
+
+
+@cases(("a child that ends", "parentmode"), ("a child that crashes", "parentmode crash"))
+def test_a_program_keeps_its_mode_when_its_child_ends(label, line):
+    with booted(extra=[("/bin/parentmode.bin", standin("parentmode")),
+                       ("/bin/div0.bin", standin("div0"))]) as c:
+        assert c.ready(), c.rows()
+        c.type(line + "\n")
+        assert settled_at(c, 192), c.rows()
+        assert "after the child: 640x360" in c.rows(), f"{label}: {c.rows()}"
+
+
+def test_the_console_does_not_draw_over_a_program_in_a_mode_of_its_own():
+    """The console at 640 x 360 lives in video memory, and a program's 1280 x
+    720 screen reuses it: were the console drawn while the program printed,
+    its text would land in the program's picture
+    (docs/gac/plans/phase7_setmode.md, As built)."""
+    with with_setmode(extra=[("/bin/overprint.bin", standin("overprint"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("setmode 640 360\n")
+        assert settled_at(c, 640), c.rows()
+        c.type("overprint\n")
+        assert c.run_until(lambda rows: c.machine.display_io.width == 1280), "never switched"
+        c.run_until(lambda rows: False, seconds=1)
+        fb = c.machine.display_io.snapshot()
+        red = (0x00, 0x00, 0xFF, 0xFF)
+        not_red = sum(1 for i in range(0, len(fb), 4) if tuple(fb[i:i + 4]) != red)
+        assert not_red == 0, f"{not_red} pixels of the picture were drawn over"
+        c.press(KEY_LCTRL, ord("c"))
+        assert settled_at(c, 640), c.rows()
+        assert "hello over the picture" in c.rows(), "what it printed was lost"
 
 
 if __name__ == "__main__":

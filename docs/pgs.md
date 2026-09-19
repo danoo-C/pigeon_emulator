@@ -63,6 +63,7 @@ again inside it, down to the kernel's eight programs.
   |---|---|
   | `# stop-on-error` | a program that fails ends the script |
   | `# graphics` | the script owns the screen ([graphics.md](graphics.md) §4) |
+  | `# graphics 640x360` | the same, in that mode, given back when the script ends |
 
   Settings live in the header, before the first command, and a word `pgs`
   doesn't know is a mistake with its line number — a silently ignored typo is
