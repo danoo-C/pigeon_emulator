@@ -281,7 +281,7 @@ class DisplayClient:
         self._key_sent = {}
 
         # Background frame fetcher
-        self._latest_frame = (bytes(self.frame_size), self._mode)
+        self._latest_frame = (bytes(self.frame_size), self._mode, None)
         self._frame_lock = threading.Lock()
         self._display_connected = True
         self._display_connected_lock = threading.Lock()
@@ -341,22 +341,51 @@ class DisplayClient:
         raise RuntimeError(f"HID server at {self.hid_url} did not respond within {timeout_sec}s")
 
     def _fetch_loop(self):
-        """Continuously fetch display frames as fast as the server can serve them,
-        independent of the render/display fps. Retries once a second while
-        the server is unreachable instead of hammering it."""
+        """Fetch the screen at the client's frame rate, asking only for what
+        changed since the frame held (docs/gac/plans/phase8_bandwidth.md): a
+        picture that did not change is a 204, and one that changed a little
+        is its rows, put into the frame held. It used to fetch whole frames
+        as fast as the server would send them -- 226 MiB/s at 1280 x 720,
+        twice the frames the emulator makes. Retries once a second while the
+        server is unreachable instead of hammering it."""
+        held = None                         # the frame, as bytes to patch
+        number = None                       # which frame it is: what since= asks from
+        mode = self._mode
         while not self._stop_event.is_set():
+            started = time.time()
             try:
-                resp = self.session.get(f"{self.base_url}/frame", timeout=REQUEST_TIMEOUT)
+                url = f"{self.base_url}/frame" + ("" if number is None else f"?since={number}")
+                resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
                 resp.raise_for_status()
-                # The bytes and the mode they were drawn in, kept together:
-                # the render loop resizes the window from the mode it draws.
-                frame = (resp.content, SM.parse_mode(resp.headers.get("X-Pigeon-Mode")))
-                with self._frame_lock:
-                    self._latest_frame = frame
+                if resp.status_code != 204:
+                    got_mode = SM.parse_mode(resp.headers.get("X-Pigeon-Mode")) or mode
+                    w, h = got_mode[0], got_mode[1]
+                    rows = SM.parse_rows(resp.headers.get("X-Pigeon-Rows")) or (0, h - 1)
+                    band = resp.content
+                    whole = rows == (0, h - 1)
+                    if len(band) != (rows[1] - rows[0] + 1) * w * 4 or (
+                            not whole and (held is None or got_mode[:2] != mode[:2])):
+                        number = None               # not one we can build on: ask for all
+                        continue
+                    held = bytearray(band) if whole else SM.apply_band(held, band, rows[0], w)
+                    mode = got_mode
+                    try:
+                        number = int(resp.headers.get("X-Pigeon-Frame"))
+                    except (TypeError, ValueError):
+                        number = None
+                    # The bytes and the mode they were drawn in, kept together:
+                    # the render loop resizes the window from the mode it draws.
+                    with self._frame_lock:
+                        self._latest_frame = (bytes(held), mode, number)
                 self._set_display_connected(True)
             except Exception:
+                number = None
                 self._set_display_connected(False)
                 time.sleep(RETRY_INTERVAL)
+                continue
+            rest = 1.0 / self.fps - (time.time() - started)
+            if rest > 0:
+                time.sleep(rest)
 
     def _set_display_connected(self, value: bool):
         with self._display_connected_lock:
@@ -1012,31 +1041,41 @@ class DisplayClient:
                     if code is not None:
                         self._send_key(code, False)
 
-            frame, mode = self._get_latest_frame()
+            frame, mode, number = self._get_latest_frame()
             # Only this thread may call set_mode, so the window follows a
             # mode change here, on the frame that brought it.
             if mode is not None and mode[:2] != (self.disp_w, self.disp_h):
                 self._set_mode(mode)
-            self._render(frame, mouse_pos)
+            self._render(frame, mouse_pos, number)
             self.clock.tick(self.fps)
 
         self._stop_event.set()
         pygame.quit()
 
-    def _render(self, frame_bytes, mouse_pos):
+    def _render(self, frame_bytes, mouse_pos, number=None):
         self.screen.fill(BG_COLOR)
 
         # Draw the framebuffer
         try:
-            # As the machine's memory has it, B,G,R,A; convert() then drops
-            # the alpha, because the screen ignores it -- memory nothing has
-            # drawn on is black, not the window behind it.
-            surface = pygame.image.frombuffer(frame_bytes, (self.disp_w, self.disp_h),
-                                              "BGRA").convert()
-            if self.pixel_size != 1:
-                surface = pygame.transform.scale(
-                    surface, (self.disp_w * self.pixel_size, self.disp_h * self.pixel_size)
-                )
+            # The same frame at the same size is the same picture: decoding
+            # and scaling it again each tick was most of this client's CPU
+            # while the screen sat still. A frame without a number is always
+            # built.
+            key = (number, self.pixel_size, self.disp_w, self.disp_h)
+            cached = getattr(self, "_scaled", None)
+            if number is not None and cached is not None and cached[0] == key:
+                surface = cached[1]
+            else:
+                # As the machine's memory has it, B,G,R,A; convert() then drops
+                # the alpha, because the screen ignores it -- memory nothing has
+                # drawn on is black, not the window behind it.
+                surface = pygame.image.frombuffer(frame_bytes, (self.disp_w, self.disp_h),
+                                                  "BGRA").convert()
+                if self.pixel_size != 1:
+                    surface = pygame.transform.scale(
+                        surface, (self.disp_w * self.pixel_size, self.disp_h * self.pixel_size)
+                    )
+                self._scaled = (key, surface)
             self.screen.blit(surface, (self._screen_x, BUTTON_BAR_HEIGHT))
         except ValueError:
             # Frame size didn't match expected dimensions; skip this frame

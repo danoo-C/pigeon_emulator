@@ -91,7 +91,7 @@ Arguments are words in the data window, sent with R/W 0. Each command answers
 | 10 | `TEXT` | dst, x, y, fg, bg, length, then the characters |
 | 11 | `SCROLL` | dst, x, y, w, h, dy, bg |
 | 12 | `BATCH` | count, then records of cmd, nwords, words → ran, refused |
-| 13 | `DAMAGE` | reserved |
+| 13 | `DAMAGE` | reserved, answers 0, and not used: the display server finds what changed by comparing frames, which catches every way a picture changes ([gac/plans/phase8_bandwidth.md](gac/plans/phase8_bandwidth.md)) |
 | 14 | `BLIT_ALPHA` | src, sx, sy, dst, dx, dy, w, h, alpha |
 | 15 | `RAM_SURFACE` | address, w, h → a handle, or 0 |
 | 16 | `RAM_FREE` | — (the handle in ADDRESS) |

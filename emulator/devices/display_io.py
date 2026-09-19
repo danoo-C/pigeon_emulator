@@ -56,6 +56,7 @@ still just returns bytes.
 """
 import logging
 import struct
+from collections import deque
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Optional
@@ -115,6 +116,12 @@ class DisplayIO:
         # In-memory frame buffer (RGBA byte order) for FastAPI serving
         self._frame_lock = Lock()
         self._frame: Optional[bytes] = None
+        # Frames that did not change are not sent again
+        # (docs/gac/plans/phase8_bandwidth.md): a picture gets a new number
+        # only when it differs from the last, with the band of rows that
+        # did, and the last BANDS of those bands answer /frame?since=N.
+        self._frame_number = 0
+        self._bands: deque = deque(maxlen=BANDS)
         self._server_thread: Optional[Thread] = None
         # Told to the browser front end via /info so it knows where to POST
         # input. Keeps config.json the single source of truth for ports.
@@ -272,11 +279,38 @@ class DisplayIO:
         """Snapshot the screen into the frame /frame serves, with the mode
         it was drawn in. The two are stored together, under one lock, so a
         frame can never be labelled with a mode it was not drawn in -- the
-        guest may switch while a request is being served."""
-        frame = (self.snapshot(), self.width, self.height, self.generation)
+        guest may switch while a request is being served.
+
+        A picture the same as the last is not a new frame, and returns
+        False: a byte comparison, about 0.3 ms at 1280 x 720. A different one
+        gets the next number and the band of rows that changed, 0.06 to
+        0.8 ms to find; a new mode is a new frame, all of it."""
+        data = self.snapshot()
+        mode = (self.width, self.height, self.generation)
+        last = self._frame                 # only this thread ever replaces it
+        if last is not None and last[1:] == mode:
+            if last[0] == data:
+                return False
+            first, end = changed_rows(last[0], data, self.width * 4, self.height)
+            fresh_mode = False
+        else:
+            first, end, fresh_mode = 0, self.height - 1, True
         with self._frame_lock:
-            self._frame = frame
+            self._frame = (data,) + mode
+            self._frame_number += 1
+            if fresh_mode:
+                self._bands.clear()        # a band from another mode means nothing
+            self._bands.append((self._frame_number, first, end))
         return True
+
+    def frame_state(self):
+        """The frame, its number and the bands of the frames before it, read
+        together: ((bytes, w, h, generation), number, [(number, first, last)])."""
+        with self._frame_lock:
+            frame = self._frame
+            if frame is None:
+                frame = (bytes(self.display_size), self.width, self.height, self.generation)
+            return frame, self._frame_number, list(self._bands)
 
     def get_frame(self):
         """The latest frame: (bytes as in memory, width, height,
@@ -287,10 +321,14 @@ class DisplayIO:
             return self._frame
 
     def clear(self) -> None:
-        """Blank the frame being served, until the next update."""
+        """Blank the frame being served, until the next update: a new frame,
+        all of it."""
         with self._frame_lock:
             self._frame = (bytes(self.display_size), self.width, self.height,
                            self.generation)
+            self._frame_number += 1
+            self._bands.clear()
+            self._bands.append((self._frame_number, 0, self.height - 1))
 
     def start_fastapi(self, host: str = "127.0.0.1", port: int = 8000, serve_frontend: bool = True):
         """Start a background FastAPI server that exposes the current frame and control endpoints.
@@ -323,10 +361,14 @@ class DisplayIO:
             )
 
             @app.get("/frame")
-            async def frame():
-                data, headers = frame_reply(self)
-                return Response(content=data, media_type="application/octet-stream",
-                                headers=headers)
+            async def frame(since: Optional[int] = None):
+                if since is None:
+                    data, headers = frame_reply(self)
+                    status = 200
+                else:
+                    status, data, headers = frame_since(self, since)
+                return Response(content=data, status_code=status,
+                                media_type="application/octet-stream", headers=headers)
 
             @app.post("/clear")
             async def clear_endpoint():
@@ -372,11 +414,51 @@ class DisplayIO:
 FRAME_FORMAT = "bgra"
 
 
+#: How many frames back /frame?since=N can answer with a band of rows. A
+#: client further behind than that gets the whole frame.
+BANDS = 64
+
+
+def changed_rows(old: bytes, new: bytes, pitch: int, rows: int):
+    """The first and the last row where two frames of one size differ. The
+    frames must differ somewhere."""
+    first = 0
+    while old[first * pitch:(first + 1) * pitch] == new[first * pitch:(first + 1) * pitch]:
+        first += 1
+    last = rows - 1
+    while old[last * pitch:(last + 1) * pitch] == new[last * pitch:(last + 1) * pitch]:
+        last -= 1
+    return first, last
+
+
 def frame_reply(display: "DisplayIO"):
     """/frame: the bytes, and the mode they were drawn in as a header,
-    X-Pigeon-Mode: w,h,generation."""
-    data, w, h, generation = display.get_frame()
-    return data, {"X-Pigeon-Mode": f"{w},{h},{generation}"}
+    X-Pigeon-Mode: w,h,generation, and the frame's number, X-Pigeon-Frame."""
+    (data, w, h, generation), number, _ = display.frame_state()
+    return data, {"X-Pigeon-Mode": f"{w},{h},{generation}", "X-Pigeon-Frame": str(number)}
+
+
+def frame_since(display: "DisplayIO", since: int):
+    """/frame?since=N, for a client holding frame N (docs/gac/plans/
+    phase8_bandwidth.md §2.2): (status, bytes, headers).
+
+    204 and nothing if N is the frame; the rows that changed since N if N is
+    one of the last BANDS frames in this mode -- X-Pigeon-Rows: first,last,
+    the union of every band after it; otherwise the whole frame, which says
+    X-Pigeon-Rows: 0,h-1 all the same."""
+    (data, w, h, generation), number, bands = display.frame_state()
+    headers = {"X-Pigeon-Mode": f"{w},{h},{generation}", "X-Pigeon-Frame": str(number)}
+    if since == number:
+        return 204, b"", headers
+    after = [band for band in bands if band[0] > since]
+    if 0 <= since < number and after and after[0][0] == since + 1:
+        first = min(band[1] for band in after)
+        last = max(band[2] for band in after)
+    else:
+        first, last = 0, h - 1                       # too old, another mode, or not ours
+    headers["X-Pigeon-Rows"] = f"{first},{last}"
+    pitch = w * 4
+    return 200, data[first * pitch:(last + 1) * pitch], headers
 
 
 def info_reply(display: "DisplayIO") -> dict:

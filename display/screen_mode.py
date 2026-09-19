@@ -53,3 +53,24 @@ def mode_items(modes, w: int, h: int):
              "w": mw, "h": mh, "current": (mw, mh) == (w, h)}
             for mw, mh in (modes or [[w, h]])]
 
+
+def parse_rows(header) -> Optional[Tuple[int, int]]:
+    """X-Pigeon-Rows: "first,last" -> (first, last), the rows a
+    /frame?since=N reply holds (docs/gac/plans/phase8_bandwidth.md); None for
+    a reply without one, or a malformed one. The page's parseRows."""
+    try:
+        first, last = (int(part) for part in str(header).split(","))
+    except (TypeError, ValueError):
+        return None
+    if first < 0 or last < first:
+        return None
+    return first, last
+
+
+def apply_band(frame: bytearray, band: bytes, first: int, w: int) -> bytearray:
+    """A band of rows into the frame held, made into the one the reply is.
+    The page's applyBand, without the swizzle: pygame reads B,G,R,A as it is."""
+    at = first * w * 4
+    frame[at:at + len(band)] = band
+    return frame
+

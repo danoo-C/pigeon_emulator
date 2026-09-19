@@ -182,6 +182,23 @@
       const fits = Math.min(Math.floor(roomW / w), Math.floor(roomH / h));
       return Math.max(1, Math.min(Math.floor(wanted) || 1, fits));
     }
+    // X-Pigeon-Rows: "first,last" -- the rows a /frame?since=N reply holds
+    // (docs/gac/plans/phase8_bandwidth.md). null for a reply without one.
+    function parseRows(header){
+      const parts = String(header ?? '').split(',').map(Number);
+      if (parts.length !== 2 || !parts.every(n => Number.isInteger(n) && n >= 0)) return null;
+      if (parts[1] < parts[0]) return null;
+      return {first: parts[0], last: parts[1]};
+    }
+
+    // A band of rows, as the machine's memory has them, into the picture the
+    // page already holds (R,G,B,A): the frame it asked `since` from, made
+    // into the one the reply is.
+    function applyBand(pixels, band, first, w){
+      pixels.set(toRGBA(band), first * w * 4);
+      return pixels;
+    }
+
     // The picker's names for the modes, and its list: /info's modes, the
     // current one chosen.
     function modeLabel(w, h){
@@ -501,6 +518,7 @@
       canvas.width = W * scale;
       canvas.height = H * scale;
       serialFit();
+      present();                          // a resized canvas is blank: the picture again
     }
 
     // A new mode: every frame from now on is this size. The off-screen
@@ -509,6 +527,8 @@
     function setMode(w, h){
       W = w; H = h;
       off.width = W; off.height = H;
+      pixels = null;                      // a band of the old mode means nothing now
+      frameNo = null;
       sizeCanvas();
       if (modes) showModes();             // the picker shows the mode, whoever chose it
       modeNote.hidden = true;
@@ -521,30 +541,50 @@
       await fetch('/clear', {method:'POST'}).catch(()=>{});
     });
 
+    // The picture as the page holds it (R,G,B,A), and the number of the
+    // frame it is: what /frame?since= asks from, so a picture that did not
+    // change costs a 204 and one that changed a little costs its rows
+    // (docs/gac/plans/phase8_bandwidth.md). null: ask for a whole frame.
+    let pixels = null;
+    let frameNo = null;
+
+    // The off-screen picture, scaled onto the canvas.
+    function present(){
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0,0,canvas.width, canvas.height);
+      ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+    }
+
     let fetching = false;
     async function loop(){
       if (!runningBox.checked){ setTimeout(loop, 200); return; }
       if (fetching){ setTimeout(loop, 10); return; }
       fetching = true;
       try{
-        const resp = await fetch('/frame');
+        const resp = await fetch(frameNo === null ? '/frame' : `/frame?since=${frameNo}`);
         if (!resp.ok) throw new Error('bad');
-        // The mode the frame was drawn in comes with it, so a mode change
-        // is noticed on the frame that has it, not on a later poll.
-        const mode = parseMode(resp.headers.get('X-Pigeon-Mode'));
-        if (mode && (mode.w !== W || mode.h !== H)) setMode(mode.w, mode.h);
-        const buf = await resp.arrayBuffer();
-        if (buf.byteLength !== W*H*4){
-          console.warn(`frame is ${buf.byteLength} bytes, expected ${W*H*4} `
-                       + `for ${W}x${H} -- dropping it`);
-        } else {
-          const img = new ImageData(toRGBA(buf), W, H);
-          offctx.putImageData(img, 0, 0);
-          ctx.imageSmoothingEnabled = false;
-          ctx.clearRect(0,0,canvas.width, canvas.height);
-          ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+        if (resp.status !== 204){               // 204: the picture has not changed
+          // The mode the frame was drawn in comes with it, so a mode change
+          // is noticed on the frame that has it, not on a later poll.
+          const mode = parseMode(resp.headers.get('X-Pigeon-Mode'));
+          if (mode && (mode.w !== W || mode.h !== H)) setMode(mode.w, mode.h);
+          const rows = parseRows(resp.headers.get('X-Pigeon-Rows')) || {first: 0, last: H - 1};
+          const buf = await resp.arrayBuffer();
+          const whole = rows.first === 0 && rows.last === H - 1;
+          if (buf.byteLength !== (rows.last - rows.first + 1) * W * 4 || (!whole && !pixels)){
+            console.warn(`frame is ${buf.byteLength} bytes for rows ${rows.first}-${rows.last} `
+                         + `of ${W}x${H} -- dropping it`);
+            frameNo = null;                     // and ask for a whole one
+          } else {
+            pixels = whole ? toRGBA(buf) : applyBand(pixels, buf, rows.first, W);
+            frameNo = Number(resp.headers.get('X-Pigeon-Frame'));
+            if (!Number.isInteger(frameNo)) frameNo = null;
+            offctx.putImageData(new ImageData(pixels, W, H), 0, 0, 0, rows.first, W,
+                                rows.last - rows.first + 1);
+            present();
+          }
         }
-      }catch(e){ /* ignore */ }
+      }catch(e){ frameNo = null; }
       fetching = false;
       setTimeout(loop, 66); // ~15 FPS
     }

@@ -133,6 +133,31 @@ def bench_display():
     return times
 
 
+def bench_frame_compare():
+    """What serving only what changed costs the emulator's thread a frame
+    at 1280 x 720 (docs/gac/plans/phase8_bandwidth.md): the snapshot and the
+    comparison with the last frame, when nothing changed, and when a row of
+    console text did."""
+    from emulator.devices.vram import VRAM
+    from emulator.memory_map import DISPLAY_MODES
+    ram = RAM(1 << 24, 1 << 23)
+    display = DisplayIO(ram)
+    vram = VRAM(ram, display, DISPLAY_MODES)
+    vram.set_mode(1280, 720)
+    screen = ram.vram_base + vram.surfaces[0].offset
+    display.update()
+    start = time.perf_counter()
+    for _ in range(100):
+        display.update()
+    same = (time.perf_counter() - start) / 100 * 1000
+    start = time.perf_counter()
+    for i in range(100):
+        ram.write_word(screen + (360 * 1280 + i) * 4, 0xFF000000 | i)
+        display.update()
+    row = (time.perf_counter() - start) / 100 * 1000
+    return same, row
+
+
 def bench_real_program():
     """The number that actually matters: a compiled C program running
     through Machine.run(), which is the path a user takes.
@@ -199,6 +224,9 @@ if __name__ == "__main__":
     print(f"  blended         {blended:>12.3f} ms      the same at alpha 0x80 (§4.5: 3.65)")
     print(f"  BLIT_ALPHA      {blit_alpha:>12.1f} ms      a whole screen over another (§4.5: 18.5)")
     print(f"GAC text, 720p    {console:>12.1f} ms      a whole 213x80 console, 80 commands")
+    same, row = bench_frame_compare()
+    print(f"Frame, unchanged  {same:>12.3f} ms      1280x720: snapshot and compare, nothing sent")
+    print(f"  one row changed {row:>12.3f} ms      and finding the band of rows to send")
     small, big = bench_display()
     print(f"Frame snapshot    {small:>12.3f} ms      192x108; the clients swizzle")
-    print(f"  at 720p         {big:>12.3f} ms      1280x720 (the server's swizzle was 6.4)")
+    print(f"  at 720p         {big:>12.3f} ms      1280x720, with the compare (the swizzle was 6.4)")

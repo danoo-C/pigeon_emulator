@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import screen_mode as SM                                              # noqa: E402
 from _runner import cases, run_module                                 # noqa: E402
 from emulator.devices.display_io import (                             # noqa: E402
-    FRAME_FORMAT, DisplayIO, frame_reply, info_reply, preferred_reply)
+    BANDS, FRAME_FORMAT, DisplayIO, frame_reply, frame_since, info_reply, preferred_reply)
 from emulator.devices.vram import CMD_PREFERRED, CMD_SET_MODE, VRAM    # noqa: E402
 from emulator.io_controller import IOChannel, IOController           # noqa: E402
 from emulator.memory_map import (                                     # noqa: E402
@@ -72,7 +72,7 @@ def test_a_frame_is_the_bytes_as_they_are_in_memory_with_its_mode():
     data, headers = frame_reply(display)
     assert len(data) == DISPLAY_SIZE
     assert data[:4] == b"\x11\x22\x33\x44", "the server swizzled"
-    assert headers == {"X-Pigeon-Mode": f"{DISPLAY_W},{DISPLAY_H},0"}
+    assert headers == {"X-Pigeon-Mode": f"{DISPLAY_W},{DISPLAY_H},0", "X-Pigeon-Frame": "1"}
 
 
 def test_a_frame_after_a_mode_change_is_the_new_size_and_says_so():
@@ -114,6 +114,74 @@ def test_a_machine_without_video_memory_is_generation_zero_forever():
     _, display, _ = machine(vram=False)
     display.update()
     assert frame_reply(display)[1]["X-Pigeon-Mode"] == f"{DISPLAY_W},{DISPLAY_H},0"
+
+
+# --- the server: frames that did not change (docs/gac/plans/phase8_bandwidth.md) ----------
+
+PITCH = DISPLAY_W * 4
+
+
+def paint_row(ram, row, colour):
+    ram.mem[DISPLAY_START + row * PITCH:DISPLAY_START + (row + 1) * PITCH] = (
+        struct.pack("<I", colour) * DISPLAY_W)
+
+
+def test_the_same_picture_is_not_a_new_frame():
+    ram, display, _ = machine()
+    assert display.update() is True
+    assert display.update() is False, "an unchanged picture made a new frame"
+    paint_row(ram, 5, 0xFF112233)
+    assert display.update() is True
+    assert frame_reply(display)[1]["X-Pigeon-Frame"] == "2"
+
+
+def test_since_the_current_frame_is_nothing():
+    ram, display, _ = machine()
+    display.update()
+    status, data, headers = frame_since(display, 1)
+    assert (status, data, headers["X-Pigeon-Frame"]) == (204, b"", "1")
+
+
+def test_since_an_older_frame_is_the_rows_that_changed():
+    ram, display, _ = machine()
+    display.update()
+    old = frame_reply(display)[0]
+    paint_row(ram, 40, 0xFFFF0000)
+    display.update()
+    paint_row(ram, 7, 0xFF00FF00)                 # two frames later, higher up
+    display.update()
+    status, data, headers = frame_since(display, 1)
+    assert status == 200 and headers["X-Pigeon-Rows"] == "7,40", headers
+    assert len(data) == (40 - 7 + 1) * PITCH
+    patched = bytearray(old)
+    patched[7 * PITCH:41 * PITCH] = data
+    assert bytes(patched) == frame_reply(display)[0], "the band did not make the frame"
+    status, data, headers = frame_since(display, 2)
+    assert headers["X-Pigeon-Rows"] == "7,7" and len(data) == PITCH
+
+
+@cases(("too old", -BANDS - 5), ("from the future", 99), ("never served", -1))
+def test_since_a_frame_it_cannot_answer_from_is_the_whole_frame(label, since):
+    ram, display, _ = machine()
+    for row in range(BANDS + 3):
+        paint_row(ram, row % DISPLAY_H, 0xFF000000 | row)
+        display.update()
+    number = int(frame_reply(display)[1]["X-Pigeon-Frame"])
+    if since < -1:
+        since = number + since                      # further back than BANDS frames
+    status, data, headers = frame_since(display, since)
+    assert status == 200 and headers["X-Pigeon-Rows"] == f"0,{DISPLAY_H - 1}", label
+    assert data == frame_reply(display)[0], label
+
+
+def test_a_mode_change_is_the_whole_frame():
+    ram, display, device = machine()
+    display.update()
+    device.set_mode(640, 360)
+    display.update()
+    status, data, headers = frame_since(display, 1)
+    assert headers["X-Pigeon-Rows"] == "0,359" and len(data) == 640 * 360 * 4
+    assert headers["X-Pigeon-Mode"] == "640,360,1"
 
 
 # --- the server: /info and /preferred ------------------------------------------------
@@ -268,7 +336,7 @@ def test_the_page_follows_the_mode_on_the_frame_that_brings_it():
     loop = between(page(), "async function loop(){", "// Translate a browser event")
     assert "parseMode(resp.headers.get('X-Pigeon-Mode'))" in loop
     assert "setMode(mode.w, mode.h)" in loop
-    assert "new ImageData(toRGBA(buf), W, H)" in loop
+    assert "pixels = whole ? toRGBA(buf) : applyBand(pixels, buf, rows.first, W)" in loop
     size = between(page(), "function sizeCanvas(){", "function setMode(")
     assert "fitScale(W, H, roomW, roomH," in size
     assert "window.addEventListener('resize', sizeCanvas)" in page()
@@ -320,6 +388,100 @@ def test_the_pickers_only_ask_and_follow_the_mode():
     assert 'add("Mode", self._choose_mode)' in client
     ask = between(client, "def _ask_for_mode(self, item):", "def _open_picker(")
     assert 'f"{self.base_url}/preferred"' in ask
+
+
+# --- bands of changed rows, in the clients (docs/gac/plans/phase8_bandwidth.md) ----------------
+
+ROWS_HEADERS = (
+    ("0,107", [0, 107]),
+    ("7,7", [7, 7]),
+    (None, None),
+    ("", None),
+    ("9,3", None),                  # last before first
+    ("-1,5", None),
+    ("1,2,3", None),
+)
+
+
+def test_both_clients_read_a_band_header_alike():
+    got = node("console.log(JSON.stringify(%s.map(h => { const r = parseRows(h); "
+               "return r && [r.first, r.last]; })));" % json.dumps([h for h, _ in ROWS_HEADERS]))
+    assert got == [want for _, want in ROWS_HEADERS]
+    for header, want in ROWS_HEADERS:
+        got = SM.parse_rows(header)
+        assert (list(got) if got else None) == want, header
+
+
+def test_a_band_put_into_the_old_frame_is_the_new_frame_in_both_clients():
+    """The server's own band, from frame_since, applied by each client's
+    logic: the page's (which swizzles to R,G,B,A) and pygame's (which keeps
+    B,G,R,A) -- each must come out as the whole new frame."""
+    ram, display, _ = machine()
+    ram.mem[DISPLAY_START:DISPLAY_START + DISPLAY_SIZE] = bytes(range(256)) * (DISPLAY_SIZE // 256)
+    display.update()
+    old = frame_reply(display)[0]
+    ram.mem[DISPLAY_START + 30 * PITCH:DISPLAY_START + 33 * PITCH] = b"\x11\x22\x33\x44" * (3 * DISPLAY_W)
+    display.update()
+    new = frame_reply(display)[0]
+    status, band, headers = frame_since(display, 1)
+    first, last = SM.parse_rows(headers["X-Pigeon-Rows"])
+    assert (first, last) == (30, 32)
+    assert bytes(SM.apply_band(bytearray(old), band, first, DISPLAY_W)) == new
+    got = node("const f = b => { const x = Buffer.from(b, 'base64'); "
+               "return x.buffer.slice(x.byteOffset, x.byteOffset + x.length); };"
+               "const pixels = toRGBA(f(%r));"
+               "applyBand(pixels, f(%r), %d, %d);"
+               "console.log(JSON.stringify(Buffer.from(pixels.buffer).toString('base64')));"
+               % (base64.b64encode(old).decode(), base64.b64encode(band).decode(), first, DISPLAY_W))
+    want = bytearray(new)
+    want[0::4], want[2::4] = new[2::4], new[0::4]
+    want[3::4] = b"\xff" * (len(new) // 4)
+    assert base64.b64decode(got) == bytes(want)
+
+
+def test_both_clients_ask_for_what_changed_and_build_on_what_they_hold():
+    loop = between(page(), "async function loop(){", "// Translate a browser event")
+    assert "`/frame?since=${frameNo}`" in loop and "resp.status !== 204" in loop
+    assert "parseRows(resp.headers.get('X-Pigeon-Rows'))" in loop
+    set_mode = between(page(), "function setMode(w, h){", "scaleInput.addEventListener")
+    assert "pixels = null" in set_mode and "frameNo = null" in set_mode
+    client = CLIENT.read_text()
+    fetch = between(client, "def _fetch_loop(self):", "def _set_display_connected")
+    assert '"?since={number}"' in fetch and "resp.status_code != 204" in fetch
+    assert "SM.apply_band(held, band, rows[0], w)" in fetch
+    assert "rest = 1.0 / self.fps" in fetch, "the fetch loop is not paced"
+
+
+def test_the_real_server_sends_nothing_for_a_picture_that_did_not_change():
+    """End to end, over HTTP: an unchanged screen is a 204 with no body; one
+    changed row is one row."""
+    import time
+    import requests
+    from emulator.machine import Machine
+    with tempfile.TemporaryDirectory() as d:
+        m = Machine(bios_path=str(REPO_ROOT / "build" / "bios.bin"),
+                    disk_path=str(Path(d) / "hdd.img"))
+        try:
+            m.start_servers(host="127.0.0.1", display_port=18820, hid_port=18821, cd_port=18822)
+            base = "http://127.0.0.1:18820"
+            for _ in range(100):
+                try:
+                    requests.get(base + "/info", timeout=1)
+                    break
+                except Exception:
+                    time.sleep(0.05)
+            m.display_io.update()
+            whole = requests.get(base + "/frame", timeout=5)
+            number = whole.headers["X-Pigeon-Frame"]
+            m.display_io.update()                         # nothing changed
+            same = requests.get(f"{base}/frame?since={number}", timeout=5)
+            assert same.status_code == 204 and same.content == b""
+            m.ram.mem[DISPLAY_START + 50 * PITCH:DISPLAY_START + 51 * PITCH] = b"\xff" * PITCH
+            m.display_io.update()
+            one = requests.get(f"{base}/frame?since={number}", timeout=5)
+            assert one.headers["X-Pigeon-Rows"] == "50,50" and len(one.content) == PITCH
+        finally:
+            m.close()
 
 
 # --- end to end ---------------------------------------------------------------------------------
