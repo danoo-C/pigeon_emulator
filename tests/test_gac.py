@@ -23,8 +23,9 @@ from emulator.devices.display_io import DisplayIO                     # noqa: E4
 from emulator.devices.gac import (                                    # noqa: E402
     CMD_BATCH, CMD_BLIT, CMD_BLIT_ALPHA, CMD_BLIT_SCALED, CMD_CIRCLE, CMD_DAMAGE, CMD_DISC, CMD_FILL,
     CMD_FRAME, CMD_INFO, CMD_LINE, CMD_NOP, CMD_RAM_FREE, CMD_RAM_SURFACE, CMD_SCROLL,
-    CMD_SET_FONT, CMD_TEXT, FEATURE_BLEND, FEATURE_TEXT, GAC, GAC_MAGIC, MAX_EXTENT,
-    MAX_ROW_PIXELS, RAM_HANDLE, WINDOW_BYTES, blend_rows)
+    CMD_SET_FONT, CMD_TEXT, FEATURE_BLEND, FEATURE_SRC_ALPHA, FEATURE_TEXT, GAC,
+    GAC_MAGIC, MAX_EXTENT, MAX_ROW_PIXELS, RAM_HANDLE, SRC_ALPHA, WINDOW_BYTES,
+    blend_rows, src_alpha_row)
 from emulator.devices.vram import CMD_ALLOC, CMD_FREE, VRAM                # noqa: E402
 from emulator.io_controller import IOChannel, IOController           # noqa: E402
 from emulator.memory_map import (                                     # noqa: E402
@@ -222,7 +223,8 @@ def test_the_gac_draws_exactly_what_display_c_draws(label, seed):
 # --- the device ---------------------------------------------------------------------
 
 def test_info_answers_the_magic_first():
-    assert Rig().words(CMD_INFO) == (GAC_MAGIC, FEATURE_TEXT | FEATURE_BLEND, WINDOW_BYTES)
+    assert Rig().words(CMD_INFO) == (
+        GAC_MAGIC, FEATURE_TEXT | FEATURE_BLEND | FEATURE_SRC_ALPHA, WINDOW_BYTES)
 
 
 @cases(CMD_NOP, CMD_DAMAGE)
@@ -708,7 +710,9 @@ def test_blit_alpha_at_the_ends_of_its_range():
     assert rig.fb() == before, "alpha 0 changed something"
     assert rig.ok(CMD_BLIT_ALPHA, rig.screen, 0, 0, rig.screen, 100, 5, 50, 50, 255)
     assert pixel(rig.fb(), 100, 5) == pixel(before, 0, 0), "alpha 255 is a blit"
-    assert not rig.ok(CMD_BLIT_ALPHA, rig.screen, 0, 0, rig.screen, 5, 5, 50, 50, 256)
+    # 256 is SRC_ALPHA, which this GAC has; 257 and up are still refused.
+    assert rig.ok(CMD_BLIT_ALPHA, rig.screen, 0, 0, rig.screen, 5, 5, 50, 50, SRC_ALPHA)
+    assert not rig.ok(CMD_BLIT_ALPHA, rig.screen, 0, 0, rig.screen, 5, 5, 50, 50, 257)
 
 
 def test_blit_alpha_onto_itself_reads_each_row_before_writing_it():
@@ -753,6 +757,278 @@ def test_a_machine_has_the_gac_only_with_video_memory():
                 assert (CH_GAC in machine.io_controller.channels) == present
             finally:
                 machine.close()
+
+
+# --- BLIT_ALPHA at SRC_ALPHA: each source pixel's own alpha -----------------------
+#
+# docs/gac/plans/phase9_srcalpha.md. src_alpha_row cuts each row into a
+# transparent margin it skips, a solid core it copies and a soft rim it
+# blends, so the tests below are mostly about those three agreeing with the
+# one reference: blend_pixel, the source word used as its own colour.
+
+
+def src_alpha_reference(dst_fb, src_pixels, w, h, dx, dy, sw):
+    """What SRC_ALPHA must produce, a pixel at a time."""
+    out = bytearray(dst_fb)
+    for y in range(h):
+        for x in range(w):
+            s = src_pixels[y * sw + x]
+            if (s >> 24) == 0:
+                continue
+            d = pixel(dst_fb, dx + x, dy + y)
+            struct.pack_into("<I", out, ((dy + y) * W + dx + x) * 4,
+                             blend_pixel(d, s))
+    return bytes(out)
+
+
+def put_sprite(rig, at, pixels):
+    rig.ram.mem[at:at + len(pixels) * 4] = b"".join(
+        struct.pack("<I", p) for p in pixels)
+
+
+SPRITE_AT = PROGRAM_LOAD_ADDR + 0x8000
+
+
+def sprite_surface(rig, pixels, w, h):
+    put_sprite(rig, SPRITE_AT, pixels)
+    handle = rig.words(CMD_RAM_SURFACE, SPRITE_AT, w, h)[0]
+    assert handle
+    return handle
+
+
+def disc_pixels(w, h):
+    """An antialiased disc: opaque core, soft rim, clear outside -- the
+    picture the design is built around."""
+    out = []
+    cx, cy, r = w / 2, h / 2, min(w, h) / 2 - 2
+    for y in range(h):
+        for x in range(w):
+            dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+            cover = max(0.0, min(1.0, r + 1 - dist))
+            out.append((int(cover * 255) << 24) | 0x2080E0)
+    return out
+
+
+def gradient_pixels(w, h):
+    """A partial alpha on nearly every pixel: no core to copy, no margin to
+    skip. The case that falls back to the plain loop."""
+    return [(((x * 255) // max(1, w - 1)) << 24) | 0x101018
+            for y in range(h) for x in range(w)]
+
+
+def noise_pixels(w, h, seed=3):
+    rng = random.Random(seed)
+    return [rng.randrange(1 << 32) for _ in range(w * h)]
+
+
+def flat_pixels(w, h, alpha):
+    return [(alpha << 24) | 0x30A050] * (w * h)
+
+
+@cases(("disc", disc_pixels), ("gradient", gradient_pixels), ("noise", noise_pixels),
+       ("opaque", lambda w, h: flat_pixels(w, h, 255)),
+       ("clear", lambda w, h: flat_pixels(w, h, 0)),
+       ("nearly opaque", lambda w, h: flat_pixels(w, h, 254)))
+def test_src_alpha_matches_the_reference_on_every_picture(name, make):
+    sw, sh = 48, 32
+    rig = Rig()
+    noise(rig, DISPLAY_START, W * H, 21)
+    pixels = make(sw, sh)
+    src = sprite_surface(rig, pixels, sw, sh)
+    before = rig.fb()
+    assert rig.ok(CMD_BLIT_ALPHA, src, 0, 0, rig.screen, 20, 30, sw, sh, SRC_ALPHA)
+    assert rig.fb() == src_alpha_reference(before, pixels, sw, sh, 20, 30, sw), name
+
+
+def test_src_alpha_leaves_a_clear_sprite_and_its_margin_untouched():
+    rig = Rig()
+    noise(rig, DISPLAY_START, W * H, 22)
+    before = rig.fb()
+    src = sprite_surface(rig, flat_pixels(30, 20, 0), 30, 20)
+    assert rig.ok(CMD_BLIT_ALPHA, src, 0, 0, rig.screen, 4, 4, 30, 20, SRC_ALPHA)
+    assert rig.fb() == before
+
+
+def test_src_alpha_copies_an_opaque_sprite_but_keeps_the_destination_alpha():
+    rig = Rig()
+    noise(rig, DISPLAY_START, W * H, 23)
+    before = rig.fb()
+    pixels = flat_pixels(16, 8, 255)
+    src = sprite_surface(rig, pixels, 16, 8)
+    assert rig.ok(CMD_BLIT_ALPHA, src, 0, 0, rig.screen, 7, 9, 16, 8, SRC_ALPHA)
+    fb = rig.fb()
+    for y in range(8):
+        for x in range(16):
+            got = pixel(fb, 7 + x, 9 + y)
+            assert got & 0xFFFFFF == 0x30A050
+            assert got >> 24 == pixel(before, 7 + x, 9 + y) >> 24, "alpha was not kept"
+
+
+def test_src_alpha_with_the_opaque_core_broken_by_a_gap():
+    """find/rfind bracket the opaque pixels; a clear one between them means
+    the core is not one run, and the whole span must go through the loop."""
+    rig = Rig()
+    noise(rig, DISPLAY_START, W * H, 24)
+    row = [0xFF112233, 0xFF112233, 0x00112233, 0x80112233, 0xFF112233, 0x40112233]
+    pixels = row * 4
+    src = sprite_surface(rig, pixels, len(row), 4)
+    before = rig.fb()
+    assert rig.ok(CMD_BLIT_ALPHA, src, 0, 0, rig.screen, 3, 2, len(row), 4, SRC_ALPHA)
+    assert rig.fb() == src_alpha_reference(before, pixels, len(row), 4, 3, 2, len(row))
+
+
+@cases(([0x80112233], "one soft pixel"),
+       ([0xFF112233], "one opaque pixel"),
+       ([0x00112233], "one clear pixel"),
+       ([0x01112233, 0xFE445566], "a rim with no core"),
+       ([0x00112233, 0xFF445566, 0x00778899], "a core with clear on both sides"),
+       ([0xFF112233, 0x00445566], "opaque then clear"))
+def test_src_alpha_on_the_awkward_little_rows(row, name):
+    rig = Rig()
+    noise(rig, DISPLAY_START, W * H, 25)
+    src = sprite_surface(rig, row, len(row), 1)
+    before = rig.fb()
+    assert rig.ok(CMD_BLIT_ALPHA, src, 0, 0, rig.screen, 11, 6, len(row), 1, SRC_ALPHA)
+    assert rig.fb() == src_alpha_reference(before, row, len(row), 1, 11, 6, len(row)), name
+
+
+@cases((-6, -4), (W - 5, 3), (3, H - 4), (-40, -40), (W + 10, 5), (5, H + 10))
+def test_src_alpha_clips_like_every_other_command(dx, dy):
+    """Nothing outside the surface is written, whatever the numbers."""
+    sw, sh = 20, 16
+    rig = Rig()
+    noise(rig, DISPLAY_START, W * H, 26)
+    pixels = disc_pixels(sw, sh)
+    src = sprite_surface(rig, pixels, sw, sh)
+    guard_before = bytes(rig.ram.mem[DISPLAY_START + DISPLAY_SIZE:
+                                     DISPLAY_START + DISPLAY_SIZE + 64])
+    before = rig.fb()
+    assert rig.ok(CMD_BLIT_ALPHA, src, 0, 0, rig.screen, dx, dy, sw, sh, SRC_ALPHA)
+    fb = rig.fb()
+    assert rig.ram.mem[DISPLAY_START + DISPLAY_SIZE:
+                       DISPLAY_START + DISPLAY_SIZE + 64] == guard_before
+    for y in range(H):
+        for x in range(W):
+            sx, sy = x - dx, y - dy
+            want = pixel(before, x, y)
+            if 0 <= sx < sw and 0 <= sy < sh:
+                want = blend_pixel(want, pixels[sy * sw + sx])
+            assert pixel(fb, x, y) == want, (x, y)
+
+
+@cases(3, -3)
+def test_src_alpha_onto_itself_reads_each_row_before_writing_it(dy):
+    rig = Rig()
+    noise(rig, DISPLAY_START, W * H, 27)
+    before = rig.fb()
+    w, h, sx, sy = 40, 20, 10, 30
+    assert rig.ok(CMD_BLIT_ALPHA, rig.screen, sx, sy, rig.screen, sx, sy + dy,
+                  w, h, SRC_ALPHA)
+    fb = rig.fb()
+    for y in range(h):
+        for x in range(w):
+            s = pixel(before, sx + x, sy + y)
+            want = blend_pixel(pixel(before, sx + x, sy + y + dy), s)
+            assert pixel(fb, sx + x, sy + y + dy) == want, (x, y)
+
+
+def test_src_alpha_refuses_a_surface_that_is_not_there():
+    rig = Rig()
+    assert not rig.ok(CMD_BLIT_ALPHA, 0x4242, 0, 0, rig.screen, 0, 0, 4, 4, SRC_ALPHA)
+    assert not rig.ok(CMD_BLIT_ALPHA, rig.screen, 0, 0, 0x4242, 0, 0, 4, 4, SRC_ALPHA)
+
+
+def test_src_alpha_inside_a_batch():
+    rig = Rig()
+    noise(rig, DISPLAY_START, W * H, 28)
+    pixels = disc_pixels(12, 12)
+    src = sprite_surface(rig, pixels, 12, 12)
+    before = rig.fb()
+    record = struct.pack("<II", CMD_BLIT_ALPHA, 9) + struct.pack(
+        "<IiiIiiiiI", src, 0, 0, rig.screen, 8, 8, 12, 12, SRC_ALPHA)
+    assert rig.words(CMD_BATCH, 1, tail=record) == (1, 0), "ran, refused"
+    assert rig.fb() == src_alpha_reference(before, pixels, 12, 12, 8, 8, 12)
+
+
+def test_src_alpha_row_is_exactly_the_per_pixel_formula():
+    """The row function itself, against the formula, on rows built to hit
+    each of its branches -- including ones no sprite above produces."""
+    rng = random.Random(29)
+    for trial in range(600):
+        w = rng.randrange(1, 20)
+        kind = trial % 5
+        if kind == 0:
+            alphas = [rng.choice([0, 255]) for _ in range(w)]
+        elif kind == 1:
+            alphas = [0] * w
+        elif kind == 2:
+            alphas = [255] * w
+        elif kind == 3:
+            alphas = [rng.randrange(256) for _ in range(w)]
+        else:
+            alphas = [rng.choice([0, 255, 255, rng.randrange(1, 255)]) for _ in range(w)]
+        src = bytearray()
+        for a in alphas:
+            src += struct.pack("<I", (a << 24) | rng.randrange(1 << 24))
+        dst = bytes(rng.randrange(256) for _ in range(w * 4))
+        got = bytearray(dst)
+        src_alpha_row(got, 0, src)
+        want = bytearray(dst)
+        for i in range(w):
+            s = struct.unpack_from("<I", src, i * 4)[0]
+            d = struct.unpack_from("<I", dst, i * 4)[0]
+            struct.pack_into("<I", want, i * 4, blend_pixel(d, s))
+        assert bytes(got) == bytes(want), (w, alphas)
+
+
+class Recorder:
+    """A bytearray that remembers which bytes were written to it. Blending
+    a clear pixel comes to the destination unchanged, so skipping the
+    transparent margin cannot be seen in the pixels -- only here."""
+
+    def __init__(self, data):
+        self.data = bytearray(data)
+        self.written = set()
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+    def __setitem__(self, key, value):
+        self.written.update(range(*key.indices(len(self.data)))
+                            if isinstance(key, slice) else (key,))
+        self.data[key] = value
+
+
+def test_src_alpha_skips_the_transparent_margin_instead_of_blending_it():
+    """The performance claim of the whole phase: a clear pixel costs
+    nothing, because it is never touched (phase9_srcalpha.md §2)."""
+    row = [0x00112233, 0x00112233, 0x80445566, 0xFF778899, 0x00AABBCC]
+    src = b"".join(struct.pack("<I", p) for p in row)
+    buf = Recorder(bytes(len(row) * 4))
+    src_alpha_row(buf, 0, bytearray(src))
+    assert buf.written, "nothing was drawn at all"
+    assert not (buf.written & set(range(0, 8))), "the leading clear pixels were written"
+    assert not (buf.written & set(range(16, 20))), "the trailing clear pixel was written"
+    # The blended pixel's alpha byte is never touched. The copied one's is
+    # written by the slice and then put straight back, which is why the
+    # value, not the write, is what the other tests pin.
+    assert 11 not in buf.written
+    assert buf.data[15] == 0
+
+
+def test_src_alpha_skips_a_wholly_clear_row_without_reading_the_destination():
+    src = bytearray(struct.pack("<I", 0x00112233) * 6)
+    buf = Recorder(bytes(24))
+    src_alpha_row(buf, 0, src)
+    assert buf.written == set()
+
+
+def test_src_alpha_row_writes_nothing_outside_the_row_it_is_given():
+    buf = bytearray(b"\xAA" * 64)
+    src = bytearray(struct.pack("<I", 0x80102030) * 4)
+    src_alpha_row(buf, 16, src)
+    assert buf[:16] == b"\xAA" * 16
+    assert buf[32:] == b"\xAA" * 32
 
 
 if __name__ == "__main__":

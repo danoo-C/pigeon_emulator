@@ -24,6 +24,7 @@
 #define BMP_MAX_IMAGE   8192u
 #define BMP_MAX_RESULT  4096u
 #define BMP_BLACK       0xFF000000u
+#define BMP_CLEAR       0x00000000u
 
 typedef struct {
     unsigned offset;                /* where the pixels start in the file   */
@@ -109,6 +110,9 @@ static unsigned bmp_source(unsigned i, unsigned n, unsigned size, int mode) {
 
 unsigned *bmp_decode(unsigned char *file, unsigned size, unsigned w, unsigned h, int mode) {
     bmp_header hd;
+    unsigned fill;                  /* what is not the image: black, or clear */
+    unsigned keep;                  /* 1 when the file's alpha byte is kept */
+    int place;                      /* the mode without BMP_ALPHA */
     unsigned *pixels;
     unsigned *cols;
     unsigned *o;
@@ -123,13 +127,21 @@ unsigned *bmp_decode(unsigned char *file, unsigned size, unsigned w, unsigned h,
     unsigned last;
     int err;
 
+    place = mode & ~BMP_ALPHA;
     if (w == 0u || h == 0u
-            || (mode != BMP_CROP && mode != BMP_CROP_TOP_LEFT && mode != BMP_STRETCH)) {
+            || (place != BMP_CROP && place != BMP_CROP_TOP_LEFT && place != BMP_STRETCH)) {
         return bmp_fail(BMP_EARGS);
     }
     if (w > BMP_MAX_RESULT || h > BMP_MAX_RESULT) return bmp_fail(BMP_ETOOBIG);
     err = bmp_parse(file, size, size, &hd);
     if (err != BMP_OK) return bmp_fail(err);
+    /* Only a 32-bit file has an alpha byte to keep. A 24-bit one has the
+     * next pixel's blue where alpha would be, so it stays opaque, and
+     * BMP_ALPHA on it is not an error -- it simply has none. Where the
+     * alpha is kept, what lies off the image is clear rather than black:
+     * a sprite's margin should not be drawn at all. */
+    keep = ((mode & BMP_ALPHA) != 0 && hd.bytes == 4u) ? 1u : 0u;
+    fill = keep ? BMP_CLEAR : BMP_BLACK;
     pixels = (unsigned *)malloc(w * h * 4u);
     cols = (unsigned *)malloc(w * 4u);
     if (pixels == (unsigned *)0 || cols == (unsigned *)0) {
@@ -141,7 +153,7 @@ unsigned *bmp_decode(unsigned char *file, unsigned size, unsigned w, unsigned h,
     first = w;                      /* the run of columns that come from the image */
     last = 0u;
     for (x = 0u; x < w; x++) {
-        sx = bmp_source(x, w, hd.width, mode);
+        sx = bmp_source(x, w, hd.width, place);
         if (sx < hd.width) {
             cols[x] = sx * hd.bytes;
             if (first == w) first = x;
@@ -151,11 +163,11 @@ unsigned *bmp_decode(unsigned char *file, unsigned size, unsigned w, unsigned h,
 
     o = pixels;
     for (y = 0u; y < h; y++) {
-        sy = bmp_source(y, h, hd.height, mode);
+        sy = bmp_source(y, h, hd.height, place);
         end = o + w;
         if (sy >= hd.height || first >= last) {
             while (o != end) {
-                *o = BMP_BLACK;
+                *o = fill;
                 o++;
             }
         } else {
@@ -163,19 +175,20 @@ unsigned *bmp_decode(unsigned char *file, unsigned size, unsigned w, unsigned h,
             row = file + hd.offset + sy * hd.stride;
             end = o + first;
             while (o != end) {
-                *o = BMP_BLACK;
+                *o = fill;
                 o++;
             }
             c = cols + first;
             end = o + (last - first);
             while (o != end) {
-                *o = *(unsigned *)(row + *c) | BMP_BLACK;
+                *o = keep ? *(unsigned *)(row + *c)
+                          : (*(unsigned *)(row + *c) | BMP_BLACK);
                 o++;
                 c++;
             }
             end = pixels + (y + 1u) * w;
             while (o != end) {
-                *o = BMP_BLACK;
+                *o = fill;
                 o++;
             }
         }

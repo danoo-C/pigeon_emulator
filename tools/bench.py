@@ -68,7 +68,8 @@ def bench_gac():
     import re
     import struct
     from emulator.devices.display_io import DisplayIO
-    from emulator.devices.gac import CMD_BLIT_ALPHA, CMD_FILL, CMD_SET_FONT, CMD_TEXT, GAC
+    from emulator.devices.gac import (CMD_BLIT_ALPHA, CMD_FILL, CMD_SET_FONT, CMD_TEXT,
+                                      GAC, SRC_ALPHA)
     from emulator.devices.vram import VRAM
     from emulator.memory_map import DISPLAY_MODES, IO_START, IOHeader
 
@@ -98,11 +99,31 @@ def bench_gac():
     for _ in range(5):
         call(CMD_FILL, "<IiiiiI", 0, 0, 0, 1280, 720, 0x80FF0000)
     blended = (time.perf_counter() - start) / 5 * 1000
-    back, _ = vram.alloc(1280, 720)            # a second screen to lay over the first
+    back, back_surface = vram.alloc(1280, 720)   # a second screen to lay over the first
     start = time.perf_counter()
     for _ in range(3):
         call(CMD_BLIT_ALPHA, "<IiiIiiiiI", back, 0, 0, 0, 0, 0, 1280, 720, 128)
     blit_alpha = (time.perf_counter() - start) / 3 * 1000
+
+    # SRC_ALPHA, on the two pictures that bracket it: a sprite that is
+    # almost all opaque or clear, and one with a partial alpha nearly
+    # everywhere (docs/gac/plans/phase9_srcalpha.md §1).
+    src_alpha = []
+    for kind in ("sprite", "gradient"):
+        pixels = bytearray(1280 * 720 * 4)
+        for y in range(720):
+            for x in range(1280):
+                if kind == "sprite":
+                    d = ((x - 640) ** 2 + (y - 360) ** 2) ** 0.5
+                    a = int(max(0.0, min(1.0, 359 - d)) * 255)
+                else:
+                    a = (x * 255) // 1279
+                struct.pack_into("<I", pixels, (y * 1280 + x) * 4, (a << 24) | 0x2080E0)
+        at = back_surface.offset
+        ram.vram[at:at + len(pixels)] = pixels
+        start = time.perf_counter()
+        call(CMD_BLIT_ALPHA, "<IiiIiiiiI", back, 0, 0, 0, 0, 0, 1280, 720, SRC_ALPHA)
+        src_alpha.append((time.perf_counter() - start) * 1000)
 
     rng = random.Random(1)
     lines = [bytes(rng.randrange(0x21, 0x7F) for _ in range(1280 // 6)) for _ in range(720 // 9)]
@@ -110,7 +131,7 @@ def bench_gac():
     for row, text in enumerate(lines):
         call(CMD_TEXT, "<IiiIII", 0, 0, row * 9, 0xFFC0C0C0, 0xFF101018, len(text), tail=text)
     console = (time.perf_counter() - start) * 1000
-    return fill, console, blended, blit_alpha
+    return fill, console, blended, blit_alpha, src_alpha
 
 
 def bench_display():
@@ -219,10 +240,12 @@ if __name__ == "__main__":
     heap, aperture = bench_memory()
     print(f"Word write, heap  {heap:>12.1f} ns")
     print(f"Word write, VRAM  {aperture:>12.1f} ns      (through the aperture: one pixel)")
-    fill, console, blended, blit_alpha = bench_gac()
+    fill, console, blended, blit_alpha, src_alpha = bench_gac()
     print(f"GAC fill, 720p    {fill:>12.3f} ms      a whole 1280x720 screen, one command")
     print(f"  blended         {blended:>12.3f} ms      the same at alpha 0x80 (§4.5: 3.65)")
     print(f"  BLIT_ALPHA      {blit_alpha:>12.1f} ms      a whole screen over another (§4.5: 18.5)")
+    print(f"  SRC_ALPHA       {src_alpha[0]:>12.2f} ms      a screen-sized sprite, soft rim (phase 9: 4.9)")
+    print(f"    every pixel   {src_alpha[1]:>12.1f} ms      alpha on nearly all of them (phase 9: 469)")
     print(f"GAC text, 720p    {console:>12.1f} ms      a whole 213x80 console, 80 commands")
     same, row = bench_frame_compare()
     print(f"Frame, unchanged  {same:>12.3f} ms      1280x720: snapshot and compare, nothing sent")

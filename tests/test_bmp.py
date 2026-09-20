@@ -28,6 +28,7 @@ HEADER = REPO_ROOT / "lib" / "pigeon" / "bmp.h"
 PIGEON = REPO_ROOT / "user" / "os" / "etc" / "bmp" / "pigeon.bmp"
 FILE_AT = 0x04000000
 CROP, CROP_TOP_LEFT, STRETCH = 0, 1, 2
+ALPHA = 4                       # BMP_ALPHA, added to any of the three
 # The error codes, read from bmp.h so the tests follow it.
 CODES = {name: int(value) for name, value in
          re.findall(r"#define (BMP_E\w+|BMP_OK)\s+\(?(-?\d+)\)?", HEADER.read_text())}
@@ -41,6 +42,12 @@ def colour(x, y):
     return ((x * 37 + y * 11) & 255, (x * 3 + y * 29 + 7) & 255, ((x ^ y) * 5 + 1) & 255)
 
 
+def alpha_at(x, y):
+    """A different alpha on every pixel too, for BMP_ALPHA: a byte taken
+    from the wrong place cannot then come out right by luck."""
+    return (x * 53 + y * 17 + 3) & 255
+
+
 def write_bmp(w, h, bits=24, top_down=False, compression=0, masks=None, masks_inside=False,
               planes=1, info=40, alpha=0x80):
     """A BMP of `colour`, as an editor would save it."""
@@ -51,7 +58,8 @@ def write_bmp(w, h, bits=24, top_down=False, compression=0, masks=None, masks_in
         row = bytearray()
         for x in range(w):
             r, g, b = colour(x, y)
-            row += bytes((b, g, r)) + (bytes((alpha,)) if bits == 32 else b"")
+            a = alpha_at(x, y) if alpha == "vary" else alpha
+            row += bytes((b, g, r)) + (bytes((a,)) if bits == 32 else b"")
         rows.append(bytes(row) + bytes(stride - len(row)))
     pixels = b"".join(rows if top_down else reversed(rows))
     header = struct.pack("<IiiHHIIiiII", info, w, -h if top_down else h, planes, bits, compression,
@@ -67,12 +75,17 @@ def write_bmp(w, h, bits=24, top_down=False, compression=0, masks=None, masks_in
 
 
 def reference(data, w, h, mode):
-    """The same crop or stretch, in Python: 0xFFRRGGBB words, top row first."""
+    """The same crop or stretch, in Python: 0xFFRRGGBB words, top row first.
+    With BMP_ALPHA on a 32-bit file, the file's own alpha byte instead, and
+    what falls outside the image clear rather than black."""
     offset = struct.unpack_from("<I", data, 10)[0]
     width, height = struct.unpack_from("<ii", data, 18)
     per = struct.unpack_from("<H", data, 28)[0] // 8
     top_down, height = height < 0, abs(height)
     stride = (width * per + 3) & ~3
+    keep = bool(mode & ALPHA) and per == 4
+    outside = 0x00000000 if keep else 0xFF000000
+    mode = mode & ~ALPHA
 
     def source(i, n, size):
         if mode == STRETCH:
@@ -90,11 +103,12 @@ def reference(data, w, h, mode):
         for x in range(w):
             sx = source(x, w, width)
             if sy is None or sx is None:
-                out.append(0xFF000000)
+                out.append(outside)
                 continue
             at = offset + (sy if top_down else height - 1 - sy) * stride + sx * per
             b, g, r = data[at:at + 3]
-            out.append(0xFF000000 | r << 16 | g << 8 | b)
+            top = (data[at + 3] << 24) if keep else 0xFF000000
+            out.append(top | r << 16 | g << 8 | b)
     return out
 
 
@@ -445,6 +459,68 @@ def test_img_says_what_is_wrong_in_one_line():
         assert c.command("img -x /t.txt") == ["usage: img [-s] FILE.bmp", "img: exit 1"]
         assert c.command("img /nope.bmp") == ["img: /nope.bmp: not found", "img: exit 1"]
         assert c.command("img /t.txt") == ["img: /t.txt: not a BMP", "img: exit 1"]
+
+
+# --- BMP_ALPHA: keeping a 32-bit file's alpha -------------------------------------
+#
+# docs/gac/plans/phase9_srcalpha.md §4. Without it every pixel comes back
+# opaque, which is what gac_blit_alpha(..., GAC_SRC_ALPHA) has nothing to
+# work with.
+
+
+@cases(CROP, CROP_TOP_LEFT, STRETCH)
+def test_bmp_alpha_keeps_a_32_bit_files_alpha(mode):
+    data = write_bmp(12, 9, bits=32, alpha="vary")
+    pixels, err, _ = decode(data, 12, 9, mode | ALPHA)
+    assert err == CODES["BMP_OK"]
+    want = reference(data, 12, 9, mode | ALPHA)
+    assert pixels == want, first_difference(pixels, want, 12)
+    assert len({p >> 24 for p in pixels}) > 1, "every pixel came back at one alpha"
+
+
+def test_without_bmp_alpha_the_same_file_is_opaque():
+    data = write_bmp(12, 9, bits=32, alpha="vary")
+    pixels, err, _ = decode(data, 12, 9, CROP)
+    assert err == CODES["BMP_OK"]
+    assert {p >> 24 for p in pixels} == {0xFF}
+
+
+def test_bmp_alpha_on_a_24_bit_file_is_still_opaque():
+    """A 24-bit file has the next pixel's blue where alpha would be, so
+    there is nothing to keep. Asking is not an error."""
+    data = write_bmp(12, 9, bits=24)
+    pixels, err, _ = decode(data, 12, 9, CROP | ALPHA)
+    assert err == CODES["BMP_OK"]
+    assert {p >> 24 for p in pixels} == {0xFF}
+    assert pixels == reference(data, 12, 9, CROP)
+
+
+def test_bmp_alpha_leaves_the_margin_clear_rather_than_black():
+    """A result bigger than the image: what is not the image should not be
+    drawn at all, so it is 0x00000000, not opaque black."""
+    data = write_bmp(4, 3, bits=32, alpha="vary")
+    pixels, err, _ = decode(data, 10, 7, CROP | ALPHA)
+    assert err == CODES["BMP_OK"]
+    assert pixels[0] == 0x00000000, f"{pixels[0]:#010x}"
+    want = reference(data, 10, 7, CROP | ALPHA)
+    assert pixels == want, first_difference(pixels, want, 10)
+    # ... and without it, that same margin is still black.
+    plain, _, _ = decode(data, 10, 7, CROP)
+    assert plain[0] == 0xFF000000
+
+
+def test_bmp_alpha_with_bit_fields():
+    data = write_bmp(8, 6, bits=32, compression=3, masks=BGRA_MASKS, alpha="vary")
+    pixels, err, _ = decode(data, 8, 6, CROP | ALPHA)
+    assert err == CODES["BMP_OK"]
+    want = reference(data, 8, 6, CROP | ALPHA)
+    assert pixels == want, first_difference(pixels, want, 8)
+
+
+def test_bmp_alpha_does_not_make_a_bad_mode_good():
+    data = write_bmp(8, 6, bits=32, alpha="vary")
+    pixels, err, _ = decode(data, 8, 6, 3 | ALPHA)
+    assert pixels is None and err == CODES["BMP_EARGS"]
 
 
 if __name__ == "__main__":

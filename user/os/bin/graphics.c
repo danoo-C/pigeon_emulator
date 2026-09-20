@@ -16,7 +16,15 @@
  *     -disc X Y R C         filled
  *     -text X Y WORDS C     the 5x7 font
  *     -f FILE X Y W H MODE  a BMP, at that place and size
+ *     -sprite FILE X Y W H MODE   the same, on its own alpha
  *     -wait                 hold the screen until a key, and print its code
+ *
+ * -f draws every pixel of the file. -sprite keeps a 32-bit file's alpha
+ * (BMP_ALPHA) and lays it over what is already there: a soft edge is soft,
+ * and a fully transparent pixel is not drawn at all. It goes to the
+ * accelerator as one command where there is one (GAC_SRC_ALPHA,
+ * docs/gac/plans/phase9_srcalpha.md), and is a pixel loop where there is
+ * not. A 24-bit file has no alpha, so -sprite draws it exactly as -f does.
  *
  * A colour is 0xAARRGGBB, alpha included: the display hands alpha to the
  * canvas without blending, so 0x00... is invisible. Numbers are decimal
@@ -33,6 +41,7 @@
  */
 #include <pigeon/bmp.h>
 #include <pigeon/display.h>
+#include <pigeon/gac.h>
 #include <pigeon/input.h>
 #include <pigeon/mem.h>
 #include <pigeon/stdio.h>
@@ -52,6 +61,7 @@
 #define OP_TEXT   8
 #define OP_IMAGE  9
 #define OP_WAIT   10
+#define OP_SPRITE 11
 
 static int op_id(char *word) {
     if (strcmp(word, "-clear")  == 0) return OP_CLEAR;
@@ -63,6 +73,7 @@ static int op_id(char *word) {
     if (strcmp(word, "-disc")   == 0) return OP_DISC;
     if (strcmp(word, "-text")   == 0) return OP_TEXT;
     if (strcmp(word, "-f")      == 0) return OP_IMAGE;
+    if (strcmp(word, "-sprite") == 0) return OP_SPRITE;
     if (strcmp(word, "-wait")   == 0) return OP_WAIT;
     return OP_NONE;
 }
@@ -81,6 +92,7 @@ static char *op_form(int op) {
     if (op == OP_DISC)   return "nnnc";
     if (op == OP_TEXT)   return "nnsc";
     if (op == OP_IMAGE)  return "fnnnnm";
+    if (op == OP_SPRITE) return "fnnnnm";
     return "";                              /* -wait */
 }
 
@@ -149,6 +161,63 @@ static void frame_rect(int x, int y, int w, int h, color_t c) {
     disp_line(x1, y, x1, y1, c);
 }
 
+/* One pixel of `src` over `dst`, on src's own alpha: the same formula the
+ * accelerator uses, rounded the same way (docs/gac.md §3). */
+static unsigned over(unsigned dst, unsigned src) {
+    unsigned a = (src >> 24) & 255u;
+    unsigned inv = 255u - a;
+    unsigned out = dst & 0xFF000000u;
+    unsigned shift = 0u;
+    unsigned x;
+    while (shift < 24u) {
+        x = ((dst >> shift) & 255u) * inv + ((src >> shift) & 255u) * a + 127u;
+        out = out | ((((x + 1u + (x >> 8)) >> 8) & 255u) << shift);
+        shift = shift + 8u;
+    }
+    return out;
+}
+
+/* A sprite, pixel by pixel: what a machine with no accelerator does. */
+static void blend_sprite(unsigned *pixels, int x, int y, unsigned w, unsigned h) {
+    unsigned px;
+    unsigned py;
+    int sx;
+    int sy;
+    unsigned s;
+    for (py = 0u; py < h; py++) {
+        sy = y + (int)py;
+        if (sy < 0 || sy >= disp_h) continue;
+        for (px = 0u; px < w; px++) {
+            sx = x + (int)px;
+            if (sx < 0 || sx >= disp_w) continue;
+            s = pixels[py * w + px];
+            if ((s >> 24) == 0u) continue;          /* clear: not drawn at all */
+            disp_set((unsigned)sx, (unsigned)sy,
+                     over(disp_get((unsigned)sx, (unsigned)sy), s));
+        }
+    }
+}
+
+/* One GAC command where the machine has one, the loop where it has not.
+ * The sprite is registered as a RAM surface for as long as the blit takes:
+ * it is in the heap, which is what gac_ram_surface is for. */
+static void draw_sprite(unsigned *pixels, int x, int y, unsigned w, unsigned h) {
+    unsigned target;
+    unsigned handle;
+    int drawn = 0;
+
+    if (disp_gac_surface(&target)
+            && (gac_features() & GAC_FEATURE_SRC_ALPHA) != 0u) {
+        handle = gac_ram_surface((unsigned)pixels, w, h);
+        if (handle != 0u) {
+            drawn = gac_blit_alpha(handle, 0, 0, target, x, y, (int)w, (int)h,
+                                   GAC_SRC_ALPHA);
+            gac_ram_free(handle);
+        }
+    }
+    if (!drawn) blend_sprite(pixels, x, y, w, h);
+}
+
 /* The FIFO holds the key that started this program -- the shell reads
  * characters, which is a different queue, so the Enter that ran the
  * command is still sitting here as an event. Throw away what happened
@@ -206,9 +275,9 @@ static int check(int argc, char **argv) {
         }
         /* bmp_load refuses a size of nothing. Six numbers in a row is
          * easy to miscount, so the message names the one that is wrong. */
-        if (op == OP_IMAGE && number(argv[i + 4]) <= 0)
+        if ((op == OP_IMAGE || op == OP_SPRITE) && number(argv[i + 4]) <= 0)
             return oops("not a width", argv[i + 4]);
-        if (op == OP_IMAGE && number(argv[i + 5]) <= 0)
+        if ((op == OP_IMAGE || op == OP_SPRITE) && number(argv[i + 5]) <= 0)
             return oops("not a height", argv[i + 5]);
         i = i + 1 + n;
     }
@@ -249,6 +318,13 @@ static int draw(int argc, char **argv) {
             disp_blit(pixels, number(a[1]), number(a[2]),
                       (unsigned)number(a[3]), (unsigned)number(a[4]));
             free(pixels);
+        } else if (op == OP_SPRITE) {
+            pixels = bmp_load(a[0], (unsigned)number(a[3]), (unsigned)number(a[4]),
+                              mode_of(a[5]) | BMP_ALPHA);
+            if (pixels == NULL) return oops(a[0], bmp_strerror(bmp_error()));
+            draw_sprite(pixels, number(a[1]), number(a[2]),
+                        (unsigned)number(a[3]), (unsigned)number(a[4]));
+            free(pixels);
         } else if (op == OP_WAIT) {
             printf("%u\n", wait_for_a_key());
         }
@@ -265,6 +341,7 @@ static void usage(void) {
     print("-circle X Y R C   -disc ...\n");
     print("-text X Y WORDS C\n");
     print("-f FILE X Y W H MODE\n");
+    print("-sprite FILE X Y W H MODE\n");
     print("-wait     C is 0xAARRGGBB\n");
 }
 

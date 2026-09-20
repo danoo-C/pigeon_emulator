@@ -27,6 +27,8 @@ about 12 ms here.
   12   BATCH        count, then records: cmd, nwords, args...   ran, refused
   13   DAMAGE       --                                          0 (reserved)
   14   BLIT_ALPHA   src, sx, sy, dst, dx, dy, w, h, alpha       1 / 0
+                    alpha 0..255, or SRC_ALPHA (256) for each
+                    source pixel's own
   15   RAM_SURFACE  address, w, h                               handle, or 0
   16   RAM_FREE     -- (the handle in ADDRESS)                  1 / 0
 
@@ -78,9 +80,12 @@ than four. A blend has to read every byte it writes, so it cannot be a
 slice assignment; per channel it is a 256-entry `bytes.translate` table
 instead, built once per command. BLIT copies bytes verbatim, alpha and
 all; BLIT_ALPHA lays a whole rectangle over another at one alpha, with the
-arithmetic done on a row at a time as one big integer (SWAR). A copy that
-honours each source pixel's own alpha is not here: no table and no single
-multiply fits it (docs/gac/design.md §9).
+arithmetic done on a row at a time as one big integer (SWAR). BLIT_ALPHA at
+SRC_ALPHA takes each source pixel's own alpha instead: no table and no
+single multiply fits that, but almost none of a real sprite needs one --
+97.6% of an antialiased one is opaque or wholly transparent -- so
+src_alpha_row cuts each row into a margin it skips, a core it copies and a
+rim it blends (docs/gac/plans/phase9_srcalpha.md).
 
 The GAC writes the surface buffers directly, as CH_DISPLAY's FILL does. It
 does not set ram.vram_dirty: that flag means "written through the
@@ -119,6 +124,13 @@ CMD_RAM_FREE = 16
 GAC_MAGIC = 0x41474750
 FEATURE_TEXT = 1
 FEATURE_BLEND = 2
+FEATURE_SRC_ALPHA = 4
+#: BLIT_ALPHA's alpha word, meaning "each source pixel's own alpha" instead
+#: of one alpha for the whole rectangle. 256 because every alpha above 255
+#: was refused before this existed, so an emulator built without it answers
+#: 0 rather than not knowing the command at all (docs/gac/plans/
+#: phase9_srcalpha.md §3).
+SRC_ALPHA = 256
 #: RAM surfaces' handles start here, so they can never be a VRAM handle.
 RAM_HANDLE = 0x80000000
 #: The longest line, the biggest radius: a guest asking for a line 2**31
@@ -270,6 +282,60 @@ def blend_rows(dst: bytes, src: bytes, alpha: int) -> bytes:
         out |= (((x + ones + ((x >> 8) & lanes)) >> 8) & lanes) << shift
     keep = _ALPHA & whole
     return ((out & ~keep) | (d & keep)).to_bytes(n, "little")
+
+
+def blend_span(buf, at: int, src, x0: int, x1: int) -> None:
+    """Pixels x0 to x1 of `src` over the row at `at`, each on its own alpha:
+    blend_rows' formula a pixel at a time. This is the slow loop, and the
+    point of src_alpha_row is to hand it as few pixels as possible."""
+    for p in range(x0 * 4, x1 * 4, 4):
+        a = src[p + 3]
+        if a == 0:
+            continue
+        o = at + p
+        if a == 255:
+            buf[o:o + 3] = src[p:p + 3]
+            continue
+        inv = 255 - a
+        for c in range(3):
+            x = buf[o + c] * inv + src[p + c] * a + 127
+            buf[o + c] = (x + 1 + (x >> 8)) >> 8
+
+
+def src_alpha_row(buf, at: int, src) -> None:
+    """One row of `src` over the row at `at`, each pixel on its own alpha.
+
+    Not a blend of every pixel: a real sprite is 97.6% opaque or wholly
+    transparent (docs/gac/plans/phase9_srcalpha.md §1), so the row is first
+    cut into three by string searches over its alpha bytes, all at C speed.
+    A transparent margin is not touched at all, a solid core is the slice
+    copy BLIT does, and only the soft rim goes through blend_span. Measured
+    at 0.39 ms for a 128 x 128 antialiased sprite against 5.65 ms for the
+    naive loop, and 4.90 ms against 213 ms for a whole 720p screen.
+
+    Where there is no solid core -- a gradient, a soft shadow -- the whole
+    ink span goes to blend_span and this is the naive loop, no worse."""
+    a = src[3::4]
+    w = len(a)
+    lo = w - len(a.lstrip(b"\x00"))
+    if lo == w:                        # nothing on this row has any alpha
+        return
+    hi = len(a.rstrip(b"\x00"))
+    first = a.find(b"\xff", lo, hi)
+    if first >= 0:
+        last = a.rfind(b"\xff", lo, hi) + 1
+        if a.count(b"\xff", first, last) == last - first:
+            # One unbroken run of opaque pixels: copy it, and put the
+            # destination's own alpha bytes back -- every blend on this
+            # device leaves them alone.
+            s, e = first * 4, last * 4
+            keep = buf[at + s + 3:at + e:4]
+            buf[at + s:at + e] = src[s:e]
+            buf[at + s + 3:at + e:4] = keep
+            blend_span(buf, at, src, lo, first)
+            blend_span(buf, at, src, last, hi)
+            return
+    blend_span(buf, at, src, lo, hi)
 
 
 class Font:
@@ -480,7 +546,10 @@ class GAC:
 
     def _blit_alpha(self, src: Target, sx: int, sy: int, dst: Target, dx: int, dy: int,
                     w: int, h: int, alpha: int) -> bool:
-        """BLIT, laid over the destination at one alpha."""
+        """BLIT, laid over the destination at one alpha -- or, at SRC_ALPHA,
+        on each source pixel's own."""
+        if alpha == SRC_ALPHA:
+            return self._blit_src_alpha(src, sx, sy, dst, dx, dy, w, h)
         if alpha > 255:
             return False
         if alpha == 255:
@@ -501,6 +570,27 @@ class GAC:
                 n = min(MAX_ROW_PIXELS, w - part) * 4
                 ps, pd = s + part * 4, d + part * 4
                 dbuf[pd:pd + n] = blend_rows(dbuf[pd:pd + n], sbuf[ps:ps + n], alpha)
+        return True
+
+    def _blit_src_alpha(self, src: Target, sx: int, sy: int, dst: Target,
+                        dx: int, dy: int, w: int, h: int) -> bool:
+        """BLIT_ALPHA at SRC_ALPHA: every pixel on the alpha it carries.
+        Always a 1 -- a sprite clipped to nothing is still done."""
+        clipped = self._clip_copy(src, sx, sy, dst, dx, dy, w, h)
+        if clipped is None:
+            return True
+        sx, sy, dx, dy, w, h = clipped
+        sbuf, dbuf = src.buf, dst.buf
+        n = w * 4
+        rows = range(h)
+        if sbuf is dbuf and dst.at(dx, dy) > src.at(sx, sy):
+            rows = reversed(rows)
+        for i in rows:
+            s, d = src.at(sx, sy + i), dst.at(dx, dy + i)
+            # The whole source row first: one copy, and overlapping source
+            # and destination in one buffer cannot then read what this row
+            # has already written.
+            src_alpha_row(dbuf, d, sbuf[s:s + n])
         return True
 
     def _blit_scaled(self, src: Target, sx: int, sy: int, sw: int, sh: int,
@@ -690,7 +780,8 @@ class GAC:
         if command == CMD_RAM_FREE:
             return _OK if self.ram_surfaces.pop(address, None) is not None else _NO
         if command == CMD_INFO:
-            return struct.pack("<III", GAC_MAGIC, FEATURE_TEXT | FEATURE_BLEND,
+            return struct.pack("<III", GAC_MAGIC,
+                               FEATURE_TEXT | FEATURE_BLEND | FEATURE_SRC_ALPHA,
                                WINDOW_BYTES)
         if command in (CMD_NOP, CMD_DAMAGE):
             return _NO

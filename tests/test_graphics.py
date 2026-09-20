@@ -379,5 +379,123 @@ def test_the_console_comes_back_when_the_program_ends():
         assert rgb(fb, 96, 54) != GREEN_RGB and rgb(fb, 4, 54) != MAGENTA_RGB
 
 
+# --- -sprite: a BMP on its own per-pixel alpha ------------------------------------
+#
+# docs/gac/plans/phase9_srcalpha.md. The same picture must come out whether
+# the machine drew it with one GAC command or with graphics.c's own pixel
+# loop, so these check the pixels against the formula, not the path.
+
+ALPHAS = (0, 64, 128, 255)
+
+
+def alpha_bmp(w, h, colour, alpha_of):
+    """A 32-bit BMP with bit fields, as an editor saves one, with a
+    different alpha per column."""
+    r, g, b = colour
+    rows = [bytes(v for x in range(w) for v in (b, g, r, alpha_of(x, y)))
+            for y in range(h)]
+    pixels = b"".join(reversed(rows))
+    head = struct.pack("<IiiHHIIiiII", 108, w, h, 1, 32, 3, len(pixels), 2835, 2835, 0, 0)
+    fields = struct.pack("<IIII", 0x00FF0000, 0x0000FF00, 0x000000FF,
+                         0xFF000000) + b"BGRs" + bytes(108 - 40 - 20)
+    offset = 14 + len(head) + len(fields)
+    return (struct.pack("<2sIHHI", b"BM", offset + len(pixels), 0, 0, offset)
+            + head + fields + pixels)
+
+
+#: Four columns, one alpha each, over a background this test picks.
+FADE = ("/fade.bmp", alpha_bmp(4, 4, MAGENTA_RGB, lambda x, y: ALPHAS[x]))
+
+
+def over(dst, src, a):
+    """One channel: the formula docs/gac.md §3 gives, which both the device
+    and graphics.c's fallback round the same way."""
+    return (dst * (255 - a) + src * a + 127) // 255
+
+
+def test_a_sprite_blends_on_each_pixels_own_alpha():
+    with at_the_prompt([FADE]) as c:
+        fb, _ = hold(c, f"-clear {GREEN} -sprite /fade.bmp 20 20 4 4 CROP_TOP_LEFT")
+        for x, a in enumerate(ALPHAS):
+            want = tuple(over(d, s, a) for d, s in zip(GREEN_RGB, MAGENTA_RGB))
+            assert rgb(fb, 20 + x, 20) == want, (x, a, rgb(fb, 20 + x, 20))
+
+
+def test_a_sprites_clear_pixels_are_not_drawn_at_all():
+    """Alpha 0 leaves the background exactly as it was -- the column at
+    x = 0, where -f would have painted magenta."""
+    with at_the_prompt([FADE]) as c:
+        fb, _ = hold(c, f"-clear {GREEN} -sprite /fade.bmp 20 20 4 4 CROP_TOP_LEFT")
+        for y in range(4):
+            assert rgb(fb, 20, 20 + y) == GREEN_RGB
+        assert rgb(fb, 23, 20) == MAGENTA_RGB, "and alpha 255 is the sprite itself"
+
+
+def test_the_same_file_with_f_is_opaque_everywhere():
+    """-f drops the alpha, so every column is the sprite's colour: the
+    difference between the two operations, on one file."""
+    with at_the_prompt([FADE]) as c:
+        fb, _ = hold(c, f"-clear {GREEN} -f /fade.bmp 20 20 4 4 CROP_TOP_LEFT")
+        assert lit(fb, MAGENTA_RGB) == 4 * 4
+
+
+def test_a_24_bit_file_has_no_alpha_so_sprite_draws_it_like_f():
+    with at_the_prompt([LOGO]) as c:
+        fb, _ = hold(c, f"-clear {GREEN} -sprite /logo.bmp 10 10 4 4 CROP_TOP_LEFT")
+        assert lit(fb, MAGENTA_RGB) == 4 * 4
+
+
+def test_a_sprite_off_the_edge_is_clipped():
+    with at_the_prompt([FADE]) as c:
+        fb, _ = hold(c, f"-clear {GREEN} -sprite /fade.bmp -2 -2 4 4 CROP_TOP_LEFT")
+        # Columns 0 and 1 are off the left; column 2 (alpha 128) lands at x=0.
+        want = tuple(over(d, s, ALPHAS[2]) for d, s in zip(GREEN_RGB, MAGENTA_RGB))
+        assert rgb(fb, 0, 0) == want
+        assert rgb(fb, 1, 0) == MAGENTA_RGB, "column 3, alpha 255"
+        assert rgb(fb, 2, 0) == GREEN_RGB, "nothing past the sprite"
+
+
+def test_what_a_wrong_sprite_says():
+    """Without -clear: the whole command has to fit the console's width, or
+    the message lands on the same row as the echo and printed() cannot tell
+    them apart. The -f tests above are five characters shorter."""
+    with at_the_prompt([FADE]) as c:
+        assert said(run(c, "graphics -sprite /nope.bmp 0 0 4 4 CROP"),
+                    "graphics: /nope.bmp: not found"), c.rows()
+        assert said(run(c, "graphics -sprite /fade.bmp 0 0 4 4 SQUISH"),
+                    "graphics: not a mode: SQUISH"), c.rows()
+        assert said(run(c, "graphics -sprite /fade.bmp 0 0 0 4 CROP"),
+                    "graphics: not a width: 0"), c.rows()
+
+
+def test_a_sprite_is_the_same_picture_without_an_accelerator():
+    """The point of the fallback: a machine with no video memory has no GAC
+    (tests/test_gac.py pins that), so graphics.c blends the sprite itself.
+    It must come out byte for byte what the device produces."""
+    command = f"-clear {GREEN} -sprite /fade.bmp 20 20 4 4 CROP_TOP_LEFT"
+    with at_the_prompt([FADE]) as c:
+        accelerated, _ = hold(c, command)
+    with booted(extra=with_graphics(FADE), vram_size=0) as c:
+        assert c.ready(), c.rows()
+        in_software, _ = hold(c, command)
+    assert in_software == accelerated
+
+
+def test_the_badge_on_the_disc_has_a_soft_edge():
+    """tools/make_badge.py's sprite, the one /etc/bmp/badge.bmp holds: the
+    picture that made this operation worth having."""
+    badge = (REPO_ROOT / "user" / "os" / "etc" / "bmp" / "badge.bmp").read_bytes()
+    with at_the_prompt([("/badge.bmp", badge)]) as c:
+        fb, _ = hold(c, f"-clear {BLACK} -sprite /badge.bmp 0 0 64 64 CROP_TOP_LEFT")
+        middle = rgb(fb, 32, 32)
+        assert middle != (0, 0, 0), "the disc itself"
+        corner = rgb(fb, 0, 0)
+        assert corner == (0, 0, 0), "the corner outside it is not drawn"
+        # Somewhere on the rim there is a pixel that is neither: that is
+        # what a soft edge means, and what no other picture on the disc has.
+        edge = [rgb(fb, x, 32) for x in range(64)]
+        assert any(p != (0, 0, 0) and p != middle for p in edge), edge[:8]
+
+
 if __name__ == "__main__":
     sys.exit(run_module(cases(globals())))

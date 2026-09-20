@@ -102,6 +102,12 @@ typedef unsigned int color_t;
  * With no display device on the bus -- a bare CPU, as tests/test_libs.py
  * builds -- present falls back to copying and none of the above applies.
  */
+/* Where drawing goes now, as a <pigeon/gac.h> surface handle: 1 with
+ * *handle filled in when this machine draws through the accelerator, 0
+ * when it draws in software. For the few GAC calls this header has no
+ * wrapper for, such as a sprite with per-pixel alpha. */
+int  disp_gac_surface(unsigned *handle);
+
 int  disp_use_back_buffer(void);   /* 0 if the heap could not provide one */
 void disp_present(void);           /* copy the back buffer to the screen  */
 

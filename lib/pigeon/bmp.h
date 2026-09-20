@@ -17,7 +17,10 @@
  * pixel, not keeping the aspect.
  *
  * Files: 24- and 32-bit uncompressed BMPs, bottom-up or top-down, and 32-bit
- * ones saved with the usual bit fields; a 32-bit file's alpha is dropped.
+ * ones saved with the usual bit fields. A 32-bit file's alpha is dropped
+ * unless BMP_ALPHA is added to the mode, and a 24-bit file has none to keep,
+ * so it stays opaque either way. With the alpha kept, whatever falls outside
+ * the image is clear rather than black -- a sprite's margin is not drawn.
  * Images up to 8,192 x 8,192, results up to 4,096 x 4,096.
  *
  * bmp_load and bmp_info read through the kernel (<pigeon/sys.h>). With no
@@ -30,6 +33,9 @@
 #define BMP_CROP          0
 #define BMP_CROP_TOP_LEFT 1
 #define BMP_STRETCH       2
+/* Added to any of the three: keep a 32-bit file's alpha byte instead of
+ * forcing it opaque, for gac_blit_alpha(..., GAC_SRC_ALPHA). */
+#define BMP_ALPHA         4
 
 /* bmp_error(): BMP_OK, one of these, or a file error from the kernel. */
 #define BMP_OK          0

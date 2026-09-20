@@ -188,6 +188,17 @@ int disp_use_back_buffer(void) {
     return 1;
 }
 
+/* Where drawing is going now, as an accelerator handle. Not a drawing
+ * function: it is here so a program can send the GAC something display.h
+ * has no call for -- gac_blit_alpha at GAC_SRC_ALPHA, say -- and still
+ * land on the surface this library is drawing on, back buffer and all
+ * (docs/gac/plans/phase9_srcalpha.md §10 Q3). */
+int disp_gac_surface(unsigned *handle) {
+    if (disp_gac == 0u) return 0;
+    if (handle != NULL) *handle = disp_target_h;
+    return 1;
+}
+
 void disp_present(void) {
     if (disp_back == 0u) return;                   /* drawing straight to it */
 

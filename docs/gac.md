@@ -59,8 +59,27 @@ its own alpha byte.
 A shape blends **each pixel once**, even where the software draws one twice
 (a disc's rows, a circle's octants, a frame's corners), so a translucent disc
 is one even shade. `BLIT` copies bytes exactly, alpha and all.
-`BLIT_ALPHA` lays a whole rectangle over another at one alpha you give it. A
-copy that honours each source pixel's own alpha is not there.
+`BLIT_ALPHA` lays a whole rectangle over another at one alpha you give it —
+or, with `GAC_SRC_ALPHA` (256) in place of that alpha, **on each source
+pixel's own**, which is how an RGBA sprite with a soft edge is drawn. Its
+fully transparent pixels are not drawn at all, so a sprite's margin costs
+nothing.
+
+**What it costs.** Not a blend of every pixel: a real sprite is almost all
+opaque or wholly clear, so each row is cut into a margin that is skipped, a
+solid core copied as `BLIT` copies, and only the rim blended. A 128 × 128
+antialiased sprite is **0.39 ms**, and a whole 720p screen 4.9 ms — cheaper
+than the same rectangle at one alpha, which has to touch every pixel
+([gac/plans/phase9_srcalpha.md](gac/plans/phase9_srcalpha.md) §1). A picture
+with a partial alpha on nearly *every* pixel — a gradient, a soft shadow —
+has no margin to skip and no core to copy, and costs what the plain loop
+costs: about 0.47 s for a whole 720p screen. That is accepted rather than
+refused; ask for it only where you mean it, or run under PyPy, where it is
+19 ms.
+
+`<pigeon/bmp.h>` drops a file's alpha unless `BMP_ALPHA` is added to the
+mode, so a sprite is loaded with `bmp_load(path, w, h, BMP_CROP | BMP_ALPHA)`.
+Only 32-bit BMPs have an alpha to keep.
 
 ## 4. Text
 
@@ -79,7 +98,7 @@ Arguments are words in the data window, sent with R/W 0. Each command answers
 | cmd | name | window |
 |---|---|---|
 | 0 | `NOP` | — |
-| 1 | `INFO` | → magic `"PGGA"`, features (1 text, 2 blending), window bytes |
+| 1 | `INFO` | → magic `"PGGA"`, features (1 text, 2 blending, 4 per-pixel source alpha), window bytes |
 | 2 | `FILL` | dst, x, y, w, h, colour |
 | 3 | `FRAME` | dst, x, y, w, h, colour |
 | 4 | `BLIT` | src, sx, sy, dst, dx, dy, w, h |
@@ -92,7 +111,7 @@ Arguments are words in the data window, sent with R/W 0. Each command answers
 | 11 | `SCROLL` | dst, x, y, w, h, dy, bg |
 | 12 | `BATCH` | count, then records of cmd, nwords, words → ran, refused |
 | 13 | `DAMAGE` | reserved, answers 0, and not used: the display server finds what changed by comparing frames, which catches every way a picture changes ([gac/plans/phase8_bandwidth.md](gac/plans/phase8_bandwidth.md)) |
-| 14 | `BLIT_ALPHA` | src, sx, sy, dst, dx, dy, w, h, alpha |
+| 14 | `BLIT_ALPHA` | src, sx, sy, dst, dx, dy, w, h, alpha — 0 to 255, or 256 (`GAC_SRC_ALPHA`) for each source pixel's own |
 | 15 | `RAM_SURFACE` | address, w, h → a handle, or 0 |
 | 16 | `RAM_FREE` | — (the handle in ADDRESS) |
 
