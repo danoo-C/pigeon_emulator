@@ -47,6 +47,23 @@ int  exec(char *path, int argc, char **argv);  /* runs it, waits: its status */
  * output past that is dropped, and a result exactly that long is how you
  * know. Its status is exec's. Buffers over 64 KB are used to 64 KB. */
 int  exec_out(char *path, int argc, char **argv, char *buf, unsigned size);
+
+/* exec, with files on either end of it, and NULL for the end you don't mean.
+ *
+ *   `out`  what the program writes to STDOUT -- and what the programs it
+ *          runs write -- goes there. R_APPEND adds to the end of it; R_TRUNC
+ *          writes `out~` and renames it over `out` when the program has
+ *          ended by itself, so a crash, a Ctrl+C or a full disk leaves the
+ *          old file whole. STDERR still reaches the console.
+ *   `in`   the program's read(STDIN) takes its lines from there -- one at a
+ *          time, the '\n' included, 0 at the end -- instead of the keyboard.
+ *
+ * A file that will not open is the answer, and the program never starts. */
+int  exec_io(char *path, int argc, char **argv, char *in, char *out, unsigned how);
+
+/* The two on their own, which is how a shell line usually reads. */
+int  exec_to(char *path, int argc, char **argv, char *file, unsigned how);
+int  exec_from(char *path, int argc, char **argv, char *file);
 void exit(int code);                        /* ends this program, now      */
 int  getkey(void);                          /* a key, or -1; never waits   */
 int  setcomplete(char *dir, char *builtins);  /* Tab's commands: a directory of
@@ -57,6 +74,20 @@ int  setbreak(int on);                      /* Ctrl+C as the break for this
 int  paging(int on);                        /* -- more -- after each screen of
                                                this program's output and its
                                                children's, until it ends     */
+int  setmode(unsigned w, unsigned h);      /* the console's screen, at once and
+                                               until the next setmode: 0, or
+                                               E_NOMODE for a mode the machine
+                                               does not offer
+                                               (docs/gac/plans/phase7_setmode.md) */
+int  consize(unsigned *cols, unsigned *rows);  /* the console's size in
+                                               cells: 32 x 12 at the power-on
+                                               screen, more in bigger modes
+                                               (docs/gac/plans/phase6_console.md) */
+int  keepscreen(int on);                    /* the console is not painted back
+                                               over the screen between the
+                                               programs this one runs, so a
+                                               picture drawn in several calls
+                                               stays: what it was            */
 
 /* --- for people ---------------------------------------------------------- */
 void  print(char *s);                       /* a string to STDOUT          */

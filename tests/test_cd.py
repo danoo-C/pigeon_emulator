@@ -797,8 +797,11 @@ def test_the_page_is_told_where_the_drive_is():
     """index.html hardcodes no ports. It learns the CD server's address
     from /info, the same way it learns HID's -- so if display_io stops
     sending cd_url, every button on the page quietly goes dead."""
-    display_io = (REPO_ROOT / "emulator" / "devices" / "display_io.py").read_text()
-    assert '"cd_url": self.cd_url' in display_io, "/info no longer carries cd_url"
+    from emulator.devices.display_io import DisplayIO, info_reply
+    from emulator.ram import RAM
+    display = DisplayIO(RAM(1 << 20))
+    display.cd_url = "http://127.0.0.1:1236"
+    assert info_reply(display)["cd_url"] == display.cd_url, "/info no longer carries cd_url"
     assert "info.cd_url" in INDEX_HTML.read_text(), "the page no longer reads cd_url"
 
     machine = (REPO_ROOT / "emulator" / "machine.py").read_text()
@@ -979,16 +982,21 @@ def test_the_bar_lays_out_without_overlap_at_every_pixel_size():
         c._build_buttons()
 
         assert [b.label for b in c.buttons] == [
-            "Clear", "-", "+", "Serial", "Load from server", "Load from PC", "Eject"]
+            "Clear", "-", "+", "Serial", "Mode", "Load from server", "Load from PC", "Eject"]
         for left, right in zip(c.buttons, c.buttons[1:]):
             assert right.rect.left > left.rect.right, f"{left.label} overlaps {right.label}"
         assert c._px_x > c.buttons[2].rect.right, "the px label sits on the + button"
         assert c.buttons[3].rect.left > c._px_x + c.font.size("px: 16")[0], "Serial sits on the px label"
         assert c._info_x > c.buttons[-1].rect.right, "the disc label sits on Eject"
 
+        # The window fits the pixel size to the desktop now (docs/gac/plans/
+        # phase4_frontends.md); a desktop with room for the biggest keeps
+        # this about the bar at every size.
+        c._desktop = (8192, 4096)
         for px in (module.MIN_PIXEL_SIZE, module.MAX_PIXEL_SIZE):
-            c.pixel_size = px
+            c.wanted_pixel_size = px
             c._resize_window()
+            assert c.pixel_size == px
             assert c.screen.get_width() >= c.buttons[-1].rect.right, (
                 f"at pixel size {px} the window is {c.screen.get_width()} px and "
                 f"the bar needs {c.buttons[-1].rect.right}")

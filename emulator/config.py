@@ -16,10 +16,17 @@ so the file works the same no matter which directory you run from.
 import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+from .memory_map import (DISPLAY_H, DISPLAY_MAX_H, DISPLAY_MAX_W, DISPLAY_MODES, DISPLAY_W,
+                         RAM_SIZE, VRAM_SIZE)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPO_ROOT / "config.json"
+
+# With video memory mapped above it, RAM's space is twice its size, and
+# that has to fit in 32 bits (docs/gac/design.md §5.1).
+MAX_RAM = 1 << 31
 
 DEFAULTS = {
     # Where the display, input and CD HTTP servers listen. Each needs its
@@ -72,6 +79,22 @@ DEFAULTS = {
     # --cd PATH does the same for one run.
     "cd": None,
 
+    # --- memory (docs/gac/phase1_aperture.md) ---
+    # "128M", "1G" or a byte count; a power of two from 128M to 2G. More
+    # than 128M is allocated and addressable, but the guest's layout -- the
+    # stack, bios2, the heap's end -- is still fixed at 128 MB, so nothing
+    # uses the rest yet. --ram SIZE does the same for one run.
+    "ram": "128M",
+    # Video memory, mapped just above RAM. null or 0 for none: the machine
+    # from before it existed. --vram SIZE does the same for one run.
+    "vram": "16M",
+    # The screen at power-on, [w, h], and the modes a program may switch to
+    # (docs/gac/phase2_vram.md). Anything but 192 x 108 needs video memory,
+    # and is shown out of it: programs that draw at DISPLAY_START draw where
+    # nobody looks. --mode WxH picks the power-on mode for one run.
+    "display_mode": [DISPLAY_W, DISPLAY_H],
+    "display_modes": [list(m) for m in DISPLAY_MODES],
+
     # --- the debug port (docs/phase5_plan.md) ---
     # Print what the machine writes to its debug port in this terminal, each
     # line with the time since power-on. --serial does the same for one run.
@@ -107,6 +130,10 @@ class Config:
     auto_build: bool
     serial: bool = False
     serial_log: Optional[Path] = None
+    ram: int = RAM_SIZE
+    vram: int = VRAM_SIZE                # 0: no video memory
+    display_mode: Tuple[int, int] = (DISPLAY_W, DISPLAY_H)
+    display_modes: List[Tuple[int, int]] = field(default_factory=lambda: list(DISPLAY_MODES))
     source_path: Optional[Path] = None   # which config.json this came from
     unknown_keys: List[str] = field(default_factory=list)
 
@@ -125,6 +152,17 @@ class Config:
     def override(self, **kwargs) -> "Config":
         """Apply command-line flags. None means 'not given, keep config'."""
         given = {k: v for k, v in kwargs.items() if v is not None}
+        # A size from a flag is parsed and checked as the config key is,
+        # so --ram and "ram" cannot disagree about what is allowed.
+        if "ram" in given:
+            given["ram"] = _ram_size(given["ram"], "--ram")
+        if "vram" in given:
+            given["vram"] = _vram_size(given["vram"], "--vram")
+        if "display_mode" in given:
+            given["display_mode"] = _mode(given["display_mode"], "--mode")
+        _check_vram(given.get("vram", self.vram), given.get("ram", self.ram))
+        _check_modes(given.get("display_mode", self.display_mode), self.display_modes,
+                     given.get("vram", self.vram))
         for key in ("program_dirs", "build_dir", "disk", "bios_source", "bios_binary",
                     "bios2_source", "bios2_binary", "cd_dirs", "cd_upload_dir",
                     "cd_root", "cd", "serial_log"):
@@ -164,6 +202,64 @@ def _size(value, name: str) -> int:
     if number <= 0:
         raise ConfigError(f"{name} must be positive, got {value!r}")
     return number * scale
+
+
+def _ram_size(value, name: str) -> int:
+    size = _size(value, name)
+    if size & (size - 1):
+        raise ConfigError(f"{name} must be a power of two, got {value!r} "
+                          f"(128M, 256M, 512M, 1G or 2G)")
+    if size < RAM_SIZE:
+        raise ConfigError(f"{name} must be at least 128M, got {value!r}: the stack "
+                          f"and the second-stage BIOS live just below 128 MB")
+    if size > MAX_RAM:
+        raise ConfigError(f"{name} can be at most 2G, got {value!r}: the video "
+                          f"memory above RAM has to fit in 32 bits")
+    return size
+
+
+def _vram_size(value, name: str) -> int:
+    """A size, or null / 0 for no video memory at all."""
+    if value is None or (isinstance(value, (int, str)) and not isinstance(value, bool)
+                         and str(value).strip() == "0"):
+        return 0
+    return _size(value, name)
+
+
+def _check_vram(vram: int, ram: int) -> None:
+    if vram > ram:
+        raise ConfigError(f"vram ({vram} bytes) cannot be larger than ram ({ram} "
+                          f"bytes): it is mapped into the space just above RAM, "
+                          f"which is as big as RAM")
+
+
+def _mode(value, name: str) -> Tuple[int, int]:
+    """[640, 360], or "640x360" from a flag."""
+    if isinstance(value, str):
+        w, _, h = value.lower().partition("x")
+        value = [int(w), int(h)] if w.isdigit() and h.isdigit() else value
+    if (not isinstance(value, (list, tuple)) or len(value) != 2
+            or not all(isinstance(n, int) and not isinstance(n, bool) and n > 0
+                       for n in value)):
+        raise ConfigError(f"{name} must be a width and a height, like [640, 360] "
+                          f"or 640x360 -- got {value!r}")
+    w, h = value
+    if w > DISPLAY_MAX_W or h > DISPLAY_MAX_H:
+        raise ConfigError(f"{name} {w}x{h} is larger than {DISPLAY_MAX_W}x"
+                          f"{DISPLAY_MAX_H}, the largest screen programs are built for")
+    return (w, h)
+
+
+def _check_modes(mode: Tuple[int, int], modes: List[Tuple[int, int]], vram: int) -> None:
+    if mode not in modes:
+        raise ConfigError(f"the display mode {mode[0]}x{mode[1]} is not one of "
+                          f"display_modes ({', '.join(f'{w}x{h}' for w, h in modes)})")
+    if not vram and mode != (DISPLAY_W, DISPLAY_H):
+        raise ConfigError(f"a {mode[0]}x{mode[1]} screen needs video memory; with "
+                          f"vram off the screen is {DISPLAY_W}x{DISPLAY_H}")
+    if vram and mode[0] * mode[1] * 4 > vram:
+        raise ConfigError(f"a {mode[0]}x{mode[1]} screen does not fit in {vram} bytes "
+                          f"of video memory")
 
 
 def _port(value, name: str) -> int:
@@ -241,6 +337,17 @@ def load_config(path: Optional[Path] = None) -> Config:
         raise ConfigError("cd must be the path of a disc image, or null for an empty "
                           f"drive -- got {disc!r}")
 
+    ram = _ram_size(settings["ram"], "ram")
+    vram = _vram_size(settings["vram"], "vram")
+    _check_vram(vram, ram)
+    modes = settings["display_modes"]
+    if not isinstance(modes, list) or not modes:
+        raise ConfigError(f"display_modes must be a list of [w, h] pairs, e.g. "
+                          f"[[192, 108], [640, 360]] -- got {modes!r}")
+    modes = [_mode(m, "display_modes") for m in modes]
+    mode = _mode(settings["display_mode"], "display_mode")
+    _check_modes(mode, modes, vram)
+
     return Config(
         host=str(settings["host"]),
         display_port=display_port,
@@ -261,6 +368,10 @@ def load_config(path: Optional[Path] = None) -> Config:
         auto_build=bool(settings["auto_build"]),
         serial=settings["serial"],
         serial_log=None if serial_log is None else _resolve(serial_log),
+        ram=ram,
+        vram=vram,
+        display_mode=mode,
+        display_modes=modes,
         source_path=path if path.exists() else None,
         unknown_keys=unknown,
     )

@@ -49,6 +49,9 @@
 #define CELL (GLYPH_W + 1)
 #define ROW  (GLYPH_H + 1)
 #define COLS (DISP_W / CELL)
+/* Arrays are sized for the widest screen there is, DISPLAY_MAX_W: COLS is
+ * the screen's own, worked out at run time now, and cannot size one. */
+#define MAX_COLS  (DISPLAY_MAX_W / CELL)
 #define X(c) ((unsigned)(c) * CELL)
 #define Y(r) (1u + (unsigned)(r) * ROW)
 
@@ -104,7 +107,7 @@ struct device {
 typedef void (*entry_fn)(void);
 
 struct device devices[DEVICES];
-char message[COLS + 1];             /* why the last boot failed; "" if none */
+char message[MAX_COLS + 1];             /* why the last boot failed; "" if none */
 
 /* --- IO ------------------------------------------------------------------- */
 
@@ -274,7 +277,7 @@ void draw_devices(int selected) {
 }
 
 void draw_frame(void) {
-    char line[COLS + 1];
+    char line[MAX_COLS + 1];
 
     disp_clear(BG);
     disp_rect(0u, 0u, DISP_W, ROW + 1u, BAR);
@@ -285,7 +288,7 @@ void draw_frame(void) {
 }
 
 void draw_countdown(int first, unsigned seconds) {
-    char line[COLS + 1];
+    char line[MAX_COLS + 1];
     char digits[12];
 
     draw_devices(-1);
@@ -408,6 +411,7 @@ int main(void) {
     unsigned seconds;
     unsigned shown;
 
+    disp_init();  /* the screen, as the machine has it (display.h) */
     devices[D_PROGRAM].name = "Program";
     devices[D_PROGRAM].channel = CH_USERPROG;
     devices[D_DISK].name = "Hard disk";

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Pygame front-end for the pigeon emulator's DisplayIO FastAPI server.
 
-Polls GET /frame for the current RGBA framebuffer and renders it scaled
-by an adjustable pixel size. Includes buttons to clear the display, to
+Polls GET /frame for the screen -- its bytes as they are in the machine's
+memory, B,G,R,A, with the mode they were drawn in as an X-Pigeon-Mode header
+-- and renders it scaled by an adjustable pixel size. When the mode changes,
+the window follows it, at the largest pixel size up to yours that fits the
+desktop (docs/gac/plans/phase4_frontends.md). Includes buttons to clear the display, to
 increase/decrease the pixel size, and to work the CD drive
 (docs/cd-drive.md): load a disc from the emulator's own folders, load one
 from anywhere with a native file dialog, and eject. A Serial panel beside the
@@ -51,6 +54,7 @@ except ImportError as exc:
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from emulator.devices import keycodes as K          # noqa: E402
 import serial_panel as SP                             # noqa: E402  (beside this file)
+import screen_mode as SM                              # noqa: E402  (beside this file)
 
 PYGAME_TO_PIGEON = {
     pygame.K_LEFT: K.KEY_LEFT,       pygame.K_RIGHT: K.KEY_RIGHT,
@@ -208,6 +212,9 @@ class DisplayClient:
         self.hid_url = f"http://{hid_host}:{hid_port}"
         self.fps = fps
         self.pixel_size = pixel_size
+        # The size you asked for, with - and +. pixel_size is the most of it
+        # the desktop has room for at the current mode.
+        self.wanted_pixel_size = pixel_size
 
         # Persistent sessions for both display and HID servers
         self.session = requests.Session()
@@ -217,6 +224,7 @@ class DisplayClient:
         self.disp_w = info["w"]
         self.disp_h = info["h"]
         self.frame_size = info["size"]
+        self._mode = (self.disp_w, self.disp_h, info.get("generation", 0))
 
         # The CD server's address comes from /info, the same way the
         # browser page learns it, so a --cd-port on the emulator needs no
@@ -246,6 +254,10 @@ class DisplayClient:
         self.font = pygame.font.SysFont(None, 22)
         self.mono = pygame.font.SysFont("monospace", 13)
         self.clock = pygame.time.Clock()
+        # The desktop, measured before the first window exists: afterwards
+        # pygame reports the window instead.
+        desktop = pygame.display.Info()
+        self._desktop = (desktop.current_w, desktop.current_h)
 
         # The Serial panel as it was last left, and what the machine has
         # written, which a thread of its own fetches.
@@ -269,7 +281,7 @@ class DisplayClient:
         self._key_sent = {}
 
         # Background frame fetcher
-        self._latest_frame = b"\x00" * self.frame_size
+        self._latest_frame = (bytes(self.frame_size), self._mode, None)
         self._frame_lock = threading.Lock()
         self._display_connected = True
         self._display_connected_lock = threading.Lock()
@@ -329,20 +341,51 @@ class DisplayClient:
         raise RuntimeError(f"HID server at {self.hid_url} did not respond within {timeout_sec}s")
 
     def _fetch_loop(self):
-        """Continuously fetch display frames as fast as the server can serve them,
-        independent of the render/display fps. Retries once a second while
-        the server is unreachable instead of hammering it."""
+        """Fetch the screen at the client's frame rate, asking only for what
+        changed since the frame held (docs/gac/plans/phase8_bandwidth.md): a
+        picture that did not change is a 204, and one that changed a little
+        is its rows, put into the frame held. It used to fetch whole frames
+        as fast as the server would send them -- 226 MiB/s at 1280 x 720,
+        twice the frames the emulator makes. Retries once a second while the
+        server is unreachable instead of hammering it."""
+        held = None                         # the frame, as bytes to patch
+        number = None                       # which frame it is: what since= asks from
+        mode = self._mode
         while not self._stop_event.is_set():
+            started = time.time()
             try:
-                resp = self.session.get(f"{self.base_url}/frame", timeout=REQUEST_TIMEOUT)
+                url = f"{self.base_url}/frame" + ("" if number is None else f"?since={number}")
+                resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
                 resp.raise_for_status()
-                data = resp.content
-                with self._frame_lock:
-                    self._latest_frame = data
+                if resp.status_code != 204:
+                    got_mode = SM.parse_mode(resp.headers.get("X-Pigeon-Mode")) or mode
+                    w, h = got_mode[0], got_mode[1]
+                    rows = SM.parse_rows(resp.headers.get("X-Pigeon-Rows")) or (0, h - 1)
+                    band = resp.content
+                    whole = rows == (0, h - 1)
+                    if len(band) != (rows[1] - rows[0] + 1) * w * 4 or (
+                            not whole and (held is None or got_mode[:2] != mode[:2])):
+                        number = None               # not one we can build on: ask for all
+                        continue
+                    held = bytearray(band) if whole else SM.apply_band(held, band, rows[0], w)
+                    mode = got_mode
+                    try:
+                        number = int(resp.headers.get("X-Pigeon-Frame"))
+                    except (TypeError, ValueError):
+                        number = None
+                    # The bytes and the mode they were drawn in, kept together:
+                    # the render loop resizes the window from the mode it draws.
+                    with self._frame_lock:
+                        self._latest_frame = (bytes(held), mode, number)
                 self._set_display_connected(True)
             except Exception:
+                number = None
                 self._set_display_connected(False)
                 time.sleep(RETRY_INTERVAL)
+                continue
+            rest = 1.0 / self.fps - (time.time() - started)
+            if rest > 0:
+                time.sleep(rest)
 
     def _set_display_connected(self, value: bool):
         with self._display_connected_lock:
@@ -462,11 +505,28 @@ class DisplayClient:
         self.status_ttl = frames
 
     def _change_pixel_size(self, delta):
-        new_size = max(MIN_PIXEL_SIZE, min(MAX_PIXEL_SIZE, self.pixel_size + delta))
-        if new_size != self.pixel_size:
-            self.pixel_size = new_size
+        wanted = max(MIN_PIXEL_SIZE, min(MAX_PIXEL_SIZE, self.pixel_size + delta))
+        if wanted != self.wanted_pixel_size:
+            self.wanted_pixel_size = wanted
             self._resize_window()
-        self._set_status(f"Pixel size: {self.pixel_size}")
+        fits = "" if self.pixel_size == wanted else " (the most that fits)"
+        self._set_status(f"Pixel size: {self.pixel_size}{fits}")
+
+    def _fitting_pixel_size(self):
+        """The pixel size you asked for, or the most of it the desktop has
+        room for at this mode."""
+        beside = self.serial_width if self.serial_open else 0
+        room_w, room_h = SM.room_for_screen(*self._desktop, beside, BUTTON_BAR_HEIGHT)
+        return SM.fit_pixel_size(self.disp_w, self.disp_h, room_w, room_h,
+                                 self.wanted_pixel_size)
+
+    def _set_mode(self, mode):
+        """The machine's screen changed size: follow it."""
+        self._mode = mode
+        self.disp_w, self.disp_h = mode[0], mode[1]
+        self.frame_size = self.disp_w * self.disp_h * 4
+        self._resize_window()
+        self._set_status(f"Mode: {self.disp_w}x{self.disp_h}")
 
     def _build_buttons(self):
         """Lay the bar out from the font's own metrics.
@@ -493,6 +553,7 @@ class DisplayClient:
         self._px_x = x + 4
         x = self._px_x + self.font.size("px: 16")[0] + 16
         self._serial_button = add("Serial", self._toggle_serial)
+        add("Mode", self._choose_mode)
 
         load_server = add("Load from server", self._load_from_server)
         load_pc = add("Load from PC", self._load_from_pc)
@@ -512,6 +573,10 @@ class DisplayClient:
                                + 12)
 
     def _resize_window(self):
+        # Every change of layout comes through here -- a mode, the pixel
+        # size, the Serial panel opening or being dragged wider -- so the
+        # pixel size is fitted to the room here, once, for all of them.
+        self.pixel_size = self._fitting_pixel_size()
         screen_w = self.disp_w * self.pixel_size
         self.serial_width = SP.clamp_width(self.serial_width, screen_w)
         spot = SP.layout(self.serial_open, self.serial_width, screen_w,
@@ -774,7 +839,37 @@ class DisplayClient:
 
     # --- the "Load from server" picker ------------------------------------------
 
-    def _open_picker(self, discs, folder=None):
+    def _choose_mode(self):
+        """The Mode picker: the machine's modes, from /info. Choosing one
+        only asks -- POST /preferred -- and the kernel switches at the
+        shell's next prompt (docs/gac/plans/phase6_console.md §3)."""
+        try:
+            info = self.session.get(f"{self.base_url}/info", timeout=REQUEST_TIMEOUT).json()
+        except Exception as e:
+            self._set_status(f"Mode: {e}", frames=180)
+            return
+        items = SM.mode_items(info.get("modes"), self.disp_w, self.disp_h)
+        self._open_picker(items, title="Mode: taken at the next prompt   arrows / click, Enter, Esc",
+                          choose=self._ask_for_mode)
+        self._picker["index"] = next((i for i, item in enumerate(items) if item["current"]), 0)
+
+    def _ask_for_mode(self, item):
+        if item["current"]:
+            return
+        try:
+            reply = self.session.post(f"{self.base_url}/preferred",
+                                      json={"w": item["w"], "h": item["h"]},
+                                      timeout=REQUEST_TIMEOUT)
+        except Exception as e:
+            self._set_status(f"Mode: {e}", frames=180)
+            return
+        if reply.ok:
+            self._set_status(f"{SM.mode_label(item['w'], item['h'])}: switches at the prompt",
+                             frames=300)
+        else:
+            self._set_status("Mode: this machine cannot change its mode", frames=180)
+
+    def _open_picker(self, discs, folder=None, title=None, choose=None):
         # Anything held down in the guest is released first. The picker
         # swallows every key while it is open, so a key pressed before it
         # opened would never see its release and would stay stuck down in
@@ -783,7 +878,8 @@ class DisplayClient:
             self._send_key(code, False)
         self._key_sent.clear()
         self._picker = {"items": discs, "folder": folder, "index": 0, "top": 0,
-                        "rows": 1, "rects": [], "panel": None}
+                        "rows": 1, "rects": [], "panel": None,
+                        "title": title, "choose": choose}
 
     def _close_picker(self):
         self._picker = None
@@ -792,8 +888,11 @@ class DisplayClient:
         items = self._picker["items"]
         if 0 <= index < len(items):
             item = items[index]
+            choose = self._picker.get("choose")
             self._close_picker()
-            if item.get("folder"):
+            if choose is not None:               # a list that is not discs: the Mode picker
+                choose(item)
+            elif item.get("folder"):
                 self._load_from_server(item["path"])   # ".." to the top is None
             else:
                 self._insert_path(item["path"])
@@ -857,8 +956,8 @@ class DisplayClient:
         pygame.draw.rect(self.screen, PICKER_BORDER, panel, 1)
 
         where = "" if p["folder"] is None else f": {Path(p['folder']).name}/"
-        title = self.font.render(f"Load from server{where}   arrows / click, Enter, Esc",
-                                 True, DIM_TEXT_COLOR)
+        text = p.get("title") or f"Load from server{where}   arrows / click, Enter, Esc"
+        title = self.font.render(text, True, DIM_TEXT_COLOR)
         self.screen.blit(title, (panel.x + 10, panel.y + 8))
 
         list_top = panel.y + 32
@@ -887,7 +986,7 @@ class DisplayClient:
             label = item["name"] + ("/" if folder and item["name"] != ".." else "")
             name = self.font.render(label, True, BUTTON_TEXT_COLOR)
             self.screen.blit(name, (rect.x + 8, rect.y + 3))
-            if not folder:
+            if not folder and "size" in item:
                 size = self.font.render(_fmt_size(item["size"]), True, DIM_TEXT_COLOR)
                 self.screen.blit(size, (rect.right - size.get_width() - 8, rect.y + 3))
 
@@ -942,23 +1041,41 @@ class DisplayClient:
                     if code is not None:
                         self._send_key(code, False)
 
-            frame = self._get_latest_frame()
-            self._render(frame, mouse_pos)
+            frame, mode, number = self._get_latest_frame()
+            # Only this thread may call set_mode, so the window follows a
+            # mode change here, on the frame that brought it.
+            if mode is not None and mode[:2] != (self.disp_w, self.disp_h):
+                self._set_mode(mode)
+            self._render(frame, mouse_pos, number)
             self.clock.tick(self.fps)
 
         self._stop_event.set()
         pygame.quit()
 
-    def _render(self, frame_bytes, mouse_pos):
+    def _render(self, frame_bytes, mouse_pos, number=None):
         self.screen.fill(BG_COLOR)
 
         # Draw the framebuffer
         try:
-            surface = pygame.image.frombuffer(frame_bytes, (self.disp_w, self.disp_h), "RGBA")
-            if self.pixel_size != 1:
-                surface = pygame.transform.scale(
-                    surface, (self.disp_w * self.pixel_size, self.disp_h * self.pixel_size)
-                )
+            # The same frame at the same size is the same picture: decoding
+            # and scaling it again each tick was most of this client's CPU
+            # while the screen sat still. A frame without a number is always
+            # built.
+            key = (number, self.pixel_size, self.disp_w, self.disp_h)
+            cached = getattr(self, "_scaled", None)
+            if number is not None and cached is not None and cached[0] == key:
+                surface = cached[1]
+            else:
+                # As the machine's memory has it, B,G,R,A; convert() then drops
+                # the alpha, because the screen ignores it -- memory nothing has
+                # drawn on is black, not the window behind it.
+                surface = pygame.image.frombuffer(frame_bytes, (self.disp_w, self.disp_h),
+                                                  "BGRA").convert()
+                if self.pixel_size != 1:
+                    surface = pygame.transform.scale(
+                        surface, (self.disp_w * self.pixel_size, self.disp_h * self.pixel_size)
+                    )
+                self._scaled = (key, surface)
             self.screen.blit(surface, (self._screen_x, BUTTON_BAR_HEIGHT))
         except ValueError:
             # Frame size didn't match expected dimensions; skip this frame

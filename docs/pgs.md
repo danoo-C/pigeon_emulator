@@ -49,13 +49,28 @@ again inside it, down to the kernel's eight programs.
 
 ## 2. Lines
 
-- **One command a line.** No `;`, no `&&`, no line continuation.
+- **One command a line.** No `;`, no `&&`.
+- **A line that ends in `\` carries on to the next one,** the two joined
+  with a space where the backslash and the newline were. Inside quotes a backslash is text, a `\\`
+  is an escaped backslash rather than a continuation, and a `;;` comment
+  cannot continue a line. The line numbers in messages stay the script's own,
+  so a continuation does not shift everything under it. A drawing call is
+  what it was added for ([graphics.md](graphics.md) §4).
 - **`;;` starts a comment,** to the end of the line, anywhere outside quotes.
-- **A line starting with `#` is a setting,** not a comment: `# stop-on-error`
-  is the only one so far. Settings live in the header, before the first
-  command, and a word `pgs` doesn't know is a mistake with its line number —
-  a silently ignored typo is what the language is built to avoid.
+- **A line starting with `#` is a setting,** not a comment. There are two:
+
+  | | |
+  |---|---|
+  | `# stop-on-error` | a program that fails ends the script |
+  | `# graphics` | the script owns the screen ([graphics.md](graphics.md) §4) |
+  | `# graphics 640x360` | the same, in that mode, given back when the script ends |
+
+  Settings live in the header, before the first command, and a word `pgs`
+  doesn't know is a mistake with its line number — a silently ignored typo is
+  what the language is built to avoid.
 - **A line is a command,** an assignment, a setting, a block word, or blank.
+- **Up to 32 words a command,** `graphics` included; it was 16 until one
+  drawing call needed more.
 
 ## 3. Words
 
@@ -68,7 +83,7 @@ edit $file                  ;; edit gets one argument, not two
 ```
 
 `\$` is a dollar, `\\` a backslash, `\"` a quote. There are no single quotes.
-At most 16 words a command, and the words of one line together at most 16 KB.
+At most 32 words a command, and the words of one line together at most 16 KB.
 
 ## 4. Variables
 
@@ -187,10 +202,32 @@ when it is missing. So a word means the same in a script as at the prompt.
 - **Ctrl+C** ends the program the script is waiting for, and then the script.
   That is the way out of a `while 1`.
 
-## 10. What it is not
+## 10. `>`, `>>` and `<`
+
+```sh
+args one > /out.txt         ;; a program's output into a file
+echo hello > note.txt       ;; and a builtin's, which is most of the point
+echo world >> note.txt
+eater < note.txt            ;; a file as a program's typed input
+sort < in.txt > out.txt     ;; both ends at once
+```
+
+They work as they do at the prompt ([shell.md](shell.md) §8): whole words
+only, `>` writing `file~` and renaming it when the command has ended by
+itself, `>>` adding to the end, `STDERR` still reaching the screen. Two
+things are the script's own:
+
+- **A builtin redirects too.** `echo hello > note.txt` writes the file, with
+  the same `file~` rule. `<` on a builtin is a mistake — none of them reads
+  input that way.
+- **A value cannot redirect.** `$x = $(ls) > out.txt` looks like a
+  redirection and is not one: the whole right-hand side is the value. Rather
+  than quietly making the value `... > out.txt`, `pgs` says
+  `a value cannot redirect: quote it if you meant the text`. `$x = "a > b"`
+  is that text.
+
+## 11. What it is not
 
 No pipes (`a | b`), no `&&`, no `;`, no functions, no arrays, no environment,
-no background jobs. Redirection — `ls > out.txt` — is
-[redirect_plan.md](redirect_plan.md), and a `# graphics` script that owns the
-screen is [graphics_plan.md](graphics_plan.md); both are planned and neither
-is built.
+no background jobs. A `# graphics` script that owns the screen is
+[graphics_plan.md](graphics_plan.md), planned and not built.

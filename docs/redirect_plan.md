@@ -1,7 +1,8 @@
 # Redirection: `ls > out.txt`
 
-> **Status: final plan, 2026-09-16; every question is decided ([§7](#7-your-answers)).
-> Written alongside [pgs_plan.md](pgs_plan.md) (its Q7) and built after it.**
+> **Status: built, 2026-09-17 ([§9](#9-as-built)); every question is decided
+> ([§7](#7-your-answers)).** Written alongside [pgs_plan.md](pgs_plan.md)
+> (its Q7) and built after it.
 > Sending a
 > program's output to a file instead of the console, in the shell and in
 > scripts: `>` to write, `>>` to add, and `<` to feed a program a file. One
@@ -251,3 +252,47 @@ Answered in this file on 2026-09-16.
   work that way.
 
   Answer:
+
+---
+
+## 9. As built
+
+Built to this plan on 2026-09-17, in the order §4 gives. Five things it
+corrected along the way.
+
+- **One system call, not two.** `exec_to` and `exec_from` cannot do
+  `sort < in.txt > out.txt` between them -- each runs the program itself, and
+  a program runs once. The kernel has **`exec_io(path, argc, argv, in, out,
+  how)`**, either end NULL, and `<pigeon/sys.h>` keeps `exec_to` and
+  `exec_from` as one-line wrappers over it, which is how a shell line usually
+  reads. One slot instead of two, and both ends work together.
+- **`k_remount()`.** `fs_unmount` refuses while any handle is open *(checked:
+  `fs.c`)*, so `k_tidy`'s "mount the disk again" is silently skipped while a
+  redirected file is open -- and that remount is what keeps the kernel's cache
+  honest after a program with its own `fs.c`. `exec_io` closes the file and
+  does it again itself; `k_tidy` and it now share the one function.
+- **Quoting protects a marker.** §3.2 said "whole words", which covers
+  `echo 1>2` but not `echo ">"`. Both splitters now remember which words had
+  quotes in them, so a quoted `>` is text. It is the only thing the quotes are
+  remembered for.
+- **The shell names the file, not the program.** `talker > /nodir/out.txt`
+  said `talker: not found`, which sends you looking in the wrong place: the
+  shell has already found the program, so an `E_NOENT` from `exec_io` is the
+  redirection's file, and that is what is printed.
+- **"A value cannot redirect" replaces Q3's message.** The trap is not `$( )`
+  and `>` together -- `cat $(pwd) > out.txt` is a perfectly good line. It is
+  that an assignment's right-hand side is *all* value, so `$x = $(ls) >
+  out.txt` quietly puts `> out.txt` in the variable. Any unquoted `>`, `>>` or
+  `<` word in a value is now `a value cannot redirect: quote it if you meant
+  the text`.
+
+Also built: `<` on a `pgs` builtin is a mistake (none of them reads input that
+way), while `>` on one writes the file with the same `file~` rule a program
+gets. F1 was left unanswered and its suggestion stands: `>>` appends in place.
+
+- **Tests:** 16 in `tests/test_kernel.py` (the call, the rename, a fault
+  keeping the old file, a program that returns a number keeping its output, a
+  grandchild's output, `<` feeding lines, both ends at once, the shell's
+  words, the built-ins refusing, a file that will not open) and 11 in
+  `tests/test_pgs.py`. `docs/shell.md` §8 and `docs/pgs.md` §10 are the
+  manual.

@@ -93,16 +93,33 @@ IO_START = BIOS_MAX  # right after BIOS, wherever it ends
 IO_SIZE  = 0x00001000 + IOHeader.USABLE_AFTER  # 4 KB + 24 bytes for the header, so the controller can read/write the header itself
 
 # --- Display (memory-mapped video) ---
-DISPLAY_START = IO_START + IO_SIZE  # right after the IO region
+DISPLAY_START = IO_START + IO_SIZE   # right after the IO region
 
 DISPLAY_W, DISPLAY_H = 192, 108   # 16:9
 DISPLAY_SIZE  = DISPLAY_W * DISPLAY_H * 4   # 4 bytes per pixel
+
+# --- Video memory (docs/gac/) ---
+# Not in the map above: it is a separate buffer, reached through an
+# aperture that starts wherever this machine's RAM ends (ram.py). There is
+# deliberately no constant for that address -- RAM size is per machine,
+# and a program that baked in 0x08000000 would draw into the middle of the
+# heap on a bigger one. The guest asks the VRAM device where it is.
+VRAM_SIZE = 16 * 1024 * 1024   # the default; config.json's "vram"
+
+# The modes a machine offers by default (config.json's "display_modes"),
+# and the largest of them: a C program sizes a buffer from the caps and
+# clips to the live mode at run time (docs/gac/design.md §5.6). A tuple, so
+# symbols() -- ints only -- leaves it out; the caps are what the toolchains
+# need. config.py refuses a mode larger than the caps.
+DISPLAY_MODES = ((192, 108), (320, 180), (640, 360), (854, 480), (1280, 720))
+DISPLAY_MAX_W = max(w for w, _ in DISPLAY_MODES)
+DISPLAY_MAX_H = max(h for _, h in DISPLAY_MODES)
 
 
 
 
 # --- User program (static code/data -- fixed load point, fixed max size) ---
-PROGRAM_LOAD_ADDR = 0x00020000   # moved up from 0x10000 for comfortable headroom above display memory
+PROGRAM_LOAD_ADDR = 0x00020000  # moved up from 0x10000 for comfortable headroom above display memory
 if DISPLAY_SIZE + DISPLAY_START > PROGRAM_LOAD_ADDR: #check for overlap with display memory
     raise RuntimeError("Display memory overlaps program load address")
 PROGRAM_MAX_SIZE  = 0x00100000   # 1 MB reserved for code + static data
@@ -159,6 +176,8 @@ CH_DISPLAY  = 5   # framebuffer: scanout base, block fill
 CH_CD       = 6   # removable read-only disc, swapped from the host
 CH_BIOS2    = 7   # read-only firmware: the second-stage BIOS (docs/os_cd.md)
 CH_DEBUG    = 8   # write-only debug port, shown as "Serial" (docs/phase5_plan.md)
+CH_VRAM     = 9   # video memory: modes, surfaces, what is on screen (docs/gac/)
+CH_GAC      = 10  # the graphics accelerator: drawing done by the host (docs/gac/)
 # <pigeon/cd.h> takes a channel, so a second drive is a one-line change
 # here and nowhere else.
 

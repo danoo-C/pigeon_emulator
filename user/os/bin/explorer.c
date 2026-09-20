@@ -44,6 +44,9 @@
  * 6x9 cell, as user/files.c lays itself out for the same reason. */
 #define CELL      (GLYPH_W + 1)                 /* 6 px: glyph plus a gap  */
 #define COLS      (DISP_W / CELL)               /* 32                      */
+/* Arrays are sized for the widest screen there is, DISPLAY_MAX_W: COLS is
+ * the screen's own, worked out at run time now, and cannot size one. */
+#define MAX_COLS  (DISPLAY_MAX_W / CELL)
 #define ROW       (GLYPH_H + 1)                 /* 9 px per line           */
 
 #define HEAD_Y    1
@@ -103,7 +106,7 @@ static int sel;                     /* the highlighted entry               */
 static int top;                     /* the first entry drawn               */
 static char here[PATH];             /* the folder shown, as getcwd says it */
 
-static char message[COLS + 1];
+static char message[MAX_COLS + 1];
 static color_t msg_ink;
 
 static char rule_cmd[MAX_RULES * CMD_MAX];      /* "EXEC", "/bin/img.bin -s" */
@@ -162,7 +165,7 @@ static void say_err(char *what, int status) {
 /* "explorer.conf:3: expected command = pattern". The first complaint is the
  * one shown; the rest are counted, since the status line is one row. */
 static void complain(unsigned line, char *what, char *detail) {
-    char text[COLS + 1];
+    char text[MAX_COLS + 1];
     char number[STR_UTOA_MAX];
     if (message[0] != 0) {
         strlcat(message, " (+)", sizeof(message));
@@ -343,7 +346,7 @@ static void go_to(char *path) {
  * where the kernel left it. */
 
 static void draw_header(void) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
     char count[STR_UTOA_MAX + 8];
     char *path = here;
     unsigned n = strlen(here);
@@ -366,7 +369,7 @@ static void draw_header(void) {
 }
 
 static void draw_status(char *hint) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
 
     disp_hline(0, FOOT_RULE, DISP_W, DIM);
     blank(row);
@@ -380,7 +383,7 @@ static void draw_status(char *hint) {
 }
 
 static void draw_list(void) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
     unsigned y;
     unsigned h;
     unsigned bar;
@@ -431,7 +434,7 @@ static void draw_menu(void) {
 }
 
 static void draw_prompt(void) {
-    char row[COLS + 1];
+    char row[MAX_COLS + 1];
     unsigned y = LIST_Y + 3u * ROW;
     unsigned label;
     unsigned room;
@@ -1040,6 +1043,7 @@ int main(int argc, char **argv) {
     int code;
     unsigned event;
 
+    disp_init();  /* the screen, as the machine has it (display.h) */
     setbreak(0);                /* ^C is a key here, not the end of it */
     mode = M_LIST;
     message[0] = 0;

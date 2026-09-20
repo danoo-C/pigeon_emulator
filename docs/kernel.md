@@ -453,7 +453,13 @@ A first set of calls is in kernel_exec.md §8. Phase 4a added `mkdir`,
 `rmdir`, `remove` and `rename`, slots 13 to 16, each passing straight to
 `fs.c` ([phase4_plan.md](phase4_plan.md) step 6). Phase 4b added
 `setcomplete`, `setbreak` and `paging`, slots 17 to 19
-([phase4b_plan.md](phase4b_plan.md) steps 3, 5 and 6).
+([phase4b_plan.md](phase4b_plan.md) steps 3, 5 and 6). `exec_out` and
+`exec_io`, slots 20 and 21, came with scripts and redirection
+([pgs_plan.md](pgs_plan.md), [redirect_plan.md](redirect_plan.md)), and
+`keepscreen`, slot 22, with drawing: while it is on, a program's children are
+tidied up after without the console being painted back over the screen, so a
+script that draws in several calls keeps its picture
+([graphics.md](graphics.md) §5).
 
 ---
 

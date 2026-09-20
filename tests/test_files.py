@@ -103,23 +103,24 @@ def glyphs():
     return table
 
 
-def text_at(fb, y):
+def text_at(fb, y, w=DISPLAY_W, h=DISPLAY_H):
     """The row of text whose glyphs start at pixel row y, one cell per
     column. A cell whose ink matches no glyph comes back as '?' -- a caret
     or the scrollbar can land inside one. Shared with tests/test_bios2.py,
-    whose screen uses the same font and cells."""
+    whose screen uses the same font and cells. w and h are the screen's,
+    for one in another mode (docs/gac/plans/phase6_console.md)."""
     table = glyphs()
 
     def ink(x, y):
-        i = (y * DISPLAY_W + x) * 4
+        i = (y * w + x) * 4
         return sum(fb[i:i + 3]) > INK_THRESHOLD
 
     out = []
-    for col in range(COLS):
+    for col in range(w // CELL):
         x = col * CELL
         rows = tuple(
             sum(1 << (GLYPH_W - 1 - c) for c in range(GLYPH_W)
-                if x + c < DISPLAY_W and y + r < DISPLAY_H and ink(x + c, y + r))
+                if x + c < w and y + r < h and ink(x + c, y + r))
             for r in range(GLYPH_H))
         out.append(table.get(rows, " " if not any(rows) else "?"))
     return "".join(out).rstrip()

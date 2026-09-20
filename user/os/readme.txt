@@ -23,6 +23,16 @@ Try, at the prompt:
   pgs /docs/hello.pgs
             a script; read it
             with more or edit
+  pgs /docs/logo.pgs
+            a script that draws;
+            Esc twice comes back
+  graphics  shapes, text and
+            images, as many to
+            a call as you
+            write. End one
+            with -wait, or the
+            console is back
+            before you see it
   explorer  the file explorer:
             click about, Esc
             comes back. What it

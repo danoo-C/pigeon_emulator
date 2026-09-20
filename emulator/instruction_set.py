@@ -15,6 +15,7 @@ by opcode and calls .handler(cpu, dst, src1, src2, imm).
 """
 
 from dataclasses import dataclass
+import random
 from typing import Callable
 
 from .memory_map import FLAG_IE, FLAG_LESS, FLAG_ZERO, VEC_DIV_ZERO
@@ -121,8 +122,11 @@ def op_add(cpu, dst, src1, src2, imm):
              ADD A, A, #1        -> A = A + 1  (increment)"""
     v = cpu.reg.values
     b = imm if src2 == NONE_REG else v[src2]
-    v[dst] = (v[src1] + b) & MASK32
 
+    # if random.randint(0, 1000) == 50 and src2 != NONE_REG: # some trolling for experimenting with a bug that subtacts 2 instead from the result of an addition
+    #     v[dst] = (v[src1] + b) & MASK32 - 2
+    # else:
+    v[dst] = (v[src1] + b) & MASK32 
 
 @instruction("SUB")
 def op_sub(cpu, dst, src1, src2, imm):

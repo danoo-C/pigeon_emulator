@@ -31,7 +31,7 @@ for (;;) {
 }
 ```
 
-- **Splitting:** at spaces, with double quotes grouping words; up to 16 words.
+- **Splitting:** at spaces, with double quotes grouping words; up to 32 words.
 - **Built-ins:** `cd` (it changes the kernel's current directory, so it can't
   be a program), `exit`, and `help`.
 - **Finding programs:** a name with no `/` is `/bin/<name>.bin`, then
@@ -197,7 +197,8 @@ same keys, not only the shell.
   back through.
 - **History is kept in memory,** so it starts empty at each boot. An empty
   line, or one repeating the last, isn't kept. A line holds up to 255
-  characters.
+  characters and 32 words — the word count was 16 until a `graphics` call,
+  which spends six words a shape, outgrew it ([graphics.md](graphics.md) §6).
 - **Keys typed while a program runs are thrown away when it ends,** so the
   Esc that closes `graph` never reaches the prompt.
 
@@ -267,3 +268,76 @@ nano, for the 32×12 screen:
 - **A line longer than the screen** moves sideways while the cursor is on
   it, with `$` in its first cell.
 - **Leaving clears the screen,** and the prompt starts at the top.
+
+---
+
+## 8. Sending output to a file: `>`, `>>` and `<`
+
+```
+2:/> ls -l /bin > listing.txt
+2:/> echo done >> listing.txt
+2:/> more < listing.txt
+```
+
+- **They are whole words**, so `echo 1>2` is one argument and `echo ">"` is a
+  greater-than sign. The shell takes them and the filename out of the words
+  it split, and hands the rest to the kernel's `exec_io`
+  ([redirect_plan.md](redirect_plan.md)).
+- **`>` writes beside the file and renames at the end**: the program writes
+  `listing.txt~`, and only when it has ended by itself does that become
+  `listing.txt`. A program that crashes, is stopped with Ctrl+C or fills the
+  disk leaves the file you had, and takes the half-written one away with it.
+  A program that merely *returns* a number has still ended, so its output is
+  kept — `ls /nope > out.txt` empties `out.txt` the way it would anywhere
+  else.
+- **`>>` adds to the end** and has no such safety: what is appended stays
+  appended. It cannot have it without copying the whole file first.
+- **`<` gives the program the file a line at a time**, with the `\n`, and 0
+  at its end — which is what a program reading the console already expects.
+- **Both at once** work: `sort < in.txt > out.txt`.
+- **`STDERR` still goes to the screen.** Only what a program writes to
+  `STDOUT` is redirected, so its complaints are not swallowed by the file.
+- **The built-ins refuse one:** `cd`, `help` and `exit` print almost nothing
+  and `cd` moves the shell itself, so `help > x` is a mistake, said as one.
+  In a script, `pgs`'s builtins *do* redirect — `echo hello > note.txt` is
+  most of why a script wants `>` ([pgs.md](pgs.md)).
+- **A file that will not open** is named, not the program: `> /nodir/out.txt`
+  says `/nodir/out.txt: not found`, since the shell has already found the
+  program.
+- **There are no pipes.** The kernel runs one program at a time
+  ([kernel_exec.md](kernel_exec.md)), so `a | b` has nowhere to put `a` while
+  `b` runs.
+
+---
+
+## 9. The screen's size: `setmode`
+
+```sh
+2:/> setmode
+192 x 108
+2:/> setmode -list
+192 x 108 (now)
+320 x 180
+640 x 360
+854 x 480
+1280 x 720
+2:/> setmode 640 360
+2:/>
+```
+
+`setmode 640 360`, or `setmode 640x360`, switches the screen at once, and says
+nothing when it works. The console fills the new screen, 106 × 40 at
+640 × 360, and **keeps its text**: a narrower screen cuts rows at its edge, and
+a shorter one sends the top rows into the scrollback (PgUp). The mode stays
+until the next `setmode`, a reboot, or the **Mode** list in the window's
+toolbar, which is taken the next time the prompt is waiting.
+
+A program can have a mode of its own too, such as a game or a
+`# graphics 640x360` script ([graphics.md](graphics.md) §4). The kernel puts
+back the mode it started with when it ends, so nothing a program does to the
+screen outlasts it. `setmode` is the exception because it asks the kernel,
+not the screen: it is the console's mode it changes ([vram.md](vram.md) §1).
+
+`edit` and anything else that lays out the whole console asks its size with
+`consize()`.
+

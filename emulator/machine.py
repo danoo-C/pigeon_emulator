@@ -9,6 +9,7 @@ lives in cli.py.
 import logging
 import struct
 import time
+from pathlib import Path
 from typing import Optional
 
 from .bios import BIOS
@@ -17,13 +18,16 @@ from .instruction_set import INSTR_SIZE
 from .devices.cd import CD
 from .devices.debug_port import DebugPort
 from .devices.display_io import DisplayIO
+from .devices.gac import GAC
 from .devices.hdd import HDD
 from .devices.hid import HID
 from .devices.timer import Timer
+from .devices.vram import VRAM
 from .io_controller import IOChannel, IOController
 from .memory_map import (
     BIOS2_MAX, CH_BIOS2, CH_CD, CH_DEBUG, CH_DISPLAY, CH_HDD, CH_HID, CH_TIMER, CH_USERPROG,
-    RAM_SIZE, REGISTER_COUNT, VEC_BREAK, VEC_TIMER,
+    CH_GAC, CH_VRAM, DISPLAY_H, DISPLAY_MODES, DISPLAY_W, RAM_SIZE, REGISTER_COUNT, VEC_BREAK,
+    VEC_TIMER, VRAM_SIZE,
 )
 from .ram import RAM
 
@@ -43,8 +47,12 @@ class Machine:
     """A wired-up pigeon computer, ready to run."""
 
     def __init__(self, bios_path="build/bios.bin", program_path=None,
-                 disk_path=None, ram_size=RAM_SIZE, cd=None, bios2_path=None):
-        self.ram = RAM(ram_size)
+                 disk_path=None, ram_size=RAM_SIZE, cd=None, bios2_path=None,
+                 vram_size=VRAM_SIZE, display_mode=(DISPLAY_W, DISPLAY_H),
+                 display_modes=DISPLAY_MODES):
+        # Video memory is mapped above RAM whatever its size; 0 is the
+        # machine from before it existed (docs/gac/phase1_aperture.md).
+        self.ram = RAM(ram_size, vram_size)
         self.cpu = CPU(self.ram, REGISTER_COUNT)
         self.io_controller = IOController(self.ram)
 
@@ -83,6 +91,24 @@ class Machine:
         # it once whether it exists, and <pigeon/debug.h> answers -1 at
         # once on a machine without it (docs/phase5_plan.md §4.1).
         self.debug = DebugPort(self.ram)
+        # Channel 9: video memory's control side -- the mode, the surfaces,
+        # what the screen shows (docs/gac/phase2_vram.md). Only with video
+        # memory; without it the channel is empty, VRAM's INFO answers
+        # 0xFFFFFFFF instead of its magic, and the screen stays 192 x 108.
+        # Channel 10: the accelerator, which draws on VRAM's surfaces, so it
+        # comes and goes with them (docs/gac/plans/phase3_gac.md, Q5).
+        self.vram: Optional[VRAM] = None
+        self.gac: Optional[GAC] = None
+        if self.ram.vram_size:
+            self.vram = VRAM(self.ram, self.display_io, display_modes, display_mode)
+            self.gac = GAC(self.ram, self.vram)
+            self.io_controller.register_channel(
+                CH_VRAM, IOChannel(self.vram.callback, name="VRAM"))
+            self.io_controller.register_channel(
+                CH_GAC, IOChannel(self.gac.callback, name="GAC"))
+        elif tuple(display_mode) != (DISPLAY_W, DISPLAY_H):
+            raise ValueError(f"a {display_mode[0]}x{display_mode[1]} screen needs video "
+                             f"memory; without it the screen is {DISPLAY_W}x{DISPLAY_H}")
         for channel_id, device, name in (
             (CH_HDD, self.hdd, "HDD"),
             (CH_HID, self.hid, "HID"),
@@ -291,7 +317,15 @@ class Machine:
             self._countdown = countdown
 
     def dump_ram_to(self, path):
-        """Write the whole address space out for debugging."""
+        """Write RAM out for debugging, and video memory beside it as
+        <name>_vram<suffix> when there is any. Returns the paths written."""
+        path = Path(path)
         with open(path, "wb") as f:
             f.write(self.ram.dump_ram())
-        return path
+        written = [path]
+        if self.ram.vram_size:
+            vram_path = path.with_name(f"{path.stem}_vram{path.suffix}")
+            with open(vram_path, "wb") as f:
+                f.write(self.ram.vram)
+            written.append(vram_path)
+        return written

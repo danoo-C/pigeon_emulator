@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _runner import run_module                                     # noqa: E402
+from emulator.devices.keycodes import KEY_PGUP                      # noqa: E402
 from emulator.machine import Machine                               # noqa: E402
 from emulator.memory_map import PROGRAM_LOAD_ADDR                  # noqa: E402
 from test_libs import run                                          # noqa: E402
@@ -224,11 +225,12 @@ def test_a_number_keeps_four_decimal_places():
 
 # --- on the machine ---------------------------------------------------------
 
-def boot_and_render(setup, budget=12_000_000):
+def boot_and_render(setup, budget=12_000_000, mode=None):
     """Boot graph.bin through the real BIOS, let it draw, then act."""
     assert GRAPH_BIN.exists(), "build/graph.bin is missing; run start_emulator.py graph"
     machine = Machine(bios_path=str(REPO_ROOT / "build" / "bios.bin"),
-                      program_path=str(GRAPH_BIN))
+                      program_path=str(GRAPH_BIN),
+                      **({} if mode is None else {"display_mode": mode}))
     shots = []
     try:
         with contextlib.redirect_stdout(io.StringIO()):
@@ -259,14 +261,34 @@ def test_it_draws_the_default_curve():
 
 
 def test_zooming_redraws_the_curve_differently():
+    # Page Up zooms in (graph.c's on_key), as the wheel does. This pressed
+    # KEY_UP, which graph does nothing with, and passed only because the
+    # first snapshot caught a frame still being drawn in software; with
+    # the accelerator the frame is finished by then, and the two matched.
     def zoom_in(hid):
         for _ in range(6):
-            hid.push_key(0x82, True)            # KEY_UP
-            hid.push_key(0x82, False)
+            hid.push_key(KEY_PGUP, True)
+            hid.push_key(KEY_PGUP, False)
 
     before, after = boot_and_render(zoom_in)
     assert curve_pixels(after) > 100, "the curve vanished when zoomed"
     assert before != after, "the screen did not change when zoomed"
+
+
+
+def test_a_curve_off_the_top_draws_nothing_on_a_bigger_screen():
+    """DISP_H became a variable in phase 5, and an unsigned one: graph's
+    PLOT_BOT went unsigned with it, a row above the plot compared as a huge
+    number, and every column where the curve left the top was drawn as a
+    line the plot's whole height. disp_h is an int again, as the literal it
+    replaced was (docs/gac/plans/phase6_console.md, As built)."""
+    before, _ = boot_and_render(lambda hid: None, mode=(640, 360))
+    w, plot_top, plot_bottom = 640, 14, 340
+    worst = max(sum(1 for y in range(plot_top, plot_bottom)
+                    if before[(y * w + x) * 4:(y * w + x) * 4 + 3] == CURVE_RGB)
+                for x in range(w))
+    assert curve_pixels(before) > 600, "the plot area is empty"
+    assert worst < 60, f"a column of {worst} curve pixels: the curve drew a wall"
 
 
 if __name__ == "__main__":

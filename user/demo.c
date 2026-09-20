@@ -37,13 +37,16 @@
 #define STATUS_Y    (DISP_H - GLYPH_H - 1)
 #define CANVAS_H    (STATUS_Y - 3 - CANVAS_Y)
 #define TEXT_MAX    ((DISP_W - 10) / (GLYPH_W + 1))
+/* Arrays are sized for the widest screen there is, DISPLAY_MAX_W: COLS is
+ * the screen's own, worked out at run time now, and cannot size one. */
+#define MAX_TEXT    ((DISPLAY_MAX_W - 10) / (GLYPH_W + 1))
 
 #define ACCENT  0xFF30C0FF
 #define DIM     0xFF505868
 #define PANEL   0xFF181C24
 
 /* --- state -------------------------------------------------------------- */
-char text[TEXT_MAX + 1];
+char text[MAX_TEXT + 1];
 int  text_len;
 int  selected;
 int  stamped;                   /* which shape the canvas is showing */
@@ -220,6 +223,7 @@ int main(void) {
     unsigned last_my = 9999;
     int frame = 0;
 
+    disp_init();  /* the screen, as the machine has it (display.h) */
     disp_use_back_buffer();     /* whole frames only; see render() */
 
     text_len = 0;

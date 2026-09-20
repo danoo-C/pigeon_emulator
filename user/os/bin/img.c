@@ -11,6 +11,7 @@
  * again once img ends.
  */
 #include <pigeon/bmp.h>
+#include <pigeon/display.h>
 #include <pigeon/input.h>
 #include <pigeon/mem.h>
 #include <pigeon/string.h>
@@ -32,7 +33,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    pixels = bmp_load(path, DISPLAY_W, DISPLAY_H, mode);
+    disp_init();                /* the screen, as the machine has it (display.h) */
+    pixels = bmp_load(path, DISP_W, DISP_H, mode);
     if (pixels == NULL) {
         print("img: ");
         print(path);
@@ -41,7 +43,7 @@ int main(int argc, char **argv) {
         print("\n");
         return 1;
     }
-    memcpy((void *)DISPLAY_START, pixels, DISPLAY_W * DISPLAY_H * 4u);
+    disp_blit(pixels, 0, 0, DISP_W, DISP_H);
     free(pixels);
 
     for (;;) {

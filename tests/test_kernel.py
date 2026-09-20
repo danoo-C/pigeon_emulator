@@ -36,7 +36,7 @@ from emulator.devices.keycodes import (                                 # noqa: 
     KEY_PGUP, KEY_RIGHT, KEY_TAB, KEY_UP)
 from emulator.machine import Machine                                    # noqa: E402
 from emulator.memory_map import (                                       # noqa: E402
-    BOOT_CHANNEL, CH_CD, CH_DEBUG, CH_DISPLAY, CH_HDD, CH_TIMER, CH_USERPROG, DISPLAY_H, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
+    BOOT_CHANNEL, CH_CD, CH_DEBUG, CH_DISPLAY, CH_GAC, CH_HDD, CH_TIMER, CH_USERPROG, DISPLAY_H, DISPLAY_START, DISPLAY_W, PROGRAM_LOAD_ADDR,
     BOOT_LOAD_ADDR, BOOT_RECORD, BOOT_SIGNATURE, VEC_BREAK)
 from emulator.programs import Program                                   # noqa: E402
 from pfs import PgfsImage                                               # noqa: E402
@@ -313,14 +313,21 @@ def make_disk(path, extra=(), shell=True, label="TEST"):
 
 # --- driving it -------------------------------------------------------------------
 
+class Rows(list):
+    """A screen's rows, knowing how wide the console was: 32 columns at the
+    power-on screen, more in a bigger mode (docs/gac/plans/phase6_console.md)."""
+    cols = COLS
+
+
 def lines(rows):
-    """The console's lines, with those it wrapped at COLS joined up again.
-    A line of exactly COLS characters looks like a wrapped one; the tests
-    print none."""
+    """The console's lines, with those it wrapped at its width joined up
+    again. A line of exactly that many characters looks like a wrapped one;
+    the tests print none."""
+    cols = getattr(rows, "cols", COLS)
     out, current = [], ""
     for row in rows:
         current += row
-        if len(row) < COLS:
+        if len(row) < cols:
             out.append(current)
             current = ""
     if current:
@@ -337,8 +344,10 @@ def last_row(rows):
 class Console:
     """The kernel on a Machine, its disk on channel 2: keys in, rows out."""
 
-    def __init__(self, disk, boot_channel=None, disc=None):
-        self.machine = Machine(bios_path=str(BIOS), disk_path=str(disk))
+    def __init__(self, disk, boot_channel=None, disc=None, display_mode=None, **machine):
+        if display_mode is not None:
+            machine["display_mode"] = display_mode
+        self.machine = Machine(bios_path=str(BIOS), disk_path=str(disk), **machine)
         if disc is not None:
             self.machine.cd.root = None
             self.machine.cd.insert(disc)
@@ -359,8 +368,23 @@ class Console:
         self.machine.close()
 
     def rows(self):
-        fb = self.machine.display_io.snapshot()
-        return [text_at(fb, r * ROW_H) for r in range(ROWS)]
+        """The console's rows, at whatever size the screen is now
+        (docs/gac/plans/phase6_console.md)."""
+        display = self.machine.display_io
+        fb = display.snapshot()
+        w, h = display.width, display.height
+        rows = Rows()
+        rows.cols = w // 6
+        for r in range(h // ROW_H):
+            band = fb[r * ROW_H * w * 4:(r + 1) * ROW_H * w * 4]
+            # A band with no red, green or blue in it anywhere is a blank row:
+            # what text_at would say, without reading it a cell at a time --
+            # which at 1280 x 720 is most of a second a look.
+            if not (any(band[0::4]) or any(band[1::4]) or any(band[2::4])):
+                rows.append("")
+            else:
+                rows.append(text_at(fb, r * ROW_H, w, h))
+        return rows
 
     def run_until(self, wanted, seconds=90):
         give_up = time.time() + seconds
@@ -1112,6 +1136,68 @@ def test_break_is_on_for_a_child_and_off_again_for_its_parent():
         assert "spin: stopped" in lines(c.rows()), c.rows()
 
 
+# --- keepscreen: docs/graphics_plan.md 4.3 ---------------------------------------
+
+def with_keeper(*extra):
+    return [("/bin/keeper.bin", standin("keeper")),
+            ("/bin/crasher.bin", standin("crasher"))] + list(extra)
+
+
+def test_the_console_is_not_redrawn_after_a_child_while_the_screen_is_kept():
+    """The whole point: a script drawing in several calls would otherwise have
+    its picture wiped between one and the next."""
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        assert c.command("keeper 1") == ["kept 0"], c.rows()
+
+
+def test_without_it_the_console_lands_on_top_of_the_picture():
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        assert c.command("keeper 0") == ["wiped 0"], c.rows()
+
+
+def test_the_programs_it_runs_inherit_it():
+    """The deeper keeper asks for nothing -- keepscreen(0) -- and still keeps
+    its picture, because the program that ran it owns the screen. It says so
+    too: what it was, for a program that wants to put it back."""
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        assert c.command("keeper 1 deep") == ["kept 1", "kept 0"], c.rows()
+
+
+def test_the_console_comes_back_when_the_program_that_kept_it_ends():
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        c.command("keeper 1")
+        fb = c.machine.display_io.snapshot()
+        assert rgb_at(fb, DISPLAY_W - 1, DISPLAY_H - 2) != (255, 0, 255), \
+            "the pixel outlived the program that drew it"
+
+
+def test_a_program_that_faults_does_not_leave_the_console_invisible():
+    """keepscreen is cleared however the program ends, so the next one is
+    tidied up after as usual: the following keeper asks for nothing and its
+    pixel is wiped."""
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        assert c.command("crasher") == ["crasher: divided by zero"], c.rows()
+        assert c.command("keeper 0") == ["wiped 0"], c.rows()
+
+
+def test_turning_it_off_deeper_down_leaves_its_owner_holding_it():
+    """keepscreen(0) ends it only for the program that turned it on, as
+    paging does: the child asks for it off and the screen is still kept."""
+    with booted(extra=with_keeper()) as c:
+        assert c.ready(), c.rows()
+        assert c.command("keeper 1 deep")[0] == "kept 1", c.rows()
+
+
+def rgb_at(fb, x, y):
+    i = (y * DISPLAY_W + x) * 4
+    return (fb[i + 2], fb[i + 1], fb[i])
+
+
 # --- paging and more: docs/phase4b_plan.md step 6 ---------------------------------
 
 def inverse_cell(fb, row, col):
@@ -1563,6 +1649,49 @@ def test_an_exec_costs_its_two_lines_and_no_more():
 
 # --- exec_out: a program's output into a buffer (docs/pgs_plan.md 4.5) ------------
 
+# A program that says what arguments it was given: "[args][a][b]".
+STANDINS["keeper"] = r"""#include <pigeon/display.h>
+#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+
+/* keeper ON [DEEP]: keepscreen as ON says, a pixel in a corner the console
+ * has no text in, a child run, and then whether the pixel is still there --
+ * which is to say whether the console was painted back over it. DEEP makes
+ * the child another keeper, so a program that inherits the screen is a
+ * program that ran one. */
+int main(int argc, char **argv) {
+    char *child[2];
+    int was;
+
+    was = keepscreen(argv[1][0] == '1');
+    disp_set(DISP_W - 1u, DISP_H - 2u, 0xFFFF00FF);
+    child[0] = "keeper";
+    child[1] = "0";
+    if (argc > 2) exec("/bin/keeper.bin", 2, child);
+    else exec("/bin/echo.bin", 1, child);
+    printf("%s %d\n",
+           disp_get(DISP_W - 1u, DISP_H - 2u) == 0xFFFF00FF ? "kept" : "wiped", was);
+    return 0;
+}
+"""
+
+STANDINS["crasher"] = r"""#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    int zero = argc - 1;
+    keepscreen(1);
+    return 1 / zero;            /* it ends holding the screen */
+}
+"""
+
+STANDINS["args"] = r"""#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    int i;
+    for (i = 0; i < argc; i++) { print("["); print(argv[i]); print("]"); }
+    print("\n");
+    return 0;
+}
+"""
+
 STANDINS["talker"] = r"""#include <pigeon/sys.h>
 int main(int argc, char **argv) { print("hello from talker\n"); return 0; }
 """
@@ -1714,6 +1843,238 @@ def test_a_program_that_cannot_start_is_reported_as_exec_reports_it():
         said = serial(c)
     assert "[kernel] exec /bin/nope.bin: no such file or directory" in said, said
 
+
+
+# --- exec_to and exec_from: a program's output into a file, and its input
+#     out of one (docs/redirect_plan.md) --------------------------------------------
+
+# into FILE [append] -- runs `talker` with its output going to FILE.
+STANDINS["into"] = r"""#include <pigeon/stdio.h>
+#include <pigeon/string.h>
+#include <pigeon/sys.h>
+char path[264];
+int main(int argc, char **argv) {
+    char *child[3];
+    int status;
+    unsigned how = R_TRUNC;
+    if (argc < 3) { print("usage: into FILE PROGRAM [ARGS]\n"); return 1; }
+    if (argc > 4) how = R_APPEND;
+    if (strchr(argv[2], '/') == (char *)0) {
+        strlcpy(path, "/bin/", sizeof(path));
+        strlcat(path, argv[2], sizeof(path));
+        strlcat(path, ".bin", sizeof(path));
+    } else {
+        strlcpy(path, argv[2], sizeof(path));
+    }
+    child[0] = argv[2];
+    child[1] = (argc > 3) ? argv[3] : (char *)0;
+    child[2] = (char *)0;
+    status = exec_to(path, (argc > 3) ? 2 : 1, child, argv[1], how);
+    printf("to %s: %d\n", argv[1], status);
+    return 0;
+}
+"""
+
+# outof FILE -- runs `eater` with its input coming from FILE.
+STANDINS["outof"] = r"""#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    char *child[2];
+    int status;
+    if (argc < 2) { print("usage: outof FILE\n"); return 1; }
+    child[0] = "eater";
+    child[1] = (char *)0;
+    status = exec_from("/bin/eater.bin", 1, child, argv[1]);
+    printf("from: %d\n", status);
+    return 0;
+}
+"""
+
+# Reads lines until there are none and says how many, with the first one.
+STANDINS["eater"] = r"""#include <pigeon/stdio.h>
+#include <pigeon/string.h>
+#include <pigeon/sys.h>
+char line[128];
+char first[128];
+int main(int argc, char **argv) {
+    int n;
+    int count = 0;
+    first[0] = 0;
+    while (1) {
+        n = read(STDIN, line, sizeof(line));
+        if (n <= 0) break;
+        line[n] = 0;
+        if (count == 0) {
+            strlcpy(first, line, sizeof(first));
+            n = (int)strlen(first);
+            while (n > 0 && first[n - 1] == 10) { n--; first[n] = 0; }
+        }
+        count++;
+    }
+    printf("ate %d [%s]\n", count, first);
+    return 0;
+}
+"""
+
+# Writes some of a line and then faults, to show > keeping the old file.
+STANDINS["halfway"] = r"""#include <pigeon/sys.h>
+int zero;
+int main(int argc, char **argv) {
+    print("half a line");
+    return 10 / zero;
+}
+"""
+
+
+@contextlib.contextmanager
+def redirecting(*names, files=()):
+    """A kernel on a disk with the standins named and `files` already on it,
+    keeping the image's path so a test can read what was written."""
+    extra = [(f"/bin/{name}.bin", standin(name)) for name in names] + list(files)
+    with tempfile.TemporaryDirectory() as t:
+        path = Path(t) / "hdd.img"
+        console = Console(make_disk(path, extra))
+        console.disk = path
+        try:
+            yield console
+        finally:
+            console.close()
+
+
+def on_disk(c, path):
+    """What the disk holds at `path`, the machine stopped first; None for
+    nothing."""
+    c.close()
+    with PgfsImage(c.disk) as img:
+        return img.read_file(path) if img.exists(path) else None
+
+
+def test_exec_to_writes_the_output_into_the_file():
+    with redirecting("into", "talker") as c:
+        assert c.ready(), c.rows()
+        text = ran(c, "into /out.txt talker")
+        assert "to /out.txt: 0" in text, c.rows()
+        assert "hello from talker" not in text, "it was printed as well as written"
+        assert on_disk(c, "/out.txt") == b"hello from talker\n"
+
+
+def test_exec_to_appends_when_it_is_asked_to():
+    with redirecting("into", "talker") as c:
+        assert c.ready(), c.rows()
+        ran(c, "into /out.txt talker")
+        ran(c, "into /out.txt talker x y")           # a fourth argument: append
+        assert on_disk(c, "/out.txt") == b"hello from talker\nhello from talker\n"
+
+
+def test_a_grandchilds_output_goes_to_the_file_too():
+    with redirecting("into", "relay", "talker") as c:
+        assert c.ready(), c.rows()
+        ran(c, "into /out.txt relay")
+        assert on_disk(c, "/out.txt") == b"relay says hi\nhello from talker\n"
+
+
+def test_a_program_that_faults_leaves_the_file_it_had():
+    """> writes beside the file and renames at the end, so a program that
+    never finished takes its half-written file away with it."""
+    with redirecting("into", "halfway", files=[("/out.txt", b"what was there\n")]) as c:
+        assert c.ready(), c.rows()
+        assert "to /out.txt: -100" in ran(c, "into /out.txt halfway"), c.rows()
+        c.close()
+        with PgfsImage(c.disk) as img:
+            assert img.read_file("/out.txt") == b"what was there\n", "the old file was lost"
+            assert not img.exists("/out.txt~"), "the half-written file was left behind"
+
+
+def test_the_file_is_only_put_in_place_when_the_program_ends_by_itself():
+    """A program that returns a number is still a program that ended: its
+    output is kept. Only a crash or a Ctrl+C throws it away."""
+    with redirecting("into", "exiter", files=[("/out.txt", b"old\n")]) as c:
+        assert c.ready(), c.rows()
+        assert "to /out.txt: 3" in ran(c, "into /out.txt exiter"), c.rows()
+        assert on_disk(c, "/out.txt") == b"leaving\n"
+
+
+def test_exec_from_feeds_a_program_its_lines():
+    with redirecting("outof", "eater", files=[("/in.txt", b"one\ntwo\nthree\n")]) as c:
+        assert c.ready(), c.rows()
+        text = ran(c, "outof /in.txt")
+        assert "ate 3 [one]" in text, c.rows()
+        assert "from: 0" in text, c.rows()
+
+
+def test_exec_from_a_file_that_is_not_there():
+    with redirecting("outof", "eater") as c:
+        assert c.ready(), c.rows()
+        assert "from: -1" in ran(c, "outof /nope.txt"), c.rows()
+
+
+def test_a_file_that_will_not_open_stops_the_program_starting():
+    with redirecting("into", "talker") as c:
+        assert c.ready(), c.rows()
+        text = ran(c, "into /nodir/out.txt talker")
+        assert "to /nodir/out.txt: -1" in text, c.rows()
+        assert "hello from talker" not in text, "it ran anyway"
+
+
+# --- the shell's > >> and < (docs/redirect_plan.md 3.2) -----------------------------
+
+def test_the_shell_writes_a_programs_output_into_a_file():
+    with redirecting("talker") as c:
+        assert c.ready(), c.rows()
+        assert c.command("talker > /out.txt") == [], c.rows()
+        assert on_disk(c, "/out.txt") == b"hello from talker\n"
+
+
+def test_the_shell_appends():
+    with redirecting("talker") as c:
+        assert c.ready(), c.rows()
+        c.command("talker > /out.txt")
+        c.command("talker >> /out.txt")
+        assert on_disk(c, "/out.txt") == b"hello from talker\nhello from talker\n"
+
+
+def test_the_shell_feeds_a_program_a_file():
+    with redirecting("eater", files=[("/in.txt", b"one\ntwo\n")]) as c:
+        assert c.ready(), c.rows()
+        assert c.command("eater < /in.txt") == ["ate 2 [one]"], c.rows()
+
+
+def test_the_shell_does_both_ends_at_once():
+    with redirecting("eater", files=[("/in.txt", b"one\ntwo\nthree\n")]) as c:
+        assert c.ready(), c.rows()
+        assert c.command("eater < /in.txt > /out.txt") == [], c.rows()
+        assert on_disk(c, "/out.txt") == b"ate 3 [one]\n"
+
+
+def test_a_redirection_is_a_whole_word_or_it_is_an_argument():
+    with redirecting("args") as c:
+        assert c.ready(), c.rows()
+        assert c.command("args 1>2") == ["[args][1>2]"], c.rows()
+        assert c.command('args ">"') == ["[args][>]"], c.rows()
+
+
+@cases(("no file after >", "talker >", ">: no file"),
+       ("no file after <", "talker <", "<: no file"),
+       ("only a redirection", "> /out.txt", "nothing to run"))
+def test_a_redirection_that_does_not_add_up(label, line, message):
+    with redirecting("talker") as c:
+        assert c.ready(), c.rows()
+        assert c.command(line) == [message], c.rows()
+
+
+def test_the_built_ins_refuse_a_redirection():
+    with redirecting("talker") as c:
+        assert c.ready(), c.rows()
+        assert c.command("help > /out.txt") == ["help: no > or < here"], c.rows()
+        assert c.command("cd /docs > /out.txt") == ["cd: no > or < here"], c.rows()
+
+
+def test_a_file_that_cannot_be_written_is_said_and_nothing_runs():
+    with redirecting("talker") as c:
+        assert c.ready(), c.rows()
+        out = c.command("talker > /nodir/out.txt")
+        assert out == ["/nodir/out.txt: not found"], c.rows()
+        assert "hello from talker" not in "".join(c.rows()), "it ran anyway"
 
 # --- boot.conf, the splash and the startup program: docs/phase6_plan.md -----------
 
@@ -2051,6 +2412,519 @@ def test_the_splash_loads_and_draws_in_a_few_million_instructions_and_waits_chea
     per_look = (looks[-1] - looks[0]) / (len(looks) - 1)
     assert to_draw < 4_400_000, f"{to_draw:,} instructions to load and draw"
     assert per_look < 9_000, f"{per_look:,.0f} instructions a look"
+
+
+
+# --- what a program leaves on the display devices (docs/gac/plans/phase5_display_lib.md §3) ---
+
+# Grabs everything a program can on the display devices -- a bigger mode, a
+# back buffer in video memory flipped onto the screen, a spare surface, a
+# rectangle of its heap registered with the accelerator -- then ends by
+# exit, a fault or Ctrl+C, as its argument says.
+STANDINS["grab"] = r"""#include <pigeon/display.h>
+#include <pigeon/gac.h>
+#include <pigeon/mem.h>
+#include <pigeon/sys.h>
+#include <pigeon/vram.h>
+int zero;
+int main(int argc, char **argv) {
+    unsigned offset;
+    unsigned *heap;
+    disp_init();
+    if (!disp_setmode(640u, 360u)) { print("no mode\n"); return 1; }
+    if (!disp_use_back_buffer()) { print("no buffer\n"); return 2; }
+    disp_clear(RED);
+    disp_present();
+    if (vram_alloc(32u, 32u, &offset) == 0u) { print("no surface\n"); return 3; }
+    heap = (unsigned *)malloc(64u);
+    if (gac_ram_surface((unsigned)heap, 4u, 4u) == 0u) { print("no ram surface\n"); return 4; }
+    print("grabbed\n");
+    if (argc > 1 && argv[1][0] == 'f') return 10 / zero;
+    if (argc > 1 && argv[1][0] == 's') { while (1) { } }
+    return 0;
+}
+"""
+
+# Holds a surface of its own, runs grab, and checks its surface outlived
+# grab's end: the kernel frees a depth and deeper, not what is above it.
+STANDINS["holder"] = r"""#include <pigeon/sys.h>
+#include <pigeon/vram.h>
+int main(void) {
+    unsigned offset;
+    unsigned mine;
+    char *argv[2];
+    mine = vram_alloc(16u, 16u, &offset);
+    if (mine == 0u) { print("no surface\n"); return 1; }
+    argv[0] = "grab";
+    argv[1] = 0;
+    exec("/bin/grab.bin", 1, argv);
+    print(vram_free(mine) ? "mine kept\n" : "mine lost\n");
+    return 0;
+}
+"""
+
+
+def assert_nothing_left(machine, label):
+    """What the kernel had before the program, and nothing else."""
+    vram, gac, display = machine.vram, machine.gac, machine.display_io
+    assert set(vram.surfaces) == {0}, f"{label}: surfaces left: {sorted(vram.surfaces)}"
+    assert all(s[3] == 0 for s in gac.ram_surfaces.values()), \
+        f"{label}: a program's RAM surface was left: {gac.ram_surfaces}"
+    assert vram.mode == (DISPLAY_W, DISPLAY_H), f"{label}: the mode stayed {vram.mode}"
+    assert display.scanout_vram is None and display.scanout_base == DISPLAY_START, \
+        f"{label}: the screen shows {display.scanout_base:#x} / {display.scanout_vram}"
+    # The shell runs at depth 1 and the program at 2: what is allocated
+    # next belongs to the shell again.
+    assert vram.owner == 1, f"{label}: the owner is {vram.owner}, not the shell's"
+
+
+@cases(("exit", "grab", ["grabbed"]), ("a fault", "grab f", ["grabbed", "grab: divided by zero"]))
+def test_what_a_program_leaves_on_the_display_is_freed_however_it_ends(label, line, said):
+    with booted(extra=[("/bin/grab.bin", standin("grab"))]) as c:
+        assert c.ready(), c.rows()
+        assert c.command(line) == said, label
+        assert_nothing_left(c.machine, label)
+        assert c.rows()[0] == "PigeonOS", "the console was not drawn back"
+
+
+def test_what_a_program_leaves_on_the_display_is_freed_after_ctrl_c():
+    with booted(extra=[("/bin/grab.bin", standin("grab"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("grab s\n")
+        assert c.run_until(lambda rows: c.machine.vram.mode == (640, 360)
+                           and len(c.machine.vram.surfaces) == 3), "it never grabbed"
+        c.press(KEY_LCTRL, ord("c"))
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+        assert_nothing_left(c.machine, "Ctrl+C")
+
+
+def test_a_programs_surfaces_outlive_a_program_it_ran():
+    with booted(extra=[("/bin/grab.bin", standin("grab")),
+                       ("/bin/holder.bin", standin("holder"))]) as c:
+        assert c.ready(), c.rows()
+        assert c.command("holder")[-1] == "mine kept"
+        assert_nothing_left(c.machine, "holder")
+
+
+
+STANDINS["bigreboot"] = r"""#include <pigeon/display.h>
+#include <pigeon/sys.h>
+int main(void) {
+    char *argv[2];
+    disp_setmode(640u, 360u);
+    argv[0] = "reboot";
+    argv[1] = 0;
+    return exec("/bin/reboot.bin", 1, argv);
+}
+"""
+
+
+def test_a_reboot_puts_the_power_on_screen_back():
+    """reboot.bin jumps to the BIOS, which knows nothing of modes and draws
+    at DISPLAY_START: the screen must be that again, not a big mode showing
+    video memory nobody draws on (docs/gac/plans/phase5_display_lib.md §1)."""
+    with booted(extra=[("/bin/bigreboot.bin", standin("bigreboot")),
+                       ("/bin/reboot.bin", shell_program("reboot"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("bigreboot\n")
+        assert c.run_until(lambda rows: c.machine.cpu.pc < PROGRAM_LOAD_ADDR), "never rebooted"
+        vram, display = c.machine.vram, c.machine.display_io
+        assert vram.mode == (DISPLAY_W, DISPLAY_H), vram.mode
+        assert display.scanout_vram is None and display.scanout_base == DISPLAY_START
+        assert set(vram.surfaces) == {0} and not c.machine.gac.ram_surfaces
+
+
+
+# --- the console at any size (docs/gac/plans/phase6_console.md) ----------------------
+
+STANDINS["lines"] = r"""#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+int main(int argc, char **argv) {
+    int i;
+    int n = argc > 1 ? atoi(argv[1]) : 60;
+    for (i = 1; i <= n; i++) printf("line %d\n", i);
+    return 0;
+}
+"""
+
+STANDINS["consize"] = r"""#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+int main(void) {
+    unsigned cols;
+    unsigned rows;
+    consize(&cols, &rows);
+    printf("%ux%u\n", cols, rows);
+    return 0;
+}
+"""
+
+# Past column 32, so only a console wider than the power-on one shows it:
+# "red" in red, then "inv" inverse.
+STANDINS["colours"] = r"""#include <pigeon/sys.h>
+int main(void) {
+    print("                                        \x1b[31mred\x1b[0m \x1b[7minv\x1b[0m\n");
+    return 0;
+}
+"""
+
+STANDINS["reader"] = r"""#include <pigeon/sys.h>
+int main(void) {
+    char line[64];
+    print("reading\n");
+    read(STDIN, line, 64u);
+    return 0;
+}
+"""
+
+
+def colours_at(machine, row, col):
+    """A cell's colours, as (r, g, b), on a screen of any size."""
+    display = machine.display_io
+    fb, w = display.snapshot(), display.width
+    found = set()
+    for dy in range(ROW_H):
+        for dx in range(6):
+            i = ((row * ROW_H + dy) * w + col * 6 + dx) * 4
+            found.add((fb[i + 2], fb[i + 1], fb[i]))
+    return found
+
+
+def ask_for(machine, w, h):
+    """What the window's picker does: POST /preferred, through its function."""
+    from emulator.devices.display_io import preferred_reply
+    assert preferred_reply(machine.display_io, {"w": w, "h": h})[0] == 200
+
+
+def settled_at(c, w, seconds=90):
+    """The console at a screen w wide, with the prompt on its last row of
+    text. The row itself, not lines(): after a narrowing, a row cut at the
+    edge is exactly as wide as the console and looks wrapped."""
+    def last(rows):
+        shown = [row for row in rows if row.strip()]
+        return shown[-1] if shown else ""
+    # The same screen on two looks in a row, as test_bios2.py's run_until
+    # asks: one look can land in the middle of the redraw after a switch.
+    looked = []
+
+    def settled(rows):
+        steady = bool(looked) and looked[-1] == rows
+        looked.append(rows)
+        return steady and c.machine.display_io.width == w and PROMPT.match(last(rows))
+    return c.run_until(settled, seconds)
+
+
+def test_the_console_fills_a_bigger_screen():
+    with booted(display_mode=(640, 360),
+                extra=[("/bin/consize.bin", standin("consize"))]) as c:
+        assert c.ready(), c.rows()
+        assert len(c.rows()) == 40
+        assert c.command("consize") == ["106x40"]
+        wide = "x" * 80                                 # 32 columns would wrap it
+        assert c.command("echo " + wide) == [wide]
+
+
+def test_consize_is_the_power_on_console_at_the_power_on_screen():
+    with booted(extra=[("/bin/consize.bin", standin("consize"))]) as c:
+        assert c.ready(), c.rows()
+        assert c.command("consize") == ["32x12"]
+
+
+def test_a_big_console_scrolls_and_keeps_what_scrolled_off():
+    """Scrolling moves only the visible part of each row: the rows past the
+    old width are blank and must stay so, which the scrollback shows."""
+    with booted(display_mode=(640, 360), extra=[("/bin/lines.bin", standin("lines"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("lines 60\n")                    # scrolls its own command off the top
+        assert c.run_until(lambda rows: "line 60" in rows and PROMPT.match(last_row(rows))), c.rows()
+        shown = lambda: {int(r[5:]) for r in c.rows() if r.startswith("line ")}
+        before = shown()
+        c.press(KEY_PGUP)
+        assert c.run_until(lambda rows: shown() and min(shown()) < min(before)), c.rows()
+        assert 1 in shown(), "Page Up did not reach the first line"
+        c.press(KEY_PGDN)
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+
+
+def test_a_big_console_draws_colours_and_inverse_past_column_32():
+    with booted(display_mode=(640, 360), extra=[("/bin/colours.bin", standin("colours"))]) as c:
+        assert c.ready(), c.rows()
+        c.command("colours")
+        # The inverse cells read as '?': their ink is the background.
+        row = next(r for r, text in enumerate(c.rows()) if text.strip().startswith("red "))
+        assert any(r > 150 and g < 100 for r, g, b in colours_at(c.machine, row, 40)), "not red"
+        # A cell's top-left pixel is outside every glyph: the background for
+        # "r", the ink's fill for the inverse "i".
+        fb, w = c.machine.display_io.snapshot(), c.machine.display_io.width
+        corner = lambda col: tuple(fb[((row * ROW_H) * w + col * 6) * 4 + k] for k in (2, 1, 0))
+        assert corner(40) == (0, 0, 0)
+        assert corner(44) != (0, 0, 0), "the inverse cell has no fill"
+
+
+def test_a_mode_asked_for_is_taken_at_the_prompt_and_the_text_survives():
+    with booted() as c:
+        assert c.ready(), c.rows()
+        c.command("echo before")
+        ask_for(c.machine, 640, 360)
+        assert settled_at(c, 640), c.rows()
+        rows = c.rows()
+        assert len(rows) == 40 and "before" in rows, rows
+        wide = "y" * 70
+        assert c.command("echo " + wide) == [wide]
+        ask_for(c.machine, 192, 108)
+        assert settled_at(c, 192), c.rows()
+        rows = c.rows()
+        assert len(rows) == 12 and "before" in rows, rows
+        assert "y" * 32 in rows and all(len(row) <= 32 for row in rows), "text past the edge"
+        display = c.machine.display_io
+        assert display.scanout_vram is None and display.scanout_base == DISPLAY_START,             "192 x 108 is not shown out of RAM, as at power-on"
+
+
+def test_fewer_rows_send_the_top_ones_to_the_scrollback():
+    with booted(display_mode=(640, 360), extra=[("/bin/lines.bin", standin("lines"))]) as c:
+        assert c.ready(), c.rows()
+        c.command("lines 30")
+        ask_for(c.machine, 192, 108)
+        assert settled_at(c, 192), c.rows()
+        assert "line 30" in c.rows(), c.rows()
+        c.press(KEY_PGUP)
+        assert c.run_until(lambda rows: "line 20" in rows), c.rows()
+
+
+def test_a_mode_is_not_taken_while_a_program_reads_a_line():
+    """Only at the shell's own prompt: a program reading a line -- a # graphics
+    script's read, say -- must not have the screen change under it."""
+    with booted(extra=[("/bin/reader.bin", standin("reader"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("reader\n")
+        assert c.run_until(lambda rows: "reading" in rows), c.rows()
+        ask_for(c.machine, 640, 360)
+        c.run_until(lambda rows: False, seconds=2)
+        assert c.machine.display_io.width == 192, "switched under a running program"
+        c.type("x\n")
+        assert settled_at(c, 640), c.rows()
+
+
+def test_edit_uses_the_whole_of_a_big_console():
+    with booted(display_mode=(640, 360), extra=[("/bin/edit.bin", shell_program("edit"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("edit /docs/new.txt\n")
+        # The keys on the console's last row, not on row 11: ^O and ^X are
+        # inverse, and read as '?'.
+        assert c.run_until(lambda rows: "Save" in rows[39] and "Exit" in rows[39]), c.rows()
+        c.press(KEY_LCTRL, ord("x"))
+        assert c.run_until(lambda rows: PROMPT.match(last_row(rows))), c.rows()
+
+
+def test_a_full_720p_console_redraws_in_a_few_hundred_commands():
+    """A row at a time, a command a run of one look: a full 213 x 80 screen
+    was 17,040 commands a cell at a time (docs/gac/plans/phase6_console.md
+    §2.3). Counted from con_redraw's first instruction to its return, after a
+    program ends and the kernel draws the console back."""
+    entry = kernel_symbols()["con_redraw"]
+    with booted(display_mode=(1280, 720), extra=[("/bin/lines.bin", standin("lines"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("lines 90\n")
+        assert c.run_until(lambda rows: "line 90" in rows and PROMPT.match(last_row(rows))), \
+            "never finished"
+        cpu = c.machine.cpu
+        calls = []
+        real = c.machine.gac.callback
+
+        def counted(*args):
+            calls.append(args[1])
+            return real(*args)
+
+        c.machine.io_controller.channels[CH_GAC].callback = counted
+        c.type("echo x\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            for _ in range(20_000_000):
+                if cpu.pc == entry:
+                    break
+                c.machine.step()
+            assert cpu.pc == entry, "the console was never drawn back"
+            calls.clear()
+            sp, steps = cpu.sp, 0
+            start = time.perf_counter()
+            while cpu.sp <= sp and steps < 50_000_000:
+                c.machine.step()
+                steps += 1
+            took = time.perf_counter() - start
+        assert len(calls) < 400, f"{len(calls)} commands for one redraw"
+        assert steps < 500_000, f"{steps:,} instructions for one redraw"
+        print(f"720p con_redraw: {steps:,} instructions, {len(calls)} commands, "
+              f"{took * 1000:.0f} ms stepped")
+
+
+
+# --- setmode, and scripts that pick a mode (docs/gac/plans/phase7_setmode.md) ----------
+
+# Switches to 640 x 360, runs a child -- one that ends, or one that crashes
+# -- and says what the screen is afterwards: its own mode, if the kernel put
+# back the one the child started in and not the kernel's.
+STANDINS["parentmode"] = r"""#include <pigeon/display.h>
+#include <pigeon/stdio.h>
+#include <pigeon/sys.h>
+#include <pigeon/vram.h>
+int main(int argc, char **argv) {
+    char *child[2];
+    unsigned w;
+    unsigned h;
+    unsigned offset;
+    disp_init();
+    disp_setmode(640u, 360u);
+    child[0] = argc > 1 ? argv[1] : "echo";
+    child[1] = 0;
+    exec(argc > 1 ? "/bin/div0.bin" : "/bin/echo.bin", 1, child);
+    vram_mode(&w, &h, &offset);
+    printf("after the child: %ux%u\n", w, h);
+    return 0;
+}
+"""
+
+# A program with the screen in a mode of its own, painting it red, that then
+# prints and spins until Ctrl+C: the console must not be drawn over it.
+STANDINS["overprint"] = r"""#include <pigeon/display.h>
+#include <pigeon/sys.h>
+int main(void) {
+    disp_init();
+    disp_setmode(1280u, 720u);
+    disp_clear(RED);
+    print("hello over the picture\n");
+    while (1) { }
+    return 0;
+}
+"""
+
+BIG_SCRIPT = b"""# graphics 640x360
+graphics -clear 0xFF102030
+graphics -disc 320 180 40 0xFFFF0000
+graphics -rect 600 340 20 10 0xFF00FF00 -wait
+"""
+
+
+def pixel_at(machine, x, y):
+    """A pixel on the screen as it is now, as 0xRRGGBB."""
+    display = machine.display_io
+    fb, w = display.snapshot(), display.width
+    i = (y * w + x) * 4
+    return (fb[i + 2] << 16) | (fb[i + 1] << 8) | fb[i]
+
+
+def with_setmode(extra=(), **kw):
+    extra = [("/bin/setmode.bin", shell_program("setmode")),
+             ("/bin/consize.bin", standin("consize"))] + list(extra)
+    return booted(extra=extra, **kw)
+
+
+def test_setmode_says_what_the_screen_is_and_what_it_could_be():
+    with with_setmode() as c:
+        assert c.ready(), c.rows()
+        assert c.command("setmode") == ["192 x 108"]
+        assert c.command("setmode -list") == ["192 x 108 (now)", "320 x 180", "640 x 360",
+                                              "854 x 480", "1280 x 720"]
+
+
+@cases("640 360", "640x360")
+def test_setmode_switches_the_console_and_it_stays(spelling):
+    with with_setmode() as c:
+        assert c.ready(), c.rows()
+        c.type(f"setmode {spelling}\n")
+        assert settled_at(c, 640), c.rows()
+        assert c.command("consize") == ["106x40"]
+        assert c.command("setmode") == ["640 x 360"]
+        assert c.machine.display_io.width == 640, "a later command undid it"
+
+
+def test_setmode_refuses_a_mode_not_offered():
+    with with_setmode() as c:
+        assert c.ready(), c.rows()
+        out = c.command("setmode 641 360")
+        assert out[0] == "setmode: 641 x 360: not a mode this machine offers", out
+        assert "640 x 360" in out
+        assert c.machine.display_io.width == 192
+
+
+def test_setmode_on_a_machine_without_video_memory():
+    with with_setmode(vram_size=0) as c:
+        assert c.ready(), c.rows()
+        assert c.command("setmode 640 360")[0] == \
+            "setmode: 640 x 360: not a mode this machine offers"
+        assert c.command("setmode") == ["192 x 108"]
+
+
+def test_the_demo():
+    """The one the whole plan was written towards (docs/gac/README.md §3)."""
+    with with_setmode(extra=[("/bin/graphics.bin", shell_program("graphics"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("setmode 640 360\n")
+        assert settled_at(c, 640), c.rows()
+        c.type("graphics -clear 0xFF101018 -disc 320 180 60 0xFFFF0000 -wait\n")
+        assert c.run_until(lambda rows: pixel_at(c.machine, 320, 180) == 0xFF0000
+                           and pixel_at(c.machine, 320 + 59, 180) == 0xFF0000
+                           and pixel_at(c.machine, 0, 0) == 0x101018), "no disc"
+        c.press(ord("x"))
+        assert settled_at(c, 640), c.rows()
+
+
+def test_a_script_that_asks_for_a_mode_draws_in_it_and_gives_it_back():
+    """Three graphics lines, each a program of its own: each starts and ends
+    in the script's mode, since the kernel puts back the mode a program
+    started in, not its own (docs/gac/plans/phase7_setmode.md §2.1)."""
+    with booted(extra=[("/bin/pgs.bin", shell_program("pgs")),
+                       ("/bin/graphics.bin", shell_program("graphics")),
+                       ("/docs/big.pgs", BIG_SCRIPT)]) as c:
+        assert c.ready(), c.rows()
+        c.type("pgs /docs/big.pgs\n")
+        assert c.run_until(lambda rows: c.machine.display_io.width == 640
+                           and pixel_at(c.machine, 610, 345) == 0x00FF00), "never drawn"
+        assert pixel_at(c.machine, 320, 180) == 0xFF0000, "the disc went with a mode change"
+        assert pixel_at(c.machine, 5, 5) == 0x102030, "the clear went with a mode change"
+        c.press(ord("x"))
+        assert settled_at(c, 192), c.rows()
+        assert c.machine.vram.mode == (192, 108)
+
+
+def test_a_script_asking_for_a_mode_not_offered_is_stopped_at_the_header():
+    script = b"# graphics 641x360\ngraphics -clear 0xFFFF0000\n"
+    with booted(extra=[("/bin/pgs.bin", shell_program("pgs")),
+                       ("/bin/graphics.bin", shell_program("graphics")),
+                       ("/docs/bad.pgs", script)]) as c:
+        assert c.ready(), c.rows()
+        out = c.command("pgs /docs/bad.pgs")
+        assert "not a mode this machine offers: 641x360" in out[0], out
+        assert "640x360" in out[1], out
+        assert c.machine.display_io.width == 192 and pixel_at(c.machine, 100, 100) != 0xFF0000
+
+
+@cases(("a child that ends", "parentmode"), ("a child that crashes", "parentmode crash"))
+def test_a_program_keeps_its_mode_when_its_child_ends(label, line):
+    with booted(extra=[("/bin/parentmode.bin", standin("parentmode")),
+                       ("/bin/div0.bin", standin("div0"))]) as c:
+        assert c.ready(), c.rows()
+        c.type(line + "\n")
+        assert settled_at(c, 192), c.rows()
+        assert "after the child: 640x360" in c.rows(), f"{label}: {c.rows()}"
+
+
+def test_the_console_does_not_draw_over_a_program_in_a_mode_of_its_own():
+    """The console at 640 x 360 lives in video memory, and a program's 1280 x
+    720 screen reuses it: were the console drawn while the program printed,
+    its text would land in the program's picture
+    (docs/gac/plans/phase7_setmode.md, As built)."""
+    with with_setmode(extra=[("/bin/overprint.bin", standin("overprint"))]) as c:
+        assert c.ready(), c.rows()
+        c.type("setmode 640 360\n")
+        assert settled_at(c, 640), c.rows()
+        c.type("overprint\n")
+        assert c.run_until(lambda rows: c.machine.display_io.width == 1280), "never switched"
+        c.run_until(lambda rows: False, seconds=1)
+        fb = c.machine.display_io.snapshot()
+        red = (0x00, 0x00, 0xFF, 0xFF)
+        not_red = sum(1 for i in range(0, len(fb), 4) if tuple(fb[i:i + 4]) != red)
+        assert not_red == 0, f"{not_red} pixels of the picture were drawn over"
+        c.press(KEY_LCTRL, ord("c"))
+        assert settled_at(c, 640), c.rows()
+        assert "hello over the picture" in c.rows(), "what it printed was lost"
 
 
 if __name__ == "__main__":

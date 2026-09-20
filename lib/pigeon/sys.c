@@ -13,12 +13,15 @@
 typedef int  (*sys_int_ptr_n)(int, void *, unsigned);
 typedef int  (*sys_path_flags)(char *, unsigned);
 typedef int  (*sys_int)(int);
+typedef int  (*sys_two_sizes)(unsigned *, unsigned *);
+typedef int  (*sys_two_words)(unsigned, unsigned);
 typedef int  (*sys_path)(char *);
 typedef int  (*sys_int_stat)(int, sys_stat_t *);
 typedef int  (*sys_path_stat)(char *, sys_stat_t *);
 typedef int  (*sys_buf_size)(char *, unsigned);
 typedef int  (*sys_exec_fn)(char *, int, char **);
 typedef int  (*sys_exec_out_fn)(char *, int, char **, char *, unsigned);
+typedef int  (*sys_exec_io_fn)(char *, int, char **, char *, char *, unsigned);
 typedef void (*sys_exit_fn)(int);
 typedef int  (*sys_none)(void);
 typedef int  (*sys_path_path)(char *, char *);
@@ -71,6 +74,18 @@ int exec_out(char *path, int argc, char **argv, char *buf, unsigned size) {
     return ((sys_exec_out_fn)SYS_SLOT(SYS_EXEC_OUT))(path, argc, argv, buf, size);
 }
 
+int exec_io(char *path, int argc, char **argv, char *in, char *out, unsigned how) {
+    return ((sys_exec_io_fn)SYS_SLOT(SYS_EXEC_IO))(path, argc, argv, in, out, how);
+}
+
+int exec_to(char *path, int argc, char **argv, char *file, unsigned how) {
+    return exec_io(path, argc, argv, (char *)0, file, how);
+}
+
+int exec_from(char *path, int argc, char **argv, char *file) {
+    return exec_io(path, argc, argv, file, (char *)0, R_TRUNC);
+}
+
 void exit(int code) { ((sys_exit_fn)SYS_SLOT(SYS_EXIT))(code); }
 
 int getkey(void) { return ((sys_none)SYS_SLOT(SYS_GETKEY))(); }
@@ -82,6 +97,16 @@ int setcomplete(char *dir, char *builtins) {
 int setbreak(int on) { return ((sys_int)SYS_SLOT(SYS_SETBREAK))(on); }
 
 int paging(int on) { return ((sys_int)SYS_SLOT(SYS_PAGING))(on); }
+
+int keepscreen(int on) { return ((sys_int)SYS_SLOT(SYS_KEEPSCREEN))(on); }
+
+int setmode(unsigned w, unsigned h) {
+    return ((sys_two_words)SYS_SLOT(SYS_SETMODE))(w, h);
+}
+
+int consize(unsigned *cols, unsigned *rows) {
+    return ((sys_two_sizes)SYS_SLOT(SYS_CONSIZE))(cols, rows);
+}
 
 void print(char *s) {
     unsigned n = 0u;
@@ -105,6 +130,7 @@ char *sys_strerror(int status) {
     if (status == E_NOTPROG) return "not a program";
     if (status == E_NOMEM) return "no room to run it";
     if (status == E_DEPTH) return "too many programs running";
+    if (status == E_NOMODE) return "not a mode this machine offers";
     if (status == ENDED_DIV_ZERO) return "divided by zero";
     if (status == ENDED_BAD_OPCODE) return "ran a bad instruction";
     if (status == ENDED_BAD_FETCH) return "ran off the end of memory";

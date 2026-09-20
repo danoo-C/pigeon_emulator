@@ -192,8 +192,8 @@ Pigeon Emulator
             elif choice == "2":
                 self.run_debug()
             elif choice == "3":
-                path = self.machine.dump_ram_to(self.config.build_dir / "ram.bin")
-                print(f"RAM written to {short(Path(path))}")
+                paths = self.machine.dump_ram_to(self.config.build_dir / "ram.bin")
+                print(f"RAM written to {', '.join(short(p) for p in paths)}")
             elif choice == "4":
                 print(self.machine.cpu.dump())
             elif choice == "5":
@@ -213,10 +213,10 @@ Pigeon Emulator
         except KeyboardInterrupt:
             print(f"\nInterrupted at PC={self.machine.cpu.pc:#06x}")
         except RuntimeError as e:
-            dump = self.machine.dump_ram_to(self.config.build_dir / "ram.bin")
+            dumps = self.machine.dump_ram_to(self.config.build_dir / "ram.bin")
             print(f"\nEMULATOR FAULT: {e}")
             print(self.machine.cpu.dump())
-            print(f"RAM dumped to {short(Path(dump))}")
+            print(f"RAM dumped to {', '.join(short(p) for p in dumps)}")
             raise
 
     def run_debug(self):
@@ -292,6 +292,12 @@ def build_parser():
                        help="disk image for IO channel 2")
     where.add_argument("--cd", metavar="PATH", dest="cd",
                        help="a disc to put in the CD drive before power-on (docs/os_cd.md)")
+    where.add_argument("--ram", metavar="SIZE",
+                       help="how much RAM, e.g. 128M or 1G (docs/gac/phase1_aperture.md)")
+    where.add_argument("--vram", metavar="SIZE",
+                       help="how much video memory, mapped above RAM, e.g. 16M")
+    where.add_argument("--mode", metavar="WxH", dest="display_mode",
+                       help="the screen at power-on, e.g. 640x360 (docs/gac/phase2_vram.md)")
     where.add_argument("--no-autobuild", action="store_true",
                        help="never reassemble, even when a build is stale")
 
@@ -335,13 +341,17 @@ def main(argv=None):
               f"'{key}' ignored (expected one of: {', '.join(sorted(DEFAULTS))})",
               file=sys.stderr)
 
-    config = config.override(
-        host=args.host, display_port=args.display_port, hid_port=args.hid_port,
-        cd_port=args.cd_port, cd=args.cd,
-        program_dirs=args.program_dirs, bios_binary=args.bios_binary,
-        bios2_binary=args.bios2_binary, disk=args.disk,
-        serial=args.serial, serial_log=args.serial_log,
-        auto_build=False if args.no_autobuild else None)
+    try:
+        config = config.override(
+            host=args.host, display_port=args.display_port, hid_port=args.hid_port,
+            cd_port=args.cd_port, cd=args.cd,
+            program_dirs=args.program_dirs, bios_binary=args.bios_binary,
+            bios2_binary=args.bios2_binary, disk=args.disk,
+            serial=args.serial, serial_log=args.serial_log,
+            ram=args.ram, vram=args.vram, display_mode=args.display_mode,
+            auto_build=False if args.no_autobuild else None)
+    except ConfigError as e:
+        parser.error(str(e))
 
     if args.list:
         print(format_listing(config))
@@ -416,7 +426,10 @@ def main(argv=None):
         machine = Machine(bios_path=str(config.bios_binary),
                           program_path=str(program_path) if program_path else None,
                           disk_path=str(config.disk), cd=drive,
-                          bios2_path=str(bios2_path) if bios2_path else None)
+                          bios2_path=str(bios2_path) if bios2_path else None,
+                          ram_size=config.ram, vram_size=config.vram,
+                          display_mode=config.display_mode,
+                          display_modes=config.display_modes)
     except ValueError as e:
         print(f"Could not start the machine: {e}", file=sys.stderr)
         return 1

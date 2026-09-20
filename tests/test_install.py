@@ -35,12 +35,13 @@ from test_project import EXAMPLE, quiet                               # noqa: E4
 MiB = 1 << 20
 PROMPT = "ENTER install   ESC cancel"
 INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt", "/docs/hello.pgs",
+             "/docs/logo.pgs", "/docs/gui.pgs",
              "/etc/shell_header.conf",
              "/etc/boot.conf", "/etc/explorer.conf", "/etc/bmp/pigeon.bmp",
              "/etc/bmp/eye-mask.bmp"] + [
     f"/bin/{name}.bin" for name in ("sh", "ls", "cat", "echo", "mkdir", "rmdir", "rm", "mv",
                                     "cp", "clear", "more", "edit", "graph", "cube", "files", "corrupter", "splash", "reboot", "img",
-                                    "explorer", "pgs")]
+                                    "explorer", "pgs", "graphics", "setmode")]
 
 # The example disc, built once for the whole file.
 _BUILD = tempfile.TemporaryDirectory()
@@ -115,11 +116,16 @@ def test_the_installer_puts_the_disc_on_the_hard_disk_and_the_disk_boots_the_she
                 f"[installer] installed {len(INSTALLED)} files; Enter restarts",
             ], said
 
-            # restart: bios2 again, and the hard disk now comes first
+            # restart: bios2 again, and the hard disk now comes first. Looked
+            # at often: the countdown is 5 s of the stepping clock, a timer
+            # read each 0.05 s of it, and with bios2 drawing through the
+            # accelerator (docs/gac/plans/phase5_display_lib.md) those reads
+            # come so close together that the whole countdown fits in two
+            # looks 20,000 instructions apart.
             p.key(ENTER)
             assert p.run_until(lambda rows: rows[4] == "  Hard disk  PIGEONOS"
                                and rows[7].startswith("Booting Hard disk"),
-                               steps=20_000_000), p.rows()
+                               steps=20_000_000, every=2_000), p.rows()
             p.key(ENTER)
             # Compared at the hand-over, before it runs: a C program's globals
             # live in its image, so running changes the bytes.

@@ -184,6 +184,16 @@ w_exec_out:
     EI
     RET
 
+w_exec_io:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_exec_io
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
 w_getkey:
     DI
     MOV C, #__g_in_kernel
@@ -259,6 +269,36 @@ w_paging:
     MOV C, #__g_in_kernel
     MWW C, #1
     CALL k_paging
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
+w_keepscreen:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_keepscreen
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
+w_consize:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_consize
+    MOV C, #__g_in_kernel
+    MWW C, #0
+    EI
+    RET
+
+w_setmode:
+    DI
+    MOV C, #__g_in_kernel
+    MWW C, #1
+    CALL k_setmode
     MOV C, #__g_in_kernel
     MWW C, #0
     EI

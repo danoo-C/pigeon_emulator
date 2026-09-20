@@ -14,7 +14,7 @@ from emulator.cpu import CPU
 from emulator.devices.display_io import DisplayIO
 from emulator.instruction_set import NONE_REG, encode
 from emulator.io_controller import IOController
-from emulator.memory_map import DISPLAY_SIZE, RAM_SIZE
+from emulator.memory_map import HEAP_START, RAM_SIZE, VRAM_SIZE
 from emulator.ram import RAM
 
 ITERATIONS = 2_000_000
@@ -45,13 +45,117 @@ def bench_io_idle():
     return 200_000 / (time.perf_counter() - start)
 
 
-def bench_display():
-    display = DisplayIO(RAM(RAM_SIZE))
-    data = bytes(range(256)) * (DISPLAY_SIZE // 256)
+def bench_memory():
+    """A word written into the heap, and one through the video-memory
+    aperture above RAM (docs/gac/phase1_aperture.md). The first must not
+    move when the aperture exists; the second is what one pixel costs."""
+    ram = RAM(RAM_SIZE, VRAM_SIZE)
+    results = []
+    for addr in (HEAP_START, ram.vram_base + 4096):
+        write = ram.write_word
+        start = time.perf_counter()
+        for _ in range(1_000_000):
+            write(addr, 0x12345678)
+        results.append((time.perf_counter() - start) * 1000)   # ns per write
+    return results
+
+
+def bench_gac():
+    """The accelerator at its biggest mode, through its callback as the
+    bus calls it: a full-screen FILL, and a full console of TEXT -- the
+    redraw that costs about 34 s in guest code (docs/gac/design.md §4.3)."""
+    import random
+    import re
+    import struct
+    from emulator.devices.display_io import DisplayIO
+    from emulator.devices.gac import CMD_BLIT_ALPHA, CMD_FILL, CMD_SET_FONT, CMD_TEXT, GAC
+    from emulator.devices.vram import VRAM
+    from emulator.memory_map import DISPLAY_MODES, IO_START, IOHeader
+
+    window = IO_START + IOHeader.USABLE_AFTER
+    ram = RAM(1 << 24, 1 << 23)
+    vram = VRAM(ram, DisplayIO(ram), DISPLAY_MODES, (1280, 720))
+    gac = GAC(ram, vram)
+    source = (REPO_ROOT / "lib" / "pigeon" / "display.c").read_text()
+    table = source[source.index("FONT[] = {"):source.index("};", source.index("FONT[] = {"))]
+    font = bytes(int(h, 16) for h in re.findall(r"0x([0-9A-Fa-f]{2})", table))
+    ram.mem[HEAP_START:HEAP_START + len(font)] = font
+
+    def call(command, fmt, *args, tail=b""):
+        data = struct.pack(fmt, *args) + tail
+        ram.mem[window:window + len(data)] = data
+        gac.callback(0, command, 4, 0, bytearray(4))
+
+    call(CMD_SET_FONT, "<7I", HEAP_START, 5, 8, 6, 9, 0x20, 95)
     start = time.perf_counter()
-    for _ in range(200):
-        display._convert_to_rgba(data)
-    return (time.perf_counter() - start) / 200 * 1000
+    for _ in range(20):
+        call(CMD_FILL, "<IiiiiI", 0, 0, 0, 1280, 720, 0xFF101018)
+    fill = (time.perf_counter() - start) / 20 * 1000
+
+    # Blending reads every byte it writes: §4.5's numbers are the ones most
+    # likely to rot, so they are measured here, through the device.
+    start = time.perf_counter()
+    for _ in range(5):
+        call(CMD_FILL, "<IiiiiI", 0, 0, 0, 1280, 720, 0x80FF0000)
+    blended = (time.perf_counter() - start) / 5 * 1000
+    back, _ = vram.alloc(1280, 720)            # a second screen to lay over the first
+    start = time.perf_counter()
+    for _ in range(3):
+        call(CMD_BLIT_ALPHA, "<IiiIiiiiI", back, 0, 0, 0, 0, 0, 1280, 720, 128)
+    blit_alpha = (time.perf_counter() - start) / 3 * 1000
+
+    rng = random.Random(1)
+    lines = [bytes(rng.randrange(0x21, 0x7F) for _ in range(1280 // 6)) for _ in range(720 // 9)]
+    start = time.perf_counter()
+    for row, text in enumerate(lines):
+        call(CMD_TEXT, "<IiiIII", 0, 0, row * 9, 0xFFC0C0C0, 0xFF101018, len(text), tail=text)
+    console = (time.perf_counter() - start) * 1000
+    return fill, console, blended, blit_alpha
+
+
+def bench_display():
+    """What serving a frame costs the emulator's own thread, 30 times a
+    second: the snapshot, at the power-on mode and the biggest. The clients
+    swizzle now (docs/gac/plans/phase4_frontends.md); the server's swizzle
+    took 6.4 ms of this thread at 1280 x 720."""
+    from emulator.devices.vram import VRAM
+    from emulator.memory_map import DISPLAY_MODES
+    ram = RAM(1 << 24, 1 << 23)
+    display = DisplayIO(ram)
+    vram = VRAM(ram, display, DISPLAY_MODES)
+    times = []
+    for mode in ((192, 108), (1280, 720)):
+        vram.set_mode(*mode)
+        start = time.perf_counter()
+        for _ in range(100):
+            display.update()
+        times.append((time.perf_counter() - start) / 100 * 1000)
+    return times
+
+
+def bench_frame_compare():
+    """What serving only what changed costs the emulator's thread a frame
+    at 1280 x 720 (docs/gac/plans/phase8_bandwidth.md): the snapshot and the
+    comparison with the last frame, when nothing changed, and when a row of
+    console text did."""
+    from emulator.devices.vram import VRAM
+    from emulator.memory_map import DISPLAY_MODES
+    ram = RAM(1 << 24, 1 << 23)
+    display = DisplayIO(ram)
+    vram = VRAM(ram, display, DISPLAY_MODES)
+    vram.set_mode(1280, 720)
+    screen = ram.vram_base + vram.surfaces[0].offset
+    display.update()
+    start = time.perf_counter()
+    for _ in range(100):
+        display.update()
+    same = (time.perf_counter() - start) / 100 * 1000
+    start = time.perf_counter()
+    for i in range(100):
+        ram.write_word(screen + (360 * 1280 + i) * 4, 0xFF000000 | i)
+        display.update()
+    row = (time.perf_counter() - start) / 100 * 1000
+    return same, row
 
 
 def bench_real_program():
@@ -112,6 +216,17 @@ if __name__ == "__main__":
 
     print(f"IO update, idle   {bench_io_idle():>12,.0f} calls/s "
           f"(no longer on the per-instruction path)")
-    ms = bench_display()
-    print(f"Frame conversion  {ms:>12.3f} ms      (was 2.22 ms; "
-          f"{1000 / ms:,.0f} FPS ceiling)")
+    heap, aperture = bench_memory()
+    print(f"Word write, heap  {heap:>12.1f} ns")
+    print(f"Word write, VRAM  {aperture:>12.1f} ns      (through the aperture: one pixel)")
+    fill, console, blended, blit_alpha = bench_gac()
+    print(f"GAC fill, 720p    {fill:>12.3f} ms      a whole 1280x720 screen, one command")
+    print(f"  blended         {blended:>12.3f} ms      the same at alpha 0x80 (§4.5: 3.65)")
+    print(f"  BLIT_ALPHA      {blit_alpha:>12.1f} ms      a whole screen over another (§4.5: 18.5)")
+    print(f"GAC text, 720p    {console:>12.1f} ms      a whole 213x80 console, 80 commands")
+    same, row = bench_frame_compare()
+    print(f"Frame, unchanged  {same:>12.3f} ms      1280x720: snapshot and compare, nothing sent")
+    print(f"  one row changed {row:>12.3f} ms      and finding the band of rows to send")
+    small, big = bench_display()
+    print(f"Frame snapshot    {small:>12.3f} ms      192x108; the clients swizzle")
+    print(f"  at 720p         {big:>12.3f} ms      1280x720, with the compare (the swizzle was 6.4)")

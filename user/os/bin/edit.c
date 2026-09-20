@@ -28,10 +28,18 @@
 #include <pigeon/string.h>
 #include <pigeon/sys.h>
 
-#define ED_COLS     32u
-#define ED_ROWS     9u              /* of text, on the screen's rows 1 to 9 */
-#define ED_MSG_ROW  10u
-#define ED_KEYS_ROW 11u
+/* The console's size, from consize() when edit starts: 32 x 12 on the
+ * power-on screen, more in a bigger mode (docs/gac/plans/phase6_console.md).
+ * Row 0 is the file's name, the text has every row after it but the last
+ * two, and those are the message and the keys. */
+static unsigned ed_cols = 32u;
+static unsigned ed_rows = 9u;               /* of text, on the screen's rows 1 to 9 */
+static unsigned ed_msg_row = 10u;
+static unsigned ed_keys_row = 11u;
+#define ED_COLS     ed_cols
+#define ED_ROWS     ed_rows
+#define ED_MSG_ROW  ed_msg_row
+#define ED_KEYS_ROW ed_keys_row
 #define ED_CELL_W   6u
 #define ED_CELL_H   9u
 #define ED_MAX_TEXT 65536u          /* 64 KB */
@@ -344,7 +352,9 @@ static void draw_keys(void) {
 }
 
 static void draw_screen(void) {
-    out_text("\x1b[0m\x1b[2J\x1b[2;10r");
+    out_text("\x1b[0m\x1b[2J\x1b[2;");          /* the text's rows scroll: 2 to ED_ROWS + 1 */
+    out_number(ED_ROWS + 1u);
+    out_char('r');
     draw_title();
     draw_rows(0u, ED_ROWS);
     draw_keys();
@@ -890,9 +900,17 @@ int main(int argc, char **argv) {
     unsigned mouse;
     int fd;
     int n;
+    unsigned cols;
+    unsigned rows;
     if (argc < 2) {
         print("usage: edit FILE\n");
         return 1;
+    }
+    if (consize(&cols, &rows) == 0 && cols >= 32u && rows >= 12u) {
+        ed_cols = cols;
+        ed_rows = rows - 3u;
+        ed_msg_row = rows - 2u;
+        ed_keys_row = rows - 1u;
     }
     strlcpy(path, argv[1], ED_PATH);
     if (stat(path, &st) >= 0) {
