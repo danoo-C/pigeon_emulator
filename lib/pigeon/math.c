@@ -2,13 +2,17 @@
  *
  * Two things shape this code.
  *
- * The only broken primitive is the SHIFT. MUL is correct for negative
- * operands already -- the machine multiplies the low 32 bits in two's
- * complement, which is what C wants -- and only `>>` and `/` go wrong.
- * So fmul() is one sign-safe shift, not the two sign-strips an earlier
- * version in user/cube.c used. Everything signed funnels through ishr(),
- * idiv() and imod(); nothing else in the file touches `>>` or `/` on a
- * value that might be negative.
+ * It was written when `>>` and `/` were wrong on negative operands: SHR
+ * is a logical shift and DIV is unsigned, so -256 >> 8 came back as
+ * 16,777,215. MUL was always right, since the machine multiplies the low
+ * 32 bits in two's complement, which is what C wants -- so fmul() is one
+ * sign-safe shift rather than the two sign-strips an earlier version in
+ * user/cube.c used.
+ *
+ * The compiler puts the sign back itself now (docs/compiler_plan.md), so
+ * plain `>>`, `/` and `%` are correct here as they are everywhere. ishr(),
+ * idiv() and imod() stay: they are published API, and they answer 0 for a
+ * zero divisor instead of faulting.
  *
  * Every divide guards against zero. Not for tidiness: the emulator raises
  * a Python exception on DIV by zero, so an unguarded divide takes the

@@ -91,6 +91,19 @@ class Analyzer:
         # Declare every function first, so calls may appear before definitions
         # and mutual recursion works.
         for function in program.functions:
+            # A struct moves four bytes at a time everywhere it is copied
+            # (docs/compiler_plan.md §2), and the ABI is a word a slot, so
+            # by-value parameters and returns are refused rather than
+            # silently truncated. Assignment is the one that is implemented.
+            if isinstance(function.returns, StructType):
+                raise function.token.error(
+                    f"'{function.name}' cannot return {function.returns} by value; "
+                    f"fill one through a pointer parameter")
+            for param in function.params:
+                if isinstance(param.type, StructType):
+                    raise function.token.error(
+                        f"parameter '{param.name}' cannot take {param.type} by value; "
+                        f"take '{param.type} *' instead")
             signature = FunctionType(function.returns,
                                      [p.type for p in function.params], function.name,
                                      function.variadic)
@@ -138,7 +151,33 @@ class Analyzer:
                     and isinstance(declaration.decl_type, ArrayType):
                 pass                        # emitted directly as .asciz
             else:
-                declaration.init = self._expr(declaration.init)
+                # A global's value is built into the image, so it has to be
+                # known now. Everything but a bare literal used to be
+                # dropped to zero in silence (docs/compiler_plan.md §3); it
+                # is folded here instead, and refused when it cannot be.
+                declaration.init = self._const_init(self._expr(declaration.init),
+                                                    declaration.decl_type)
+
+    def _const_init(self, value: A.Node, target: Type) -> A.Node:
+        """A global's initialiser as something the image can hold: a folded
+        IntLiteral, or an AddressLiteral naming a label."""
+        address = _address_constant(value)
+        if address is not None:
+            if not (decays(target).is_pointer or is_integer(target)):
+                raise value.token.error(f"cannot initialise {target} with an address")
+            return address
+        try:
+            number = _fold_const_expr(value)
+        except CompileError:
+            raise
+        except Exception:
+            number = None
+        if number is None:
+            raise value.token.error(
+                "a global initialiser must be a compile-time constant")
+        folded = A.IntLiteral(token=value.token, value=number & 0xFFFFFFFF)
+        folded.type = INT
+        return folded
 
     def _init_list(self, declaration: A.VarDecl):
         """Only constants, and only on a global: the value has to be known
@@ -152,21 +191,7 @@ class Analyzer:
             raise declaration.token.error(
                 f"'{declaration.name}' holds {target.count} elements but "
                 f"{len(values)} were given")
-        folded = []
-        for value in values:
-            if isinstance(value, A.StringLiteral):
-                folded.append(self._expr(value))   # interned; emitted as .word label
-                continue
-            if not isinstance(value, A.IntLiteral):
-                from .parser import _fold_constant
-                try:
-                    number = _fold_constant(value)
-                except Exception:
-                    raise value.token.error(
-                        "a global initialiser must be a compile-time constant") from None
-                value = A.IntLiteral(token=value.token, value=number & 0xFFFFFFFF)
-            value.type = INT
-            folded.append(value)
+        folded = [self._const_init(self._expr(value), target.element) for value in values]
         declaration.init.values = folded
 
     def _function(self, function: A.FunctionDef):
@@ -257,6 +282,7 @@ class Analyzer:
                 raise node.token.error(f"'{word}' outside a loop")
 
         elif isinstance(node, A.ExprStatement):
+            node.expr.is_statement = True    # a struct assignment is allowed here
             node.expr = self._expr(node.expr)
 
         elif isinstance(node, A.Empty):
@@ -282,6 +308,8 @@ class Analyzer:
         if node.init is not None:
             node.init = self._expr(node.init)
             self._check_assignable(node.decl_type, node.init, node.token)
+            if isinstance(node.decl_type, StructType):
+                self._check_struct_copy(node.decl_type, node.init, node.token, False)
 
     # --- expressions -------------------------------------------------------
 
@@ -358,6 +386,14 @@ class Analyzer:
             raise node.token.error(
                 f"'{node.op}' does not apply to {node.left.type} and {node.right.type}")
         node.type = common_type(left, right)
+        # The machine's DIV and SHR are unsigned, so codegen puts the sign
+        # back where the types say there is one (docs/compiler_plan.md §4,
+        # §5). A shift takes its signedness from the value being shifted,
+        # not from the count -- `x >> n` is about x.
+        if node.op in ("/", "%"):
+            node.operand_type = node.type
+        elif node.op in ("<<", ">>"):
+            node.operand_type = left
         return node
 
     def _pointer_arithmetic(self, node, left, right):
@@ -381,8 +417,20 @@ class Analyzer:
             raise node.token.error("cannot assign to this")
         if isinstance(node.target.type, ArrayType):
             raise node.token.error("cannot assign to an array")
+        if isinstance(decays(node.target.type), StructType):
+            self._check_struct_copy(node.target.type, node.value, node.token,
+                                    node.op != "=" or not getattr(node, "is_statement", False))
         self._check_assignable(node.target.type, node.value, node.token)
         node.type = node.target.type
+        if node.op != "=":
+            # `a /= b` is `a = a / b`, and codegen rebuilds that Binary --
+            # so it needs the same signedness a written-out one would have
+            # (docs/compiler_plan.md §4, §5).
+            left, right = decays(node.target.type), decays(node.value.type)
+            if node.op[:-1] in ("/", "%") and is_integer(left) and is_integer(right):
+                node.operand_type = common_type(left, right)
+            elif node.op[:-1] in ("<<", ">>"):
+                node.operand_type = left
         return node
 
     def _x_IncDec(self, node):
@@ -476,6 +524,20 @@ class Analyzer:
 
     # --- type checking -----------------------------------------------------
 
+    def _check_struct_copy(self, target: Type, value: A.Node, token, as_value: bool):
+        """A whole struct is copied word by word (docs/compiler_plan.md §2),
+        which needs an address to copy FROM and nothing to leave behind: so
+        the source is an lvalue, and the copy is a statement rather than a
+        value."""
+        if as_value:
+            raise token.error(
+                f"a {target} can only be copied as a whole statement -- "
+                f"'a = b;', not part of a larger expression")
+        if not _is_lvalue(value):
+            raise value.token.error(
+                f"a {target} can only be copied from a variable, "
+                f"since the copy reads it through its address")
+
     def _check_assignable(self, target: Type, value: A.Node, token):
         source = decays(value.type)
         target = decays(target)
@@ -507,6 +569,85 @@ def _function_label(name: str) -> str:
     if len(name) == 1 and name.upper() in "ABCDEF":
         return f"__fn_{name}"
     return name
+
+
+def _address_constant(value: A.Node) -> Optional[A.AddressLiteral]:
+    """`&global`, a function's name, an array's name or a string literal as
+    a global initialiser: the label the image should hold, or None if this
+    is not one of those.
+
+    Only a bare address -- `&arr[2]` and `name + 1` are refused, because
+    the point of this is to catch what used to be a silent zero, not to
+    grow a link-time expression evaluator.
+    """
+    if isinstance(value, A.StringLiteral):
+        return A.AddressLiteral(token=value.token, label=value.label, type=value.type)
+    if isinstance(value, A.Unary) and value.op == "&":
+        target = value.operand
+        if isinstance(target, A.Identifier) and target.symbol.storage == "global":
+            return A.AddressLiteral(token=value.token, label=target.symbol.label,
+                                    type=value.type)
+        return None
+    if isinstance(value, A.Identifier) and value.symbol.storage == "function":
+        return A.AddressLiteral(token=value.token, label=value.symbol.label,
+                                type=value.type)
+    if isinstance(value, A.Identifier) and value.symbol.storage == "global" \
+            and isinstance(value.symbol.type, ArrayType):
+        return A.AddressLiteral(token=value.token, label=value.symbol.label,
+                                type=value.type)
+    return None
+
+
+def _fold_const_expr(node: A.Node) -> Optional[int]:
+    """Evaluate an ANALYSED expression at compile time, or None.
+
+    parser._fold_constant does the same for array sizes, before types are
+    known; this one runs after, so it can also do `sizeof` and casts. The
+    two exist for that reason and not by accident.
+    """
+    if isinstance(node, A.IntLiteral):
+        return node.value
+    if isinstance(node, A.SizeOf):
+        return node.of_type.size
+    if isinstance(node, A.Cast):
+        inner = _fold_const_expr(node.operand)
+        if inner is None or not is_integer(node.to):
+            return None
+        bits = node.to.size * 8
+        inner &= (1 << bits) - 1
+        if node.to.is_signed and inner >= 1 << (bits - 1):
+            inner -= 1 << bits
+        return inner
+    if isinstance(node, A.Unary):
+        inner = _fold_const_expr(node.operand)
+        if inner is None or node.op not in ("-", "+", "~", "!"):
+            return None
+        return {"-": -inner, "+": inner, "~": ~inner, "!": int(not inner)}[node.op]
+    if isinstance(node, A.Binary):
+        left, right = _fold_const_expr(node.left), _fold_const_expr(node.right)
+        if left is None or right is None:
+            return None
+        if node.op in ("/", "%") and right == 0:
+            raise node.token.error("division by zero in a constant")
+        ops = {"+": lambda: left + right, "-": lambda: left - right,
+               "*": lambda: left * right, "<<": lambda: left << right,
+               ">>": lambda: left >> right, "|": lambda: left | right,
+               "&": lambda: left & right, "^": lambda: left ^ right,
+               "/": lambda: abs(left) // abs(right) * (1 if (left < 0) == (right < 0) else -1),
+               "%": lambda: left - (abs(left) // abs(right)
+                                    * (1 if (left < 0) == (right < 0) else -1)) * right,
+               "==": lambda: int(left == right), "!=": lambda: int(left != right),
+               "<": lambda: int(left < right), ">": lambda: int(left > right),
+               "<=": lambda: int(left <= right), ">=": lambda: int(left >= right),
+               "&&": lambda: int(bool(left) and bool(right)),
+               "||": lambda: int(bool(left) or bool(right))}
+        return ops[node.op]() if node.op in ops else None
+    if isinstance(node, A.Conditional):
+        condition = _fold_const_expr(node.condition)
+        if condition is None:
+            return None
+        return _fold_const_expr(node.then if condition else node.otherwise)
+    return None
 
 
 def _is_lvalue(node: A.Node) -> bool:

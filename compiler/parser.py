@@ -33,6 +33,7 @@ class Parser:
         self.pos = 0
         self.typedefs = {}        # name -> Type
         self.structs = {}         # tag -> StructType
+        self.unsized_array = False  # did the last declarator end in `[]`?
 
     # --- token helpers -----------------------------------------------------
 
@@ -118,8 +119,9 @@ class Parser:
                     self.expect("op", ";")        # a prototype: record nothing
                 return
 
+            unsized = self.unsized_array
             init = self._initializer() if self.accept("op", "=") else None
-            type_ = _size_from_initializer(type_, init)
+            type_ = _size_from_initializer(type_, init, unsized)
             program.globals.append(A.VarDecl(token=start, name=name,
                                              decl_type=type_, init=init,
                                              is_static=is_static,
@@ -222,7 +224,13 @@ class Parser:
         return struct
 
     def _declarator(self, base: Type):
-        """Parse pointer stars, a name, and any array or function suffix."""
+        """Parse pointer stars, a name, and any array or function suffix.
+
+        Sets `self.unsized_array` for the caller: `T a[]` and `T *a` reach
+        the same pointer type, and only the first of them takes its length
+        from an initialiser (_size_from_initializer).
+        """
+        self.unsized_array = False
         type_ = base
         while self.at_op("*"):
             self.take()
@@ -255,6 +263,7 @@ class Parser:
             if self.at_op("]"):
                 self.take()
                 type_ = pointer_to(type_)         # `T a[]` is `T *a`
+                self.unsized_array = True
                 continue
             count_token = self.current
             count = self._constant_expression()
@@ -555,10 +564,15 @@ class Parser:
         raise token.error(f"unexpected {token.value!r} in an expression")
 
 
-def _size_from_initializer(type_, init):
+def _size_from_initializer(type_, init, unsized: bool):
     """`int v[] = {1,2,3}` -- an unsized array takes its length from the
-    initialiser. The declarator parsed `[]` as a pointer, so rebuild it."""
-    if init is None or not type_.is_pointer:
+    initialiser. The declarator parsed `[]` as a pointer, so rebuild it.
+
+    Only for `[]`. `char *p = "hi";` is a POINTER to the string, and used
+    to become a 3-byte array here because the two spellings arrive with
+    the same type (docs/compiler_plan.md).
+    """
+    if init is None or not unsized or not type_.is_pointer:
         return type_
     if isinstance(init, A.InitList):
         return array_of(type_.target, max(len(init.values), 1))

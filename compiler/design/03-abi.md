@@ -122,6 +122,14 @@ F + 4*(n+8)               local 0
 - **Every extra argument is one word:** an integer, a `char`, a pointer or a
   function. A struct is refused at the call, and so is a ninth extra
   argument.
+
+> **No struct crosses a call, in either direction.** A parameter slot is one
+> word, and a return comes back in `A`, so a by-value struct parameter or
+> return is **refused with a diagnostic** rather than quietly truncated to
+> its first four bytes, which is what happened before 2026-09-20. Pass
+> `struct T *`; every library in the tree already does. Assignment —
+> `y = x;` between whole structs — *is* supported and copies every word
+> (docs/compiler_plan.md §2).
 - **`...` needs a named parameter before it,** since the extra slots are
   found by that parameter's address.
 - **A call through a function pointer** to a variadic type works the same.

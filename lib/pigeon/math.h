@@ -6,16 +6,17 @@
  * both raw operands under about 46,340. Q8 leaves +-181 units of range;
  * Q16 would leave +-0.7, which is useless.
  *
- * The reason this library exists is that three operations are WRONG on
- * negative numbers, and every one of them turns up in 3D maths:
+ * This library exists because `>>` and `/` used to be WRONG on negative
+ * numbers, and both turn up all over 3D maths:
  *
- *     -256 >> 8    gives 16777215     SHR is a LOGICAL shift
- *     -256 / 256   gives 16777215     DIV is unsigned
- *     -256 * 2     gives -512         MUL is fine
+ *     -256 >> 8    gave 16777215      SHR is a LOGICAL shift
+ *     -256 / 256   gave 16777215      DIV is unsigned
+ *     -256 * 2     gave -512          MUL was always fine
  *
- * ishr(), idiv() and imod() do the work where the hardware is correct and
- * put the sign back. Everything else is built on those, so a caller never
- * has to think about it again.
+ * The COMPILER puts the sign back now (docs/compiler_plan.md), so plain
+ * `>>`, `/` and `%` are correct wherever you write them. ishr(), idiv()
+ * and imod() remain the same operations with one difference worth keeping:
+ * they answer 0 for a zero divisor, where a bare `/` faults.
  *
  * Angles are 0..255 for a full turn, not degrees or radians, so wrapping
  * is one AND rather than the DIV+MUL+SUB that `% 360` compiles to.
