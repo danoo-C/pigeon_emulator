@@ -1,7 +1,9 @@
 # GAC and VRAM: a graphics accelerator, its own video memory, and a screen that resizes
 
-> **Status: Phases 1–8 built, 2026-09-19: the plan is complete. The manuals are [vram.md](../vram.md) and [gac.md](../gac.md). Every question is decided
-> ([decisions.md](decisions.md)).** You answered the design questions on
+> **Status: Phases 1–8 built, 2026-09-19: the plan as written is complete.
+> The manuals are [vram.md](../vram.md) and [gac.md](../gac.md). Every question in it is decided
+> ([decisions.md](decisions.md)). A follow-up, [Phase 9](plans/phase9_srcalpha.md),
+> was planned and built on 2026-09-20.** You answered the design questions on
 > 2026-09-17 and the one follow-up (§11, whether `--ram` ships with this) on
 > 2026-09-18: it ships with Phase 1, defaulting to 128 MB.
 
@@ -14,6 +16,7 @@ its own:
 | **README.md** (this) | what you asked for, where things stood, the goal, the phases, what is not in the plan |
 | [design.md](design.md) | the numbers (§4), the design (§5), the file-by-file list (§6), the risks (§8) |
 | [decisions.md](decisions.md) | your answers, Q1–Q15 (§10) and the follow-up (§11) |
+| [next.md](next.md) | what is left after Phase 9, and what each piece would cost |
 | `phaseN_*.md` | one phase each: its steps, its tests, what "done" means, and — once built — what was built |
 
 Section numbers (§4, §5.3.1, …) are kept from the original file, so every
@@ -40,6 +43,12 @@ graphics accelerator and separate video memory, running the existing
 | [6](plans/phase6_console.md) | **The kernel console at any size, and the mode picker** | guest | **built** 2026-09-19 |
 | [7](plans/phase7_setmode.md) | **`setmode`, and `# graphics` scripts that pick a mode** | guest | **built** 2026-09-19 |
 | [8](plans/phase8_bandwidth.md) | **Frames that did not change are not sent again** | host | **built** 2026-09-19 |
+| [9](plans/phase9_srcalpha.md) | **A blit that honours each source pixel's own alpha** | emulator + guest | **built** 2026-09-20 |
+
+Phases 1–8 were the plan as it was written. **Phase 9 is a follow-up,** the
+first item of §9 turned into a plan of its own once its numbers were
+measured rather than estimated. `graphics -sprite` is what draws with it
+([phase9_srcalpha.md §11](plans/phase9_srcalpha.md#11-as-built)).
 
 ---
 
@@ -173,13 +182,18 @@ Three things have to be true at once, and the design exists to keep all three:
 
 ## 9. Not in this plan
 
-- **A blit honouring per-pixel source alpha** — the one piece of blending
-  left out of v1, because neither the `translate` table nor the SWAR multiply
-  applies when the alpha differs per pixel and the naive loop is 0.28 s a
-  screen (§4.5). The flag is reserved and the command refuses it. If you want
-  soft-edged sprites later, that is its own small plan, and the honest
-  options are a C-speed trick nobody has found yet, an optional `numpy` fast
-  path, or accepting the cost for small sprites only.
+- ~~**A blit honouring per-pixel source alpha**~~ — **now planned, as
+  [Phase 9](plans/phase9_srcalpha.md), 2026-09-20.** It was left out of v1
+  because neither the `translate` table nor the SWAR multiply applies when
+  the alpha differs per pixel, and the naive loop is 0.28 s a screen (§4.5).
+  Both halves of that still hold — a SWAR version was since written and
+  measured at **10× slower than the naive loop** it was meant to beat. What
+  changed is the picture being measured: §4.5 timed a blit where every pixel
+  has a partial alpha, and a real sprite is **97.6% opaque-or-transparent**,
+  so the arithmetic is needed only for a thin rim. Skipping the rest brings
+  an antialiased sprite to **0.39 ms**, which is *cheaper than the
+  constant-alpha `BLIT_ALPHA` already shipped*. No `numpy`, no new
+  dependency, no small-sprites-only rule.
 - **A command queue, fences, or asynchrony.** The bus is synchronous and
   §4.3 says the host's work is a fraction of a millisecond; a queue would buy
   nothing and cost a lot of correctness.

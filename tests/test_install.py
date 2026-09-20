@@ -38,7 +38,7 @@ INSTALLED = ["/boot.bin", "/pigeon.txt", "/docs/readme.txt", "/docs/hello.pgs",
              "/docs/logo.pgs", "/docs/gui.pgs",
              "/etc/shell_header.conf",
              "/etc/boot.conf", "/etc/explorer.conf", "/etc/bmp/pigeon.bmp",
-             "/etc/bmp/eye-mask.bmp"] + [
+             "/etc/bmp/eye-mask.bmp", "/etc/bmp/badge.bmp"] + [
     f"/bin/{name}.bin" for name in ("sh", "ls", "cat", "echo", "mkdir", "rmdir", "rm", "mv",
                                     "cp", "clear", "more", "edit", "graph", "cube", "files", "corrupter", "splash", "reboot", "img",
                                     "explorer", "pgs", "graphics", "setmode")]

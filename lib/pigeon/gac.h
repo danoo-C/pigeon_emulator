@@ -11,6 +11,12 @@
  * is 0xAARRGGBB, and blends on its alpha: 0xFF... is stored as it is,
  * 0x80... is half of it over what is there.
  *
+ * gac_blit_alpha's alpha is 0 to 255 for one alpha over the whole rectangle,
+ * or GAC_SRC_ALPHA for each source pixel's own -- an RGBA sprite with a soft
+ * edge, drawn over what is there, its fully transparent parts not drawn at
+ * all. gac_features() & GAC_FEATURE_SRC_ALPHA says whether the machine has
+ * it; where it has not, the call returns 0 and draws nothing.
+ *
  * A surface is a handle: GAC_SCREEN, one from vram_alloc(), or a rectangle
  * of RAM registered with gac_ram_surface(). Every call returns 1, or 0 when
  * the surface is not there. On a machine without a GAC, gac_present() is 0
@@ -21,7 +27,18 @@
 
 #define GAC_SCREEN 0u                 /* the screen of the current mode, in video memory */
 
+/* gac_blit_alpha: not one alpha for the rectangle, but each source pixel's. */
+#define GAC_SRC_ALPHA 256u
+
+/* gac_features() */
+#define GAC_FEATURE_TEXT      1u
+#define GAC_FEATURE_BLEND     2u
+#define GAC_FEATURE_SRC_ALPHA 4u
+
 int gac_present(void);
+
+/* What this GAC can do: the GAC_FEATURE_* bits, or 0 with no GAC. */
+unsigned gac_features(void);
 
 unsigned gac_ram_surface(unsigned address, unsigned w, unsigned h);  /* a handle, or 0 */
 int gac_ram_free(unsigned handle);

@@ -28,6 +28,7 @@
 
 /* 0 = not asked yet, 1 = there, 2 = not. */
 static unsigned gac_there = 0u;
+static unsigned gac_feat = 0u;             /* INFO's feature bits, once probed */
 static unsigned gac_cell_w = 0u;           /* the font's cell, for a long text's pieces */
 
 /* One command whose arguments are already in the window: its answer. */
@@ -53,9 +54,15 @@ int gac_present(void) {
             IO_CH = 0u;
         } else if (IO_RETLEN != 0xFFFFFFFFu && IO_RETLEN >= 12u && IO_DATAW[0] == GAC_MAGIC) {
             gac_there = 1u;
+            gac_feat = IO_DATAW[1];    /* the same reply: no second command */
         }
     }
     return gac_there == 1u;
+}
+
+unsigned gac_features(void) {
+    if (!gac_present()) return 0u;
+    return gac_feat;
 }
 
 unsigned gac_ram_surface(unsigned address, unsigned w, unsigned h) {

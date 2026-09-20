@@ -43,6 +43,7 @@ system    = kernel.c            # what the installed hard disk boots: the kernel
 
 /etc/bmp/pigeon.bmp = etc/bmp/pigeon.bmp   # what the splash draws
 /etc/bmp/eye-mask.bmp = etc/bmp/eye-mask.bmp   # where the splash's eyes flash
+/etc/bmp/badge.bmp = etc/bmp/badge.bmp   # a soft-edged sprite, for graphics -sprite (tools/make_badge.py)
 /docs/readme.txt = readme.txt
 /docs/hello.pgs  = docs_hello.pgs   # a script to read and to run
 /docs/logo.pgs   = docs_logo.pgs    # and one that draws (docs/graphics.md)

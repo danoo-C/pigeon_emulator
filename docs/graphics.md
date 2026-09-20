@@ -29,6 +29,7 @@ arguments, as many to a call as a line holds:
 | `-disc X Y R C` | filled |
 | `-text X Y WORDS C` | the 5×7 font; quote it if it has spaces in it |
 | `-f FILE X Y W H MODE` | a BMP, at that place and size |
+| `-sprite FILE X Y W H MODE` | the same, but on the file's own per-pixel alpha |
 | `-wait` | hold the screen until a key, and print its code |
 
 **A colour is `0xAARRGGBB`**, and an alpha from `0x01` to `0xFE` **blends**:
@@ -192,9 +193,35 @@ display, so a program that page-flipped is still pointed back at
 |---|---|
 | `user/os/bin/graphics.c` | the program |
 | `lib/pigeon/display.h` | the shapes, `disp_disc` included |
-| `lib/pigeon/bmp.h` | `-f`, through `bmp_load` |
+| `lib/pigeon/bmp.h` | `-f`, through `bmp_load`; `-sprite` adds `BMP_ALPHA` |
+| `lib/pigeon/gac.h` | `-sprite`, through `gac_blit_alpha` at `GAC_SRC_ALPHA` |
 | `user/os/kernel.c` | `keepscreen`, slot 22 |
 | `user/os/bin/pgs.c` | `# graphics`, `# graphics WxH`, and `\` |
 | `user/os/bin/setmode.c` | `setmode` ([vram.md](vram.md)) |
 | `user/os/docs_logo.pgs` | `/docs/logo.pgs`, the example |
 | `tests/test_graphics.py` | the operations, at the pixel |
+
+
+## `-sprite`: a picture with a soft edge
+
+`-f` draws every pixel of a file. **`-sprite` keeps a 32-bit BMP's alpha
+byte** (`BMP_ALPHA`) and lays the picture over what is already on the
+screen: a soft edge is soft, and a fully transparent pixel is not drawn at
+all, so a round badge is round rather than a square with a round thing in
+it.
+
+```sh
+graphics -clear 0xFF101018 -sprite /etc/bmp/badge.bmp 60 20 64 64 CROP_TOP_LEFT -wait
+```
+
+`/etc/bmp/badge.bmp` ships on the disc for exactly this: a 64 × 64 disc
+whose rim is one pixel of partial alpha, written by `tools/make_badge.py`.
+The other two pictures on the disc are 24-bit and have no alpha to keep —
+`-sprite` draws those exactly as `-f` does, which is not an error.
+
+**Where it goes.** On a machine with the accelerator it is one bus command,
+`gac_blit_alpha` at `GAC_SRC_ALPHA` ([gac.md](gac.md) §3); on one without,
+`graphics.c` blends the pixels itself with the same formula. The picture is
+identical either way, and `tests/test_graphics.py` runs the same command on
+a machine with no video memory and compares the two framebuffers byte for
+byte.
