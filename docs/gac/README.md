@@ -16,6 +16,7 @@ its own:
 | **README.md** (this) | what you asked for, where things stood, the goal, the phases, what is not in the plan |
 | [design.md](design.md) | the numbers (§4), the design (§5), the file-by-file list (§6), the risks (§8) |
 | [decisions.md](decisions.md) | your answers, Q1–Q15 (§10) and the follow-up (§11) |
+| [next.md](next.md) | what is left after Phase 9, and what each piece would cost |
 | `phaseN_*.md` | one phase each: its steps, its tests, what "done" means, and — once built — what was built |
 
 Section numbers (§4, §5.3.1, …) are kept from the original file, so every
