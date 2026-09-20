@@ -1,9 +1,12 @@
 # Later: the shell with a font you can change
 
-> Part of [the GUI plan](../gui/README.md). **Status: recorded, not planned,
-> 2026-09-20.** You asked for this to be written down so it is not
-> forgotten ([questions.md Q7](questions.md)), and explicitly **not built
-> now**. Facts marked *(checked)* were read in the code on 2026-09-20.
+> Part of [the font plan](README.md). **Status: §1–§3's first two steps are
+> now F1, 2026-09-20.** You asked for this to be written down so it is not
+> forgotten ([gui/questions.md Q7](../gui/questions.md)) and explicitly not
+> built then — but [build.md Q2](build.md) decided the console takes the new
+> font the day F1 lands, which is §3 steps 1 and 2. **The font picker,
+> `/etc/boot.conf` and Ctrl + wheel are still later.** Facts marked
+> *(checked)* were read in the code on 2026-09-20.
 
 **What you said:**
 
@@ -56,18 +59,27 @@ worth switching to is wider, so it needs fewer columns and fewer rows:
 | 12 × 24 | 13 × 26 | 98 | fits easily |
 | 16 × 32 | 18 × 36 | 71 | fits easily |
 
-So zooming the shell's font costs **no extra memory at all**. The one rule to
-keep is that nothing may select a font whose cell is *narrower* than 6 px,
-which is also the smallest font that exists.
+So zooming the shell's font costs **no extra memory at all**. The rule to
+keep is that nothing may select a font whose cell is **narrower than 6 px or
+shorter than 9 px**: the arrays are sized `DISPLAY_MAX_W / CON_CELL_W` by
+`DISPLAY_MAX_H / CON_CELL_H` from those two constants *(checked:
+`kernel.c:77-78`)*, so the height is a floor exactly as the width is. The
+built-in 5 × 7 on its 6 × 9 cell is that floor, and every font worth switching
+to is bigger ([build.md §6.1](build.md)).
 
 ---
 
 ## 3. What it would take
 
-1. **Font slots** ([the font plan](README.md) F2) — without them, the shell's font
-   is the same global slot every program clobbers, so this cannot work first.
-2. **`CON_CELL_W`/`CON_CELL_H` become variables**, read from the selected
-   slot's cell, plus a `con_resize()` on change.
+1. **`CON_CELL_W`/`CON_CELL_H` become variables**, read from the loaded
+   font's cell, plus a `con_resize()` on change. **This is F1**
+   ([build.md Q2](build.md)), together with the `k_tidy()` line that puts the
+   console's font back when a program ends — without which any program that
+   loads a font of its own leaves the console drawing on the wrong grid.
+2. **Font slots** ([the font plan](README.md) F2) are what make it *safe*
+   rather than merely working: until slot 0 is the console's, the shell's font
+   is the same global one every program overwrites, and `k_tidy()` is what
+   repairs it each time.
 3. **A way to say which font.** Three, in increasing effort:
    - `/etc/boot.conf` names a font at startup — one line, matches how the
      splash is already configured *(checked)*;
@@ -78,7 +90,7 @@ which is also the smallest font that exists.
      "if Ctrl is held, change the font size instead of scrolling" lands in
      code that already exists.
 4. **`panel.bin`** gets a font picker, which it wants anyway
-   ([questions.md Q7](questions.md)).
+   ([gui/questions.md Q7](../gui/questions.md)).
 
 ---
 
@@ -98,6 +110,7 @@ app. It is not the shell and does not try to be.
 
 ## 5. When
 
-After F2 at the earliest, and there is no reason it must come before or after
-the GUI library — it is independent of it. It is small enough to be a good
-thing to do on a day when the GUI plan feels large.
+**Steps 1 and 2 are F1 and F2**, so the shell's text is big as soon as the
+font system exists. **Steps 3 and 4 — saying *which* font, and the picker —
+are still later**, independent of the GUI library, and small enough to be a
+good thing to do on a day when the GUI plan feels large.

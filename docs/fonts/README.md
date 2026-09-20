@@ -35,6 +35,7 @@ it rather than the other way round.
 | [format.md](format.md) | the `.pf` file, and `tools/make_font.py` — including importing a real TTF |
 | [vector.md](vector.md) | **your counter-question answered:** vectors, pixels, cells, and what actually makes text look modern |
 | [questions.md](questions.md) | every question, your answers, and what was decided |
+| [build.md](build.md) | **the plan checked against the code** — what holds, eight things that do not, and the questions they raise |
 | [shell.md](shell.md) | **later:** the shell with a font you can change, recorded so it is not lost |
 
 ---
@@ -58,8 +59,11 @@ the 5 × 7 on *every program start* — the only caller in the tree *(checked:
 pixels.** Every glyph pixel is ink or nothing, drawn with a mask OR
 *(checked: `gac.py:341-362, 647-677`)*. Antialiasing is the biggest visual
 win available, and it is cheap: for a known foreground and background,
-coverage → colour is a 256-entry `translate` table, which the device already
-builds for `BlendInk` ([vector.md](vector.md)).
+coverage → colour is a 256-entry `translate` table, the same shape as the one
+the device builds for `BlendInk` but indexed by coverage rather than by the
+destination. Where there is no known background — which is **every text call
+on the machine today** — the glyph's coverage is per-pixel alpha and Phase
+9's blend draws it ([vector.md](vector.md), [build.md §3](build.md)).
 
 **4. A real font off your PC works today.** `pygame.freetype` is already
 installed with the pygame client, found **26** TrueType faces on this
@@ -86,15 +90,23 @@ exactly the 98-column cell ([format.md](format.md)).
 
 | | what | side | needs |
 |---|---|---|---|
-| **F1** | The `.pf` format, `tools/make_font.py` (hand-drawn and `--ttf`), an 8 × 16 font in `/etc/font/` | guest | nothing |
-| **F2** | **Font slots**: commands 17/18, `FEATURE_FONTS`, per-slot cell in the library | both | F1 |
+| **F1** | The `.pf` format, **`font.c`**, `tools/make_font.py` (hand-drawn and `--ttf`), an 8 × 16 font in `/etc/font/`, **the console on it**, and **`k_tidy()` putting the font back** | guest | nothing |
+| **F2** | **Font slots**: commands 17/18 *with `flags` and `advance` words*, `FEATURE_FONTS`, per-slot cell in the library | both | F1 |
 | **F3** | `disp_cell_w()`/`disp_cell_h()`, layout from run-time metrics | guest | F2 |
 | **F4** | **Wide glyphs** (over 8 px) — the `bpr` stride. What 98 columns needs | device | F2 |
-| **F5** | **Antialiased text**: 8-bit coverage and the `translate` draw path | device | F4 |
+| **F5** | **Antialiased text**: 8-bit coverage, the `translate` path where the background is known and Phase 9's blend where it is not | device | F4 |
 | **F6** | **Proportional fonts**, chosen per font — monospaced for columns, proportional for GUI chrome | both | F5 |
 
-**F1 on its own already helps**, and needs nothing from the device. F4 and F5
+**F1 on its own already helps**, and needs nothing from the *device* — but it
+does need one line from the kernel: `k_tidy()` does not put the accelerator's
+font back when a program ends, so a program that loads one leaves the shell
+drawing its 6 × 9 grid with 8 × 16 glyphs ([build.md §2](build.md)). F4 and F5
 are what make it genuinely good.
+
+> **Every phase above carries an amendment from [build.md](build.md)**, which
+> checked this plan against the code and found eight things wrong or missing.
+> The amendments are folded in here and in the files they belong to; the
+> reasoning stays there.
 
 Recorded but not scheduled: **[shell.md](shell.md)**, the shell with a font
 you can change — which turns out to be two variables and a `con_resize()`.

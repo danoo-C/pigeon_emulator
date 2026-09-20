@@ -1,7 +1,8 @@
 # `<pigeon/gui.h>`: the proposed header, and the widgets
 
-> Part of [the GUI plan](README.md). **Status: design, 2026-09-20. Questions
-> open ([questions.md](questions.md)).** Everything here is shaped by
+> Part of [the GUI plan](README.md). **Status: design, 2026-09-20. Every
+> question is decided ([questions.md](questions.md),
+> [fonts/build.md §7](../fonts/build.md#7-questions)).** Everything here is shaped by
 > [constraints.md](constraints.md) — no `enum`, no `switch`, no struct by
 > value, no self-referential struct, no brace initialisers. Read that first
 > if a choice here looks odd.

@@ -1,12 +1,15 @@
 # `<pigeon/gui.h>`: a GUI library, and fonts you can read
 
-> **Status: design, 2026-09-20. Nothing is built. You answered the first
-> 27 questions and they are folded in; **7 are open** — [Q6](questions.md#6-retained-mode-at-all)
-> re-asked with the explanation you wanted, [Q17–Q22](questions.md) raised by
-> your answers, and [fonts questions §2](../fonts/questions.md) raised
-> by verifying the sizes.**
+> **Status: design, 2026-09-20. Nothing is built. Every question is now
+> answered and folded in** — Q1–Q16, then Q17–Q22 raised by those answers,
+> then [Q23](questions.md#23-how-much-line-editing-does-the-console-widget-do),
+> settled through [fonts/build.md](../fonts/build.md), which also checked this
+> plan against the code it rests on and found nothing here that has to change.
 > Facts marked *(checked)* were read in the code on 2026-09-20; the compiler
-> findings in [constraints.md](constraints.md) were **run**, not read.
+> findings in [constraints.md](constraints.md) were **run**, not read — and
+> **re-run on 2026-09-20**, reproducing byte for byte
+> ([build.md §1](../fonts/build.md)). They now have a plan of their own,
+> [compiler_plan.md](../compiler_plan.md).
 
 ---
 
@@ -34,14 +37,11 @@ Five things, and they turn out to be one thing with four parts:
 They keep working with no GUI library at all
 ([canvas.md §6](canvas.md#6-the-originals-are-not-touched)).
 
-> **Where the questions are.** Answered ones are folded in as
-> **Decided (you)**; the open ones are:
-> **[questions.md Q6](questions.md#6-retained-mode-at-all)** (retained vs
-> immediate, now with the explanation), **[questions.md Q17–Q22](questions.md)**
-> (raised by your answers about themes, the console widget and fonts) and
-> **[fonts questions §2](../fonts/questions.md)** (six, raised by
-> measuring the sizes). Each has a recommendation that stands if you leave it
-> blank.
+> **Where the questions are.** All of them are folded in as
+> **Decided (you)** — [questions.md](questions.md) for this plan,
+> [fonts/questions.md](../fonts/questions.md) for the font system, and
+> [fonts/build.md §7](../fonts/build.md#7-questions) for the five raised by
+> checking both plans against the code. **None is open.**
 
 ---
 
@@ -63,7 +63,8 @@ They keep working with no GUI library at all
 | [canvas.md](canvas.md) | the canvas widget: a surface the app draws into itself |
 | [fonts/shell.md](../fonts/shell.md) | **later:** the shell with a font you can change, recorded so it is not lost |
 | [api.md](api.md) | the proposed header, and the widget catalogue |
-| [questions.md](questions.md) | **the open questions**, each with a recommendation |
+| [questions.md](questions.md) | every question, your answers, and what was decided |
+| [fonts/build.md](../fonts/build.md) | **both plans checked against the code** — what holds, what did not, and the amendments |
 
 ---
 
@@ -94,7 +95,7 @@ luxury: they are what lets a GUI use a big font without breaking the console
 around it.** Phase 3 foresaw this and left room *(checked:
 `phase3_gac.md:290-299`)*.
 
-### 3. Three silent miscompiles, confirmed by running them
+### 3. Silent miscompiles, confirmed by running them
 
 Not "unsupported" — **accepted, and wrong, with no diagnostic**
 ([constraints.md §1](constraints.md)):
@@ -105,11 +106,15 @@ Not "unsupported" — **accepted, and wrong, with no diagnostic**
 | `f(q)` passing a struct by value | passes it | **passes its first word** |
 | `int a = 2*3+1;` at file scope | 7 | **0** |
 | `int a = -1;` at file scope | −1 | **0** |
+| `a / b` on negative operands | −10 | **2147483638** |
+| `a >> 1` on a negative value | −4 | **2147483644** |
 
 These shape the whole API: **every function takes a pointer, and every table
 is filled at run time.** They are also worth fixing in the compiler
 independently of this library — a rejected program is a nuisance, a silently
-wrong one is a trap.
+wrong one is a trap — and they now have a plan of their own,
+**[compiler_plan.md](../compiler_plan.md)**, which re-ran every row above and
+added the last two.
 
 What *does* work, and is the one thing this design cannot do without:
 **function pointers as struct members, called through `->`** — verified.
@@ -154,7 +159,10 @@ void on_quit(int id, gui_event *e) {
 ## Phases
 
 Each leaves the machine working. **F1 is independent of everything else and
-fixes the complaint on its own.**
+fixes the complaint on its own** — given the one line in `k_tidy()` that puts
+the console's font back when a program ends, without which a program that
+loads a font leaves the shell drawing on the wrong grid
+([fonts/build.md §2](../fonts/build.md)).
 
 **[The font plan](../fonts/README.md) is built first, in full** — F1 to F5 —
 because you said so and because measuring agreed: 8 × 16 is not actually
@@ -183,8 +191,10 @@ enough ([fonts/sizes.md](../fonts/sizes.md)). Only then:
   without any of it ([canvas.md §6](canvas.md#6-the-originals-are-not-touched)).
 - **Reflowing layout** — rows, columns, weights. Absolute positions first, as
   you asked; a layout pass can come later over the same machinery.
-- **Proportional text.** Nothing on the machine supports variable-width
-  glyphs, in three independent places *(checked)*
+- **Proportional text, before F6.** Nothing on the machine supports
+  variable-width glyphs today, in three independent places *(checked)* — the
+  font plan adds it in [F6](../fonts/README.md), after this library's first
+  phases, and the GUI's own chrome is what it is for
   ([fonts/vector.md §3](../fonts/vector.md)).
 - **Overlapping windows or z-order** beyond "the modal is on top".
 

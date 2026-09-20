@@ -12,42 +12,52 @@ before [api.md](api.md); it is why that header looks the way it does.
 
 ---
 
-## 1. Three silent miscompiles
+## 1. The silent miscompiles — **fixed, 2026-09-20**
 
-**These compile without a warning and produce wrong values.** They are not
-"unsupported" — the compiler accepts them and emits code that does the wrong
-thing, so nothing tells you. Every one was confirmed by running the program
-on the emulator and reading `A`:
+**These used to compile without a warning and produce wrong values**, which
+is why much of this library's shape was a way of avoiding them. Every one was
+found by running the program on the emulator and reading `A`, and every one
+is now either correct or a diagnostic
+([compiler_plan.md](../compiler_plan.md)):
 
-| written | expected | actually returns |
-|---|---|---|
-| `struct P y; y = x;` then read `y.c` | 3 | **9** — the old value; only the first word is copied |
-| `int f(struct P p)` called as `f(q)`, read `p.c` | 3 | **0** |
-| `struct P mk(void)` returning a struct, read `.c` | 3 | **0** |
-| `int a = 2*3+1;` at file scope | 7 | **0** |
-| `int a = -1;` at file scope | −1 | **0** |
+| written | expected | was | now |
+|---|---|---|---|
+| `struct P y; y = x;` then read `y.c` | 3 | **9** — only the first word was copied | **3**, every word copied |
+| `int f(struct P p)` called as `f(q)` | 3 | **0** | *refused:* take a `struct P *` |
+| `struct P mk(void)` returning a struct | 3 | **0** | *refused:* fill one through a pointer |
+| `int a = 2*3+1;` at file scope | 7 | **0** | **7** |
+| `int a = -1;` at file scope | −1 | **0** | **−1** |
+| `int a = sizeof(struct P);` at file scope | 8 | **0** | **8** |
+| `int b = a;` at file scope | — | **0** | *refused:* not a constant |
+| `int v = -20; v / 2` | −10 | **2147483638** | **−10** |
+| `int a = -7; a % 3` | −1 | **0** | **−1** |
+| `int a = -8; a >> 1` | −4 | **2147483644** | **−4** |
 
-The struct cases are one bug: there is no struct copy anywhere in codegen, so
-assignment, by-value arguments and by-value returns all move exactly four
-bytes *(checked: `codegen.py:697-712`, `607-612`)*. The initialiser case is
-another: only a bare non-negative integer literal survives; everything else —
-a constant expression, a negative number, `&something`, `sizeof` — is
-silently dropped to zero *(checked: `codegen.py:194-200`)*.
+**What this means for the code you write here:**
 
-**The rules that follow, and they are absolute:**
+1. **A struct may be assigned; it still may not cross a call.** `y = x;`
+   copies every word, and so does `struct P y = x;`. A by-value parameter or
+   return is a diagnostic naming the fix, because a parameter slot is one
+   word and a return comes back in `A`. Every function in this library still
+   takes `struct T *`, which is house style and what `math.h`, `bmp.c` and
+   `fs.c` already do *(checked)*.
+2. **A global may be initialised with any constant** — a folded expression,
+   `sizeof`, a cast, `?:`, or an address such as `&thing`, an array's name or
+   a function's. A **table of function pointers at file scope now works**,
+   where before every entry was silently zero. What is still impossible is a
+   brace initialiser on a *struct* (§2), so the theme is still filled at run
+   time ([theme.md](theme.md)) — for that reason alone, not this one.
+3. **Signed `/`, `%` and `>>` are correct**, so [scaling.md](scaling.md)'s
+   arithmetic no longer has to keep its coordinates non-negative. It still
+   does, because the unsigned path skips the sign-fixing helper and is
+   smaller and faster — but it is now an optimisation rather than a
+   correctness rule.
 
-1. **Never pass, assign or return a struct by value.** Every function takes
-   `struct T *`. Every library in the tree already does this — `math.h`'s
-   `vec3 *`, `bmp.c`'s `bmp_header *out`, `fs.c` throughout *(checked)* — and
-   this is why.
-2. **Never initialise a global with anything but a plain literal.** Fill it
-   in an `init()` function. For the GUI this decides the whole theme design:
-   a `static gui_theme pigeon = {...}` table is impossible twice over, so the
-   palette is **filled at run time** ([theme.md](theme.md)).
-
-> These are worth fixing in the compiler regardless of this library — a
-> rejected program is a nuisance, a silently wrong one is a trap. It is not
-> part of the GUI plan, but it belongs on the list.
+Two more went the same way on the same day: **`char` now sign-extends when
+it is loaded**, so `char c = -1; (int)c` is −1 rather than 255 and
+`(char)200` is −56; and **`char *p = "hi";` at file scope is a pointer**
+rather than the 3-byte array it silently became. `unsigned char` is
+untouched, and is still the right type for a byte.
 
 ---
 
@@ -112,14 +122,17 @@ exactly the thing, and they work.
 2. **Locals are never zero-initialised** — the frame stack is reused
    *(checked)*. `gui_init()` clears the pool explicitly; a local `gui_event`
    is filled field by field.
-3. **`/` and `%` are the machine's unsigned divide**, correct only for
-   non-negative operands *(checked: `codegen.py:512-517`)*. **This lands
-   directly on scaling**, which is all multiply-then-divide — so the scaling
-   path keeps coordinates non-negative and does the sign separately
-   ([scaling.md](scaling.md)).
-4. **`char` is signed but never sign-extended on load** *(checked:
-   `codegen.py:414-415`)*. Use `unsigned char` for bytes, `int` for anything
-   that can go negative.
+3. **`/`, `%` and `>>` are correct on signed operands**, as of 2026-09-20:
+   the compiler calls a `__divsi3`/`__modsi3` helper and shifts the sign in
+   *(checked: `codegen.py`, `_arithmetic_shift`)*. **Unsigned operands skip
+   all of that**, which is why [scaling.md](scaling.md) still casts to
+   `unsigned` before it multiplies and divides — smaller and faster, not
+   safer. `<pigeon/math.h>`'s `idiv`, `imod` and `ishr` are still there and
+   still answer 0 for a zero divisor, where a bare `/` faults.
+4. **`char` is signed and sign-extends on load**, as of 2026-09-20 — two
+   instructions after the byte load, and none at all for `unsigned char`
+   *(checked: `codegen.py`, `_load`)*. `unsigned char` is still the right
+   type for a byte, because it says what it means and costs less.
 5. **`short`, `long` and `long long` are all silently 32-bit `int`**
    *(checked: `parser.py:169-170`)*. They promise something that is not
    delivered, so they do not appear in this library's header.

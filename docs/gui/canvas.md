@@ -96,6 +96,13 @@ void on_plot(int id, gui_event *e) {
 `disp_push_target` must swap `disp_w` and `disp_h` too, or clipping would
 still be against the screen — that is the whole point of it.
 
+**And a push must not straddle a `disp_present()`.** Present reassigns
+`disp_target` itself on the flip *(checked: `display.c:209-219`)*, so a
+present inside a push would be undone by the pop. The library draws canvases
+inside the frame and presents after, so this never arises in `gui_poll()`;
+it is a rule for a program using `disp_push_target` by hand
+([build.md §6.1](../fonts/build.md)).
+
 **This is what makes the canvas worth having:** the body of `graph.c`'s
 `render()` or `cube.c`'s draw loop can be *copied* into a canvas handler and
 compile as-is, because `disp_*` and `DISP_W`/`DISP_H` keep meaning what they
