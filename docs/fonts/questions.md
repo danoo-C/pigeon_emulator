@@ -88,6 +88,17 @@ Raised by §8 and §9. Same rule: blank means the recommendation.
 
    **Decided (you):** blank, so the recommendation — **fall back to 1-bit** for text over an unknown background. Silently correct and fast.
 
+   **Amended 2026-09-20 ([build.md §3](build.md), Q1):** the fallback would
+   have been the *only* path. Every text call on the machine passes `bg = 0`,
+   which is the device's "no background" — `disp_text`, `disp_textn`,
+   `disp_char` and so the kernel console *(checked: `display.c:632-684`,
+   `kernel.c:285-293`)*. F5 would have shipped without changing one pixel.
+   **So both paths go in:** coverage is per-pixel alpha, so text over no
+   background blends against what is there with Phase 9's
+   `src_alpha_row`/`blend_span`, and text with a background takes the fast
+   table. `disp_text_bg()` is added so the console and the GUI ask for the
+   fast one deliberately.
+
 4. **Is `pygame` allowed to be a build dependency?** `tools/make_font.py`
    would need it to read a TTF, and today pygame is only needed by the
    optional display client — the emulator, the tests and the toolchain need

@@ -385,6 +385,212 @@ def test_function_pointer_reassigned():
             "int main(void){ int (*f)(void) = a; int s = f(); f = b; return s*10 + f(); }", 12)
 
 
+# --- signed arithmetic on an unsigned machine (docs/compiler_plan.md) --------
+#
+# DIV and SHR are unsigned and there is no SAR, so the compiler puts the
+# sign back. Every case below returned the wrong answer, silently, before
+# the fix: -20 / 2 was 2,147,483,638.
+
+@cases(
+    ("-20 / 2", -10),
+    ("20 / -2", -10),
+    ("-20 / -2", 10),
+    ("-7 / 2", -3),                       # C truncates toward zero
+    ("7 / -2", -3),
+    ("-7 % 3", -1),                       # the sign follows the dividend
+    ("7 % -3", 1),
+    ("-7 % -3", -1),
+    ("-8 >> 1", -4),
+    ("-1 >> 5", -1),
+    ("-1024 >> 10", -1),
+    ("-3 << 2", -12),
+    ("(int)0x80000000 / 2", -1073741824),  # INT_MIN, where negating overflows
+)
+def test_signed_arithmetic(expr, expected):
+    returns(f"int main(void) {{ return {expr}; }}", expected)
+
+
+@cases(
+    ("divide", "int a; int b; a = -20; b = 2; return a / b;", -10),
+    ("divide by a negative", "int a; int b; a = 20; b = -2; return a / b;", -10),
+    ("modulo", "int a; int b; a = -7; b = 3; return a % b;", -1),
+    ("shift by a variable", "int a; int n; a = -64; n = 3; return a >> n;", -8),
+    ("shift by a zero variable", "int a; int n; a = -8; n = 0; return a >> n;", -8),
+    ("compound divide", "int a; a = -20; a /= 2; return a;", -10),
+    ("compound modulo", "int a; a = -7; a %= 3; return a;", -1),
+    ("compound shift", "int a; a = -8; a >>= 1; return a;", -4),
+    ("INT_MIN / -1", "int a; int b; a = (int)0x80000000; b = -1; return a / b;",
+     -2147483648),
+)
+def test_signed_arithmetic_on_variables(label, body, expected):
+    returns(f"int main(void) {{ {body} }}", expected)
+
+
+@cases(
+    ("divide", "unsigned a; a = 0xFFFFFFFEu; return (int)(a / 2u);", 0x7FFFFFFF),
+    ("modulo", "unsigned a; a = 0xFFFFFFFFu; return (int)(a % 10u);", 5),
+    ("shift", "unsigned a; a = 0x80000000u; return (int)(a >> 31);", 1),
+)
+def test_unsigned_arithmetic_is_left_alone(label, body, expected):
+    """The helper and the sign-extending shift cost nothing where the types
+    say they are not needed -- which is most of this machine's arithmetic."""
+    returns(f"int main(void) {{ {body} }}", expected)
+
+
+def test_pointer_difference_can_be_negative():
+    returns("int main(void){ int v[8]; int *p; int *q; p = &v[1]; q = &v[5];"
+            "                return (int)(p - q); }", -4)
+
+
+# --- globals are built into the image, so their values must be known --------
+
+@cases(
+    ("a constant expression", "int a = 2*3+1;", 7),
+    ("a negative number", "int a = -1;", -1),
+    ("sizeof", "int a = sizeof(int) * 2;", 8),
+    ("a macro that expands to an expression", "#define N (4*2)\nint a = N;", 8),
+    ("a cast", "int a = (char)300;", 44),
+    ("a conditional", "int a = 1 ? 9 : 4;", 9),
+    ("a character", "int a = 'A';", 65),
+    ("a plain literal, as ever", "int a = 7;", 7),
+)
+def test_global_initialisers_fold(label, declaration, expected):
+    returns(declaration.replace("\\n", "\n") + "\nint main(void){ return a; }", expected)
+
+
+def test_a_global_can_hold_an_address():
+    returns("int v = 42;\nint *p = &v;\nint main(void){ return *p; }", 42)
+
+
+def test_a_global_table_of_function_pointers():
+    """Impossible before: every entry was silently zero, so calling one
+    jumped to address 0."""
+    returns("typedef int (*cb)(int);\n"
+            "int one(int x){ return x + 1; }\n"
+            "int two(int x){ return x + 2; }\n"
+            "cb table[] = {one, two};\n"
+            "int main(void){ return table[1](5); }", 7)
+
+
+def test_a_global_array_folds_its_elements():
+    returns("int t[] = {2*3+1, -1, sizeof(int)};\n"
+            "int main(void){ return t[0] + t[1] + t[2]; }", 10)
+
+
+# --- struct assignment copies the whole struct ------------------------------
+
+def test_struct_assignment_copies_every_word():
+    returns("struct P { int a; int b; int c; };\n"
+            "int main(void){ struct P x; struct P y;\n"
+            "  x.a = 1; x.b = 2; x.c = 3; y.a = 7; y.b = 8; y.c = 9;\n"
+            "  y = x; return y.a * 100 + y.b * 10 + y.c; }", 123)
+
+
+def test_struct_assignment_through_pointers():
+    returns("struct P { int a; int c; };\n"
+            "int main(void){ struct P x; struct P y; struct P *p; struct P *q;\n"
+            "  x.c = 3; y.c = 9; p = &y; q = &x; *p = *q; return y.c; }", 3)
+
+
+def test_struct_copies_into_a_declaration():
+    returns("struct P { int a; int c; };\n"
+            "int main(void){ struct P x; x.a = 1; x.c = 3;\n"
+            "  { struct P y = x; return y.c; } }", 3)
+
+
+def test_struct_assignment_of_a_global_and_a_member():
+    returns("struct Inner { int u; int v; };\n"
+            "struct Outer { int k; struct Inner in; };\n"
+            "struct Outer g;\n"
+            "int main(void){ struct Inner i; i.u = 4; i.v = 5;\n"
+            "  g.in = i; return g.in.u * 10 + g.in.v; }", 45)
+
+
+def test_a_big_struct_copies_in_a_loop():
+    returns("struct Big { int a[10]; };\n"
+            "int main(void){ struct Big x; struct Big y; int i;\n"
+            "  for (i = 0; i < 10; i++) { x.a[i] = i * 2; y.a[i] = 0; }\n"
+            "  y = x; return y.a[9] + y.a[0]; }", 18)
+
+
+def test_a_struct_copy_leaves_its_neighbours_alone():
+    returns("struct P { int a; int b; int c; };\n"
+            "int main(void){ int before; struct P x; struct P y; int after;\n"
+            "  before = 11; after = 22; x.a = 1; x.b = 2; x.c = 3;\n"
+            "  y = x; return before + after + y.c; }", 36)
+
+
+# --- char is signed, and says so (docs/compiler_plan.md C7) -----------------
+#
+# MR loads a byte zero-extended, so `char c = -1;` used to compare equal to
+# 255 and (int)c was 255. unsigned char is untouched and still costs one
+# instruction.
+
+@cases(
+    ("assigned a negative", "char c; c = -1; return (int)c;", -1),
+    ("compared with a negative", "char c; c = -1; return c == -1;", 1),
+    ("tested for less than zero", "char c; c = -1; if (c < 0) return 5; return 9;", 5),
+    ("at the positive edge", "char c; c = 127; return (int)c;", 127),
+    ("cast from a bigger number", "return (char)200;", -56),
+    ("cast that also narrows", "return (char)300;", 44),
+    ("in arithmetic", "char a; char b; a = -10; b = 3; return a + b;", -7),
+    ("in an array", "char v[4]; v[0] = -3; return (int)v[0];", -3),
+    ("through a pointer", "char v[4]; char *p; v[1] = -9; p = v; return (int)p[1];", -9),
+)
+def test_char_is_signed(label, body, expected):
+    returns(f"int main(void) {{ {body} }}", expected)
+
+
+def test_a_char_struct_member_and_parameter_are_signed():
+    returns("struct S { char a; char b; };\n"
+            "int f(char c){ return (int)c; }\n"
+            "int main(void){ struct S s; s.b = -7; return f(s.b); }", -7)
+
+
+def test_a_global_char_is_signed():
+    returns("char g = -5;\nint main(void){ return (int)g; }", -5)
+
+
+@cases(
+    ("holds 128 and above", "unsigned char c; c = 200; return (int)c;", 200),
+    ("compares as unsigned", "unsigned char c; c = 200; return c > 100;", 1),
+    ("cast stays in range", "return (int)(unsigned char)200;", 200),
+)
+def test_unsigned_char_is_not_touched(label, body, expected):
+    returns(f"int main(void) {{ {body} }}", expected)
+
+
+def test_a_string_scan_still_stops_at_the_terminator():
+    """The loop everything on this machine is built on: sign extension must
+    not change what counts as the end of a string."""
+    returns("int main(void){ char v[4]; int n; v[0] = 65; v[1] = 0; n = 0;\n"
+            "  while (v[n]) n++; return n; }", 1)
+
+
+# --- `char *p = "..."` is a pointer, `char v[] = "..."` is an array (C8) ----
+
+def test_a_global_string_pointer_is_a_pointer():
+    """It used to become char[3]: the parser could not tell `char *p` from
+    `char p[]`, so the image held the characters where the pointer goes."""
+    returns('char *p = "hi";\nint main(void){ return (int)sizeof(p) * 100 + p[0]; }',
+            4 * 100 + 104)
+
+
+def test_a_global_string_pointer_can_be_reassigned():
+    returns('char *p = "hi";\nchar *q = "XY";\n'
+            'int main(void){ p = q; return (int)p[0]; }', 88)
+
+
+def test_a_global_char_array_still_holds_its_own_bytes():
+    returns('char v[] = "hi";\n'
+            'int main(void){ v[0] = 88; return (int)sizeof(v) * 100 + v[0]; }',
+            3 * 100 + 88)
+
+
+def test_an_unsized_array_still_takes_its_length_from_the_initialiser():
+    returns("int t[] = {1,2,3};\nint main(void){ return (int)sizeof(t) + t[2]; }", 15)
+
+
 # --- diagnostics ------------------------------------------------------------
 
 @cases(
@@ -400,6 +606,15 @@ def test_function_pointer_reassigned():
     ("int other(void){ return 0; }", "no main"),
     ("int main(void){ goto x; }", "goto"),
     ("int main(void){ switch(1){} }", "switch"),
+    # Silent miscompiles until 2026-09-20, now refused (docs/compiler_plan.md)
+    ("struct P { int a; };\nint f(struct P p){ return p.a; }\nint main(void){ return 0; }",
+     "by value"),
+    ("struct P { int a; };\nstruct P mk(void){ struct P r; return r; }\n"
+     "int main(void){ return 0; }", "return"),
+    ("int a = 3;\nint b = a;\nint main(void){ return b; }", "compile-time constant"),
+    ("int a = 1 / 0;\nint main(void){ return a; }", "division by zero"),
+    ("struct P { int a; };\nint main(void){ struct P x; struct P y; struct P z;\n"
+     "  z = (y = x); return 0; }", "whole statement"),
 )
 def test_rejects(source, fragment):
     try:

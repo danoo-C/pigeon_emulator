@@ -10,8 +10,9 @@ You asked, against the recommendation of a 12 × 24 cell:
 > but why are we thinking of cells and pixels? are we doing svg style?
 
 It is the right question, and **three different things are tangled inside
-it.** One of them is not a choice, one of them is a choice we have already
-made without discussing it, and one is a choice still open.
+it.** One of them is not a choice, one of them is a choice we had already made
+without discussing it, and one was still open when this was written — §3, now
+decided both ways at once.
 
 ---
 
@@ -65,9 +66,22 @@ look like 1985.**
 The fix is **antialiasing** — storing 8-bit coverage per pixel and blending
 by it — and it is cheap, because for a known foreground and background the
 map from coverage to output byte is affine, so it is a 256-entry
-`bytes.translate` table, which `blend_table()` already builds for `BlendInk`
-*(checked: `gac.py:333-339`)*. That is phase **F5** and it is the single
-biggest visual win available.
+`bytes.translate` table, the same shape as the one `blend_table()` builds for
+`BlendInk` *(checked: `gac.py:258-262`)*. **Not the same table**: that one is
+indexed by the destination byte for a fixed source and alpha, and F5's is
+indexed by the coverage for a fixed foreground and background. Three of them,
+one per channel, per (fg, bg) pair — and since a console uses about two such
+pairs, caching the rendered glyph rows per pair makes antialiased text cost
+what 1-bit text costs from the second line onwards.
+
+**And where there is no background**, which is every text call on the machine
+today — `disp_text` and friends all pass `bg = 0` *(checked:
+`display.c:632-684`)* — the glyph's coverage **is** per-pixel alpha, so
+Phase 9's `src_alpha_row`/`blend_span` draws it against whatever is under it,
+with no table at all *(checked: `gac.py:287-318`)*. Both paths, or F5 ships
+and nothing on the machine looks any different ([build.md §3](build.md)).
+
+That is phase **F5** and it is the single biggest visual win available.
 
 So the honest ranking of what makes text look modern:
 
@@ -79,7 +93,7 @@ So the honest ranking of what makes text look modern:
 
 ---
 
-## 3. "Cells" is the real choice, and it is still open
+## 3. "Cells" is the real choice, and the answer is "both"
 
 This is the part of your question that is genuinely undecided, and I should
 have raised it rather than assuming.
@@ -119,9 +133,19 @@ Smaller than it sounds, because the drawing already works:
 - **`_text`** computes a prefix sum of advances instead of `i * cell_w`. The
   big-integer mask join is unaffected; the masks simply stop being equal
   width *(checked: the join at `gac.py:363-367` does not care)*.
+- **`_text`'s clipping** is the same prefix sum again. It takes the visible
+  span as `len(text) * cell_w` and then slices the row mask at `left * 4`
+  *(checked: `gac.py:648-663`)*, which assumes a uniform advance just as
+  plainly as the drawing does.
+- **`gac_text()`'s chunking.** A string over 4,072 characters goes in pieces
+  and the guest advances `x` by `chunk * gac_cell_w` between them *(checked:
+  `gac.c:207-213`)*. With per-glyph advances that is wrong — and wrong only
+  for long strings, which is the worst kind of bug to leave lying about.
 - **The guest** needs `disp_text_w(slot, s)`, which [the GUI](../gui/api.md)
   wants anyway for laying out buttons.
-- **`.pf`** gains an optional advance table; absent means monospaced.
+- **`.pf`** gains an optional advance table; absent means monospaced, and the
+  device is told which by `SET_FONT2`'s `flags` and `advance` words
+  ([device.md §3.1](device.md)).
 
 ### The recommendation
 
@@ -130,9 +154,12 @@ that lines up columns keeps a monospaced font; the GUI's buttons and labels
 get a proportional one, where it will look markedly better. A `.pf` says
 which it is, and `TEXT` follows the font rather than a global setting.
 
-That becomes phase **F6**, after antialiasing — [questions.md §3
-Q1](questions.md) asks whether you want it at all, since "everything is a
-terminal font" is a perfectly coherent taste and costs nothing.
+That becomes phase **F6**, after antialiasing — and
+[questions.md §3 Q1](questions.md) **decided it**: both, chosen per font. The
+console and anything with columns keeps a monospaced font; the GUI's own
+chrome gets a proportional one. A `.pf` says which it is, through
+`SET_FONT2`'s `flags` and `advance` words ([device.md §3.1](device.md)), and
+`TEXT` follows the font rather than a global setting.
 
 ---
 

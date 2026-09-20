@@ -9,10 +9,16 @@ There is no font file format on this machine and no font on the disc — the
 one more, and the user should be able to add their own, so:
 
 - **A `.pf` font file**, the simplest thing that can work: a small header
-  (magic, glyph_w, glyph_h, cell_w, cell_h, first, count) then
-  `count * glyph_h * bpr` bytes, exactly the layout `SET_FONT` already wants
-  in RAM. Loading is `fs_load_alloc` then one `SET_FONT` at that address — no
-  decoding pass at all, which is the point of matching the layout.
+  (magic, glyph_w, glyph_h, cell_w, cell_h, first, count, **flags**, and an
+  optional advance table) then `count * glyph_h * bpr` bytes, exactly the
+  layout `SET_FONT` already wants in RAM. Loading is `fs_load_alloc` then one
+  `SET_FONT` at that address — no decoding pass at all, which is the point of
+  matching the layout. **`flags` is bit 0 for 8-bit coverage and bit 1 for
+  proportional**, handed to the device as `SET_FONT2`'s `flags` word with the
+  advance table's address as its `advance` ([device.md §3.1](device.md)).
+  Reading the file is `font.c`'s job, not `display.c`'s — a `display.c` that
+  called `fs_load_alloc` would drag the filesystem into `bios2.c`
+  ([build.md §6](build.md)).
 - **`tools/make_font.py`** to write them, the way `tools/make_badge.py`
   writes the badge, so a font can be edited as readable text rather than a
   binary blob.

@@ -1,7 +1,8 @@
 # Events: what a handler gets, and who synthesizes it
 
-> Part of [the GUI plan](README.md). **Status: design, 2026-09-20. Questions
-> open ([questions.md](questions.md)).** Facts marked *(checked)* were read
+> Part of [the GUI plan](README.md). **Status: design, 2026-09-20. Every
+> question is decided ([questions.md](questions.md),
+> [fonts/build.md §7](../fonts/build.md#7-questions)).** Facts marked *(checked)* were read
 > in the code on 2026-09-20.
 
 **What you asked for:** the handler receives an event, not just "a click" —

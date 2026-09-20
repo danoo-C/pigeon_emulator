@@ -65,7 +65,7 @@ wide glyphs a small change rather than a rewrite.
 ## 2. The real blocker: there is one font slot, and it is everyone's
 
 `GAC` holds a single `self.font`, and any `SET_FONT` replaces it *(checked:
-`gac.py:381, 687-688`)*. That alone would be survivable. These three facts
+`gac.py:381, 687-688`)*. That alone would be survivable. These four facts
 together are not:
 
 1. **Every program uploads the 5 × 7 font at startup.** `disp_init()` calls
@@ -77,6 +77,13 @@ together are not:
    between chunks of a long string *(checked: `gac.c:32, 191, 213)`*.
 3. **The kernel console assumes a 6-pixel cell**, as do all 97 call sites of
    `disp_text`/`disp_textn`/`disp_char` *(checked)*.
+4. **Nothing puts the font back when a program ends.** `k_tidy()` restores
+   the mode, the screen base, open handles, timers and the input queues, and
+   never touches the font; the kernel calls `disp_init()` once, at startup
+   *(checked: `kernel.c:1533-1572, 2060`)*. So a program that uploads its own
+   font corrupts the shell's console the moment it exits, and nothing puts it
+   right until the machine reboots. **F1 adds that one line to `k_tidy()`**
+   ([build.md §2](build.md)); F2's slot 0 makes it unnecessary.
 
 So a GUI app that uploads a 9 × 18 cell silently changes the geometry the
 console and every other drawing program depend on. **Font slots are not a
@@ -110,12 +117,27 @@ guest code would be refused**, so this must be gated on a feature bit and
 as they are. Nothing old breaks, at the cost of two command numbers and a
 little duplication in the device.
 
+**`SET_FONT2` takes ten words, not eight:**
+
+```
+    slot, address, glyph_w, glyph_h, cell_w, cell_h, first, count, flags, advance
+```
+
+`flags` is bit 0 for 8-bit coverage and bit 1 for proportional; `advance` is
+the address of the per-glyph advance table, or 0. **Both zero is exactly
+today's font**, so F2 ships with no change in behaviour — and F5 and F6 then
+need no third command. They would otherwise: `BATCH` checks every record's
+word count against the command's struct and refuses **the whole batch** if
+one record is the wrong length *(checked: `gac.py:744-766`)*, so a command's
+shape is fixed the day it ships ([build.md §4](build.md)).
+
 **Recommendation: (b).** Commands 17+ are free *(checked)*, `BATCH`'s shape
 table stays honest for the old commands, and the failure mode for a guest
 built before the feature is "the command is not there" rather than "my
 arguments are the wrong length". `FEATURE_FONTS = 8` in `INFO` says which
-machine you are on — bit 8 is free and `gac_features()` already hands the
-word over with no extra bus command *(checked: `gac.c:63-66`)*.
+machine you are on — the **value** 8 is free, 1, 2 and 4 being taken
+*(checked: `gac.py:125-127`)* — and `gac_features()` already hands the word
+over with no extra bus command *(checked: `gac.c:63-66`)*.
 
 **How many slots?** [questions.md §1 Q2](questions.md). A slot costs host memory only when filled. Eight
 is the recommendation: enough for a GUI's small/normal/large/bold plus the
@@ -163,11 +185,26 @@ and `<pigeon/display.h>` grows a selected font, so the 97 existing call sites
 keep working unchanged:
 
 ```c
-int  disp_font_load(unsigned slot, char *path);   /* a .pf off the disc */
 void disp_font(unsigned slot);                    /* what disp_text draws with now */
 unsigned disp_cell_w(void);                       /* of the selected font */
 unsigned disp_cell_h(void);
 ```
+
+**Reading a `.pf` off the disc is a unit of its own, `<pigeon/font.h>`** —
+not a `disp_font_load()` inside `display.c`. There is no linker: units are
+compiled together and each program names its libraries *(checked:
+`cc.py:115-140`, `lib/README.md`)*, so a `display.c` that called
+`fs_load_alloc` would force `fs.c` into every program that draws, including
+`firmware/bios2.c`, which includes `display.h` and no filesystem at all
+*(checked: `bios2.c:42-46`)* and which has a size cap. So:
+
+```c
+int font_load(char *path, font_info *out);   /* fs_load_alloc, and the header read */
+int font_use(unsigned slot, font_info *info);/* -> gac_font_load at that address   */
+```
+
+and `display.c` keeps taking an address, as `gac_set_font` already does
+([build.md §6](build.md)).
 
 **`disp_cell_w()`/`disp_cell_h()` are the important pair.** Every UI in
 `user/` derives its layout from the macros `GLYPH_W`/`GLYPH_H` *(checked:

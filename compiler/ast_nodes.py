@@ -29,6 +29,14 @@ class StringLiteral(Node):
 
 
 @dataclass
+class AddressLiteral(Node):
+    """A global initialiser that is an address rather than a number:
+    `&counter`, a function's name, an array's name, a string. The image
+    holds the label, which the assembler resolves."""
+    label: str = ""
+
+
+@dataclass
 class Identifier(Node):
     name: str = ""
     symbol: object = None         # resolved by the analyser

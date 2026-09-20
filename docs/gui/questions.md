@@ -1,10 +1,11 @@
 # Questions
 
-> Part of [the GUI plan](README.md). **Status: Q1–Q16 answered 2026-09-20 and
-> folded in, except [Q6](#6-retained-mode-at-all), which is re-asked with the
-> explanation you wanted. A third set, Q17–Q22, is raised by your answers.**
-> Answer
-> inline under each; **the recommendation stands where you leave it blank.**
+> Part of [the GUI plan](README.md). **Status: every question is answered and
+> folded in, 2026-09-20** — Q1–Q16 first, then Q17–Q22 raised by those
+> answers, then Q23, which
+> [fonts/build.md §7](../fonts/build.md#7-questions) settled last. Answers are
+> kept verbatim under `Answer:`, with the decision that follows from each;
+> blank means the recommendation stood.
 > Questions about fonts live in [fonts questions](../fonts/questions.md) and about
 > the canvas in [canvas.md §7](canvas.md#7-questions) — they are separable,
 > and fonts F1 is worth doing whatever you decide here.
@@ -585,3 +586,10 @@ want the shell itself in a widget, that is
 [the shell plan](../fonts/shell.md) and it is a different conversation.
 
 Answer:
+
+**Decided (you):** the recommendation — **(b)**: characters, Backspace and
+Enter, plus history on Up/Down and left/right within the line. `GUI_LINE`
+carries the finished line; Tab completion stays with the app, because only the
+app knows what is being completed. Settled through
+[fonts/build.md §7 Q5](../fonts/build.md#7-questions), and it was **the last
+open question in either plan**.

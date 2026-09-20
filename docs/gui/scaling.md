@@ -1,7 +1,8 @@
 # Dynamic scaling: design once, run at any size
 
-> Part of [the GUI plan](README.md). **Status: design, 2026-09-20. Questions
-> open ([questions.md](questions.md)).** Facts marked *(checked)* were read
+> Part of [the GUI plan](README.md). **Status: design, 2026-09-20. Every
+> question is decided ([questions.md](questions.md),
+> [fonts/build.md §7](../fonts/build.md#7-questions)).** Facts marked *(checked)* were read
 > in the code on 2026-09-20.
 
 **What you asked for:** say you designed the app at 720p, and when the
@@ -67,11 +68,13 @@ and table columns stay flush at every scale.
 `lexer.py:161-165`)*. All of this is integer multiply-then-divide, which is
 fine, but two things bite:
 
-1. **Divide is only correct for non-negative operands.** `/` and `%` lower to
-   the machine's unsigned `DIV` *(checked: `codegen.py:512-517`,
-   `design/02-language.md:71-75`)*. A widget at `x = -20` — deliberately
-   off the left edge, which existing programs do — would scale to nonsense.
-   The library takes the sign out first:
+1. **Divide on a signed value costs a helper call.** `/` and `%` are
+   correct for negative operands as of 2026-09-20 — the compiler calls
+   `__divsi3` around the machine's unsigned `DIV`
+   ([compiler_plan.md](../compiler_plan.md)) — but unsigned operands still
+   lower to the single instruction. Scaling is the hottest multiply-then-
+   divide on the machine and a widget at `x = -20` is ordinary, so the
+   library takes the sign out itself and keeps the cheap path:
 
    ```c
    static int gui_scale_axis(int v, int num, int den) {

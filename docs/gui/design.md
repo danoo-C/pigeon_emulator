@@ -1,7 +1,8 @@
 # The design: a pool, a frame, and what gets repainted
 
-> Part of [the GUI plan](README.md). **Status: design, 2026-09-20. Questions
-> open ([questions.md](questions.md)).** Read
+> Part of [the GUI plan](README.md). **Status: design, 2026-09-20. Every
+> question is decided ([questions.md](questions.md),
+> [fonts/build.md §7](../fonts/build.md#7-questions)).** Read
 > [constraints.md](constraints.md) first — several decisions here are forced
 > rather than chosen. Facts marked *(checked)* were read in the code on
 > 2026-09-20.

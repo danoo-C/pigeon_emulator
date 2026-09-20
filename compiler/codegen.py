@@ -29,6 +29,47 @@ JUMP_FOR = {"==": "JZ", "!=": "JNZ", "<": "JL", ">": "JG", "<=": "JLE", ">=": "J
 DIRECT_BINOPS = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV",
                  "&": "AND", "|": "OR", "^": "XOR", "<<": "SHL", ">>": "SHR"}
 
+# Compiler-provided routines, emitted only when used, called with the
+# operands already in A and B (see _call_helper). The machine's DIV is
+# unsigned, so signed division puts the sign back around it -- the same
+# thing <pigeon/math.h>'s idiv() does, without the branches.
+HELPERS = {
+    "__divsi3": """
+__divsi3:
+    ; A = A / B, signed. |a| and |b| divide, then the sign goes back on.
+    ; Negating on a mask rather than a branch: (x ^ m) - m is -x when m is
+    ; all ones and x when m is 0, and it is right for INT_MIN too.
+    MOV C, #0
+    SHR D, A, #31
+    SUB D, C, D              ; D = all ones if A < 0
+    XOR A, A, D
+    SUB A, A, D              ; A = |A|
+    SHR E, B, #31
+    SUB E, C, E              ; E = all ones if B < 0
+    XOR B, B, E
+    SUB B, B, E              ; B = |B|
+    XOR D, D, E              ; negative result exactly if the signs differed
+    DIV A, A, B              ; B = 0 still faults, as it always has
+    XOR A, A, D
+    SUB A, A, D
+    RET
+""",
+    "__modsi3": """
+__modsi3:
+    ; A = A % B, signed: a - (a / b) * b, so the sign follows the dividend
+    ; and -7 % 3 is -1, as C requires.
+    PUSH A
+    PUSH B
+    CALL __divsi3
+    POP B
+    MUL A, A, B
+    MOV C, A
+    POP A
+    SUB A, A, C
+    RET
+""",
+}
+
 
 class CodeGen:
     def __init__(self, program: A.Program, source_lines=None, origin="PROGRAM_LOAD_ADDR",
@@ -49,6 +90,8 @@ class CodeGen:
         self.loops: List[tuple] = []       # (continue_label, break_label)
         self.function: Optional[A.FunctionDef] = None
         self.last_line = -1
+        # Compiler-provided routines, emitted only if something used one.
+        self.helpers: List[str] = []
 
     # --- emission helpers --------------------------------------------------
 
@@ -92,10 +135,39 @@ class CodeGen:
         self._startup()
         for function in self.program.functions:
             self._function(function)
+        self._emit_helpers()
         for name, text in self.assembly:
             self._assembly(name, text)
         self._data()
         return "\n".join(self.out) + "\n"
+
+    def _call_helper(self, name: str):
+        """Call a compiler-provided routine. These do NOT use the C calling
+        convention: the argument is in A, the second in B, the answer comes
+        back in A, and C, D and E are scratch -- exactly the state a binary
+        operator is already in, so nothing is saved around the call. F is
+        untouched, and CALL/RET balance the hardware stack."""
+        if name not in self.helpers:
+            self.helpers.append(name)
+        self.emit(f"CALL {name}")
+
+    def _emit_helpers(self):
+        # A helper may call another -- __modsi3 divides -- so pull those in
+        # too, or the label it names is not there to assemble against.
+        pending = list(self.helpers)
+        while pending:
+            for line in HELPERS[pending.pop()].splitlines():
+                called = line.strip().split()
+                if len(called) == 2 and called[0] == "CALL" and called[1] in HELPERS \
+                        and called[1] not in self.helpers:
+                    self.helpers.append(called[1])
+                    pending.append(called[1])
+        for name in self.helpers:
+            self.out.append("")
+            for line in HELPERS[name].strip("\n").splitlines():
+                self.out.append(line if line.endswith(":") else f"    {line.strip()}")
+        if self.helpers:
+            self.out.append("")
 
     def _startup(self):
         """Set the frame pointer, init the heap, call main, halt."""
@@ -175,8 +247,7 @@ class CodeGen:
                 element = declaration.decl_type.element
                 directive = ".byte" if element.size == 1 else ".word"
                 mask = 0xFF if element.size == 1 else 0xFFFFFFFF
-                values = [v.label if isinstance(v, A.StringLiteral) else str(v.value & mask)
-                          for v in declaration.init.values]
+                values = [_static_value(v, mask) for v in declaration.init.values]
                 for chunk in range(0, len(values), 12):
                     self.emit(f"{directive} " + ", ".join(values[chunk:chunk + 12]))
                 written = len(values) * element.size
@@ -191,11 +262,11 @@ class CodeGen:
                     self.emit(f".space {size - written}")
                 self.emit(f".align {WORD}")
                 continue
-            if declaration.init is not None and isinstance(declaration.init, A.IntLiteral):
+            if isinstance(declaration.init, (A.IntLiteral, A.AddressLiteral)):
                 if size == 1:
-                    self.emit(f".byte {declaration.init.value & 0xFF}")
+                    self.emit(f".byte {_static_value(declaration.init, 0xFF)}")
                 else:
-                    self.emit(f".word {declaration.init.value}")
+                    self.emit(f".word {_static_value(declaration.init, 0xFFFFFFFF)}")
                     if size > WORD:
                         self.emit(f".space {size - WORD}")
             else:
@@ -260,6 +331,16 @@ class CodeGen:
 
     def _s_VarDecl(self, node):
         if node.init is None:
+            return
+        if isinstance(node.decl_type, StructType):
+            self.comment(f"copy {node.decl_type} into {node.name}")
+            self._address_of(node.init)
+            self.emit("MOV D, A")
+            if node.symbol.offset:
+                self.emit(f"ADD C, F, #{node.symbol.offset}")
+            else:
+                self.emit("MOV C, F")
+            self._copy_words(node.decl_type.size)
             return
         self._expr(node.init)
         self._store_to_frame(node.symbol.offset, node.decl_type)
@@ -402,17 +483,15 @@ class CodeGen:
         if symbol.storage in ("local", "param"):
             self._load_from_frame(symbol.offset, symbol.type)
         else:
-            self.emit(f"{_load_op(symbol.type)} A, #{symbol.label}")
+            self._load(symbol.type, f"#{symbol.label}")
 
     def _e_Cast(self, node):
         self._expr(node.operand)
         target = node.to
         if target.size == 1 and is_integer(target):
             self.emit("AND A, A, #0xFF")        # narrowing to a byte
-        elif target.size == 1:
-            pass
-        if target in (CHAR,) and node.operand.type.size > 1:
-            pass                                 # sign extension is not modelled yet
+            if target.is_signed:
+                self._sign_extend_byte()        # ...and (char)200 is -56
 
     def _e_SizeOf(self, node):
         self.emit(f"MOV A, #{node.of_type.size}")
@@ -424,7 +503,7 @@ class CodeGen:
         if node.op == "*":
             self._expr(node.operand)
             if not isinstance(node.type, (ArrayType, StructType)):
-                self.emit(f"{_load_op(node.type)} A, A")
+                self._load(node.type, "A")
             return
         if node.op == "!":
             done = self.new_label("not")
@@ -509,17 +588,54 @@ class CodeGen:
 
         imm = self._binary_operands(node)
         rhs = "B" if imm is None else f"#{imm}"
+        signed = _is_signed(node)
+
+        if node.op in ("/", "%") and signed:
+            # The machine's DIV is unsigned, so the sign is put back around
+            # it (docs/compiler_plan.md §5). A helper rather than inline
+            # code: it is a dozen instructions and '/' is everywhere.
+            if imm is not None:
+                self.emit(f"MOV B, #{imm}")
+            self._call_helper("__divsi3" if node.op == "/" else "__modsi3")
+            return
         if node.op == "%":
             self.comment("a % b  ==  a - (a / b) * b   (no MOD instruction)")
             self.emit(f"DIV C, A, {rhs}")
             self.emit(f"MUL C, C, {rhs}")
             self.emit("SUB A, A, C")
             return
-        self.emit(f"{DIRECT_BINOPS[node.op]} A, A, {rhs}")
+        if node.op == ">>" and signed:
+            self._arithmetic_shift(imm)
+        else:
+            self.emit(f"{DIRECT_BINOPS[node.op]} A, A, {rhs}")
 
         difference = getattr(node, "pointer_diff", None)
         if difference and difference > 1:
-            self.emit(f"DIV A, A, #{difference}")
+            # p - q is signed: q may be the later pointer.
+            self.emit(f"MOV B, #{difference}")
+            self._call_helper("__divsi3")
+
+    def _arithmetic_shift(self, imm: Optional[int]):
+        """x >> n with the sign shifted in, since SHR shifts zeros and the
+        machine has no SAR (docs/compiler_plan.md §4). Branchless: the sign
+        bit becomes a mask of all ones or none, shifted back into the top.
+        SHL by 32 or more yields 0 here, so n == 0 needs no special case."""
+        if imm is not None and not 0 <= imm < 32:
+            self.emit(f"SHR A, A, #{imm}")        # undefined in C; the machine says 0
+            return
+        self.comment("arithmetic >>: shift the sign in, not zeros")
+        self.emit("SHR C, A, #31")
+        self.emit("MOV D, #0")
+        self.emit("SUB C, D, C")                  # all ones if negative, else 0
+        if imm is None:
+            self.emit("MOV D, #32")
+            self.emit("SUB D, D, B")
+            self.emit("SHR A, A, B")
+            self.emit("SHL C, C, D")
+        else:
+            self.emit(f"SHR A, A, #{imm}")
+            self.emit(f"SHL C, C, #{32 - imm}")
+        self.emit("OR A, A, C")
 
     def _pointer_binary(self, node: A.Binary, scale: int):
         """p + i, i + p, p - i: the integer side is scaled by the element size."""
@@ -573,6 +689,15 @@ class CodeGen:
         self.label(done)
 
     def _e_Assign(self, node):
+        if isinstance(node.type, StructType):
+            self.comment(f"copy {node.type} -- {node.type.size} bytes, not one word")
+            self._address_of(node.value)
+            self.emit("PUSH A")
+            self._address_of(node.target)
+            self.emit("MOV C, A")
+            self.emit("POP D")
+            self._copy_words(node.type.size)
+            return
         if node.op != "=":
             # a op= b  ->  a = a op b, with the target evaluated once here
             # because none of the lvalue forms this compiler supports have
@@ -581,6 +706,7 @@ class CodeGen:
                               left=node.target, right=node.value)
             binary.type = node.type
             binary.scale = getattr(node, "scale", 1)
+            binary.operand_type = getattr(node, "operand_type", None)
             self._expr(binary)
         else:
             self._expr(node.value)
@@ -651,12 +777,12 @@ class CodeGen:
     def _e_Index(self, node):
         self._address_of(node)
         if not isinstance(node.type, (ArrayType, StructType)):
-            self.emit(f"{_load_op(node.type)} A, A")
+            self._load(node.type, "A")
 
     def _e_Member(self, node):
         self._address_of(node)
         if not isinstance(node.type, (ArrayType, StructType)):
-            self.emit(f"{_load_op(node.type)} A, A")
+            self._load(node.type, "A")
 
     # --- addresses and storage ---------------------------------------------
 
@@ -711,12 +837,57 @@ class CodeGen:
         self.emit("POP A")
         self.emit(f"{_store_op(target.type)} C, A")
 
+    def _copy_words(self, size: int):
+        """Copy `size` bytes from the address in D to the one in C.
+
+        A struct's size is always a whole number of words (typesys.
+        layout_struct rounds it up), so this never copies a part word.
+        Small ones are straight line; anything bigger is a loop, because
+        four instructions a word adds up.
+        """
+        words = size // WORD
+        if words <= 4:
+            for index in range(words):
+                self.emit("MRW A, D")
+                self.emit("MWW C, A")
+                if index + 1 < words:
+                    self.emit(f"ADD D, D, #{WORD}")
+                    self.emit(f"ADD C, C, #{WORD}")
+            return
+        top = self.new_label("copy")
+        self.emit(f"MOV B, #{size}")
+        self.label(top)
+        self.emit("MRW A, D")
+        self.emit("MWW C, A")
+        self.emit(f"ADD D, D, #{WORD}")
+        self.emit(f"ADD C, C, #{WORD}")
+        self.emit(f"SUB B, B, #{WORD}")
+        self.emit("CMP B, #0")
+        self.emit(f"JNZ {top}")
+
+    def _load(self, type_, operand: str):
+        """Load a value of `type_` into A from `operand`.
+
+        MR loads a byte zero-extended, so a signed char came back as 0..255
+        and `char c = -1;` compared equal to 255 (docs/compiler_plan.md).
+        Two instructions put the sign back: bias the byte by 0x80 and take
+        it away again, which leaves 0..127 alone and turns 128..255 into
+        -128..-1.
+        """
+        self.emit(f"{_load_op(type_)} A, {operand}")
+        if getattr(type_, "size", WORD) == 1 and getattr(type_, "is_signed", False):
+            self._sign_extend_byte()
+
+    def _sign_extend_byte(self):
+        self.emit("XOR A, A, #0x80")
+        self.emit("SUB A, A, #0x80")
+
     def _load_from_frame(self, offset: int, type_):
         if offset == 0:
-            self.emit(f"{_load_op(type_)} A, F")
+            self._load(type_, "F")
             return
         self.emit(f"ADD C, F, #{offset}")
-        self.emit(f"{_load_op(type_)} A, C")
+        self._load(type_, "C")
 
     def _store_to_frame(self, offset: int, type_):
         if offset:
@@ -762,6 +933,23 @@ def _contains_call(node) -> bool:
 def _is_simple(node: A.Node) -> bool:
     """True when evaluating this cannot involve a call or deep nesting."""
     return isinstance(node, (A.IntLiteral, A.Identifier, A.StringLiteral))
+
+
+def _is_signed(node: A.Binary) -> bool:
+    """Do this operator's operands carry a sign the machine's unsigned
+    instructions would lose? The analyser attaches the type to say."""
+    operand_type = getattr(node, "operand_type", None)
+    return operand_type is not None and operand_type.is_signed
+
+
+def _static_value(node, mask: int) -> str:
+    """One initialiser as the assembler wants it: a number, or a label the
+    assembler resolves. The analyser has already folded everything else."""
+    if isinstance(node, A.AddressLiteral):
+        return node.label
+    if isinstance(node, A.StringLiteral):
+        return node.label
+    return str(node.value & mask)
 
 
 def _escape_c(data: bytes) -> str:

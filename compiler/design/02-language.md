@@ -23,21 +23,39 @@ hardware and soft-float is out of scope.
 
 ### Signedness matters more than usual
 
-The machine compares unsigned. `int` is signed, so every relational operator on
-signed operands costs two extra `XOR`s ([01-overview.md](01-overview.md) §4).
-Declaring loop counters and coordinates `unsigned` produces meaningfully
-smaller code, and the libraries in `05`–`07` do so deliberately.
+The machine compares, divides and shifts **unsigned**, and loads a byte
+zero-extended. `int` and `char` are signed, so the compiler puts the sign back
+every time — two extra `XOR`s on a relational operator
+([01-overview.md](01-overview.md) §4), two instructions after a `char` load, a
+`__divsi3` call for `/` and `%`, three instructions for `>>`.
+
+All of it is skipped for an unsigned type. So declaring loop counters,
+coordinates and bytes `unsigned` produces meaningfully smaller code, and the
+libraries in `05`–`07` do so deliberately — but a signed type is now *correct*
+rather than merely smaller-if-you-avoid-it.
 
 ## Declarations
 
 ```c
 int   x;                      /* global -> .bss, zero-initialised            */
 int   y = 7;                  /* global with an initialiser -> emitted inline */
+int   z = 2 * K + 1;          /* any constant expression: folded at compile time */
+int  *p = &x;                 /* an address is a constant too                 */
 static int z;                 /* same storage; name not exported             */
 int   grid[100];              /* array; size must be a constant expression   */
 struct point { int x, y; };
 struct point origin;
 ```
+
+`char *p = "hi";` is a **pointer** to the string and `char v[] = "hi";` is a
+3-byte array of its own. Both spellings reach the same type in the
+declarator, so until 2026-09-20 either became the array *(docs/compiler_plan.md)*.
+
+**A global's initialiser must be a compile-time constant** — a folded
+expression (`sizeof`, casts, `?:` and the arithmetic operators all fold), or
+an address: `&global`, an array's or a function's name, a string. Anything
+else, such as another variable's value, is an error. *(Until 2026-09-20 it
+was silently zero, which is why `int a = -1;` gave 0 — docs/compiler_plan.md.)*
 
 Local declarations may appear anywhere in a block (C99 style). Locals are **not**
 implicitly zeroed — the frame stack is reused across calls, so an uninitialised
@@ -68,11 +86,20 @@ rather than capability.
 | Pointer | `*` `&` `[]` `.` `->` |
 | Other | `sizeof`, casts, `?:`, comma |
 
-`/` and `%` on signed operands use the machine's unsigned `DIV`, so results are
-only correct for non-negative values. The compiler emits a diagnostic when it
-can see a signed division whose operands may be negative; getting this fully
-right needs a `__divsi3`-style helper, which is listed in phase 2. *(This
-limitation is reasoned, not measured.)*
+**Signed `/`, `%` and `>>` are correct.** The machine's `DIV` and `SHR` are
+unsigned and there is no `SAR`, so the compiler puts the sign back: `/` and
+`%` call a `__divsi3` / `__modsi3` helper it plants when something uses one,
+and `>>` shifts the sign in with three extra instructions. Both are skipped
+entirely when the operands are unsigned, which is most of this machine's
+arithmetic. *(Until 2026-09-20 these were the raw unsigned instructions with
+no diagnostic: `-20 / 2` was 2,147,483,638 and `-8 >> 1` was 2,147,483,644.
+An earlier version of this document claimed a diagnostic that did not exist —
+docs/compiler_plan.md.)*
+
+`<pigeon/math.h>`'s `idiv`, `imod` and `ishr` do the same thing in C. They
+stay, because they are published API and because they also take a zero
+divisor without faulting, but plain `/`, `%` and `>>` are now correct on
+their own.
 
 ## Functions
 
